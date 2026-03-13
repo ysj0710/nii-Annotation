@@ -17,6 +17,22 @@ const Viewer = forwardRef(function Viewer(
   const fillAxCorSagRef = useRef(0)
   const fillActiveRef = useRef(false)
   const markerPtsRef = useRef([])
+  const activePointerIdRef = useRef(null)
+  const MAX_MARKER_POINTS = 24000
+  const MAX_FILL_POINTS = 32000
+
+  const compactPoints = (points, maxPoints) => {
+    if (!Array.isArray(points) || points.length <= maxPoints) return points
+    const step = Math.ceil(points.length / maxPoints)
+    const compacted = []
+    for (let i = 0; i < points.length; i += step) {
+      compacted.push(points[i])
+    }
+    if (compacted[compacted.length - 1] !== points[points.length - 1]) {
+      compacted.push(points[points.length - 1])
+    }
+    return compacted
+  }
 
   const safeCall = (fn, ...args) => {
     const nv = nvRef.current
@@ -89,6 +105,7 @@ const Viewer = forwardRef(function Viewer(
     fillPtsRef.current = []
     fillActiveRef.current = false
     markerPtsRef.current = []
+    activePointerIdRef.current = null
     const markerCanvas = markerCanvasRef.current
     const ctx = markerCanvas?.getContext?.('2d')
     if (ctx && markerCanvas) {
@@ -103,6 +120,18 @@ const Viewer = forwardRef(function Viewer(
     if (!ctx) return
     ctx.clearRect(0, 0, markerCanvas.width, markerCanvas.height)
     const pts = markerPtsRef.current
+    if (pts.length > 1) {
+      ctx.beginPath()
+      ctx.moveTo(pts[0].x, pts[0].y)
+      for (let i = 1; i < pts.length; i += 1) {
+        ctx.lineTo(pts[i].x, pts[i].y)
+      }
+      ctx.lineWidth = 2
+      ctx.strokeStyle = 'rgba(255, 220, 40, 0.9)'
+      ctx.lineJoin = 'round'
+      ctx.lineCap = 'round'
+      ctx.stroke()
+    }
     for (const pt of pts) {
       ctx.beginPath()
       ctx.arc(pt.x, pt.y, 2.4, 0, Math.PI * 2)
@@ -132,13 +161,179 @@ const Viewer = forwardRef(function Viewer(
     const last = pts[pts.length - 1]
     const dx = first[h] - last[h]
     const dy = first[v] - last[v]
-    const dist = Math.sqrt(dx * dx + dy * dy)
-    const closed = dist <= 3.8
+    const distVox = Math.sqrt(dx * dx + dy * dy)
+    const mp = markerPtsRef.current
+    const m0 = mp[0]
+    const m1 = mp[mp.length - 1]
+    const distPx = m0 && m1 ? Math.hypot(m0.x - m1.x, m0.y - m1.y) : Number.POSITIVE_INFINITY
+    const closed = distVox <= 6.5 || distPx <= 20
 
     if (closed) {
-      nv.drawPenFillPts = pts
-      nv.drawPenAxCorSag = axCorSag
-      nv.drawPenFilled()
+      const dims = nv.back?.dims
+      const nx = Number(dims?.[1] || 0)
+      const ny = Number(dims?.[2] || 0)
+      const nz = Math.max(1, Number(dims?.[3] || 1))
+      if (nx > 0 && ny > 0 && nz > 0 && nv.drawBitmap) {
+        ensureBaseSnapshot(nv.drawBitmap)
+        const fillLabel = Math.max(1, Math.min(255, Number(activeLabelValue || 1)))
+
+        const project = (p) => [Number(p[h] || 0), Number(p[v] || 0)]
+        const poly = [...pts.map(project), project(pts[0])]
+        const polyNoDup = []
+        for (const [px, py] of poly) {
+          const prev = polyNoDup[polyNoDup.length - 1]
+          if (!prev || prev[0] !== px || prev[1] !== py) {
+            polyNoDup.push([px, py])
+          }
+        }
+
+        const pointInPolygon = (x, y, vertices) => {
+          let inside = false
+          for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i, i += 1) {
+            const xi = vertices[i][0]
+            const yi = vertices[i][1]
+            const xj = vertices[j][0]
+            const yj = vertices[j][1]
+            const intersect =
+              yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi + Number.EPSILON) + xi
+            if (intersect) inside = !inside
+          }
+          return inside
+        }
+
+        let minH = Number.POSITIVE_INFINITY
+        let maxH = Number.NEGATIVE_INFINITY
+        let minV = Number.POSITIVE_INFINITY
+        let maxV = Number.NEGATIVE_INFINITY
+        let fixed = 0
+        const axisFixed = axCorSag === 0 ? 2 : axCorSag === 1 ? 1 : 0
+        for (const p of pts) {
+          const hh = Number(p[h] || 0)
+          const vv = Number(p[v] || 0)
+          minH = Math.min(minH, hh)
+          maxH = Math.max(maxH, hh)
+          minV = Math.min(minV, vv)
+          maxV = Math.max(maxV, vv)
+          fixed += Number(p[axisFixed] || 0)
+        }
+        fixed = Math.round(fixed / pts.length)
+
+        const hStart = Math.floor(minH)
+        const hEnd = Math.ceil(maxH)
+        const vStart = Math.floor(minV)
+        const vEnd = Math.ceil(maxV)
+        const xy = nx * ny
+        let changed = false
+
+        const setVoxelByHV = (hh, vv) => {
+          let x = 0
+          let y = 0
+          let z = 0
+          if (axCorSag === 0) {
+            x = hh
+            y = vv
+            z = fixed
+          } else if (axCorSag === 1) {
+            x = hh
+            y = fixed
+            z = vv
+          } else {
+            x = fixed
+            y = hh
+            z = vv
+          }
+          if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return
+          const idx = z * xy + y * nx + x
+          if (nv.drawBitmap[idx] === fillLabel) return
+          nv.drawBitmap[idx] = fillLabel
+          changed = true
+        }
+
+        const drawSegmentHV = (h0, v0, h1, v1) => {
+          const steps = Math.max(1, Math.ceil(Math.max(Math.abs(h1 - h0), Math.abs(v1 - v0)) * 2))
+          for (let s = 0; s <= steps; s += 1) {
+            const t = s / steps
+            const hh = Math.round(h0 + (h1 - h0) * t)
+            const vv = Math.round(v0 + (v1 - v0) * t)
+            setVoxelByHV(hh, vv)
+          }
+        }
+
+        for (let i = 1; i < polyNoDup.length; i += 1) {
+          drawSegmentHV(polyNoDup[i - 1][0], polyNoDup[i - 1][1], polyNoDup[i][0], polyNoDup[i][1])
+        }
+
+        for (let vv = vStart; vv <= vEnd; vv += 1) {
+          for (let hh = hStart; hh <= hEnd; hh += 1) {
+            if (!pointInPolygon(hh + 0.5, vv + 0.5, polyNoDup)) continue
+            setVoxelByHV(hh, vv)
+          }
+        }
+
+        const smoothLabelInBox = () => {
+          const hMin = Math.max(1, hStart - 1)
+          const hMax = Math.min((axCorSag === 2 ? ny : nx) - 2, hEnd + 1)
+          const vMin = Math.max(1, vStart - 1)
+          const vMax = Math.min((axCorSag === 0 ? ny : nz) - 2, vEnd + 1)
+          if (hMin > hMax || vMin > vMax) return
+
+          const sampleByHV = (hh, vv) => {
+            let x = 0
+            let y = 0
+            let z = 0
+            if (axCorSag === 0) {
+              x = hh
+              y = vv
+              z = fixed
+            } else if (axCorSag === 1) {
+              x = hh
+              y = fixed
+              z = vv
+            } else {
+              x = fixed
+              y = hh
+              z = vv
+            }
+            if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return 0
+            const idx = z * xy + y * nx + x
+            return nv.drawBitmap[idx] === fillLabel ? 1 : 0
+          }
+
+          const toSet = []
+          for (let vv = vMin; vv <= vMax; vv += 1) {
+            for (let hh = hMin; hh <= hMax; hh += 1) {
+              const center = sampleByHV(hh, vv)
+              let neighbors = 0
+              for (let dvv = -1; dvv <= 1; dvv += 1) {
+                for (let dhh = -1; dhh <= 1; dhh += 1) {
+                  if (dvv === 0 && dhh === 0) continue
+                  neighbors += sampleByHV(hh + dhh, vv + dvv)
+                }
+              }
+              if (center === 0 && neighbors >= 6) {
+                toSet.push([hh, vv])
+              }
+            }
+          }
+          for (const [hh, vv] of toSet) setVoxelByHV(hh, vv)
+        }
+        smoothLabelInBox()
+
+        if (changed) {
+          if (typeof nv.refreshDrawing === 'function') {
+            nv.refreshDrawing(true)
+          }
+          pushSnapshot(nv.drawBitmap)
+          if (typeof onDrawingChange === 'function') {
+            onDrawingChange('draw')
+          }
+        }
+      } else {
+        const closedPts = [...pts, [...pts[0]]]
+        nv.drawPenFillPts = closedPts
+        nv.drawPenAxCorSag = axCorSag
+        nv.drawPenFilled()
+      }
     }
 
     resetFillTracking()
@@ -451,6 +646,13 @@ const Viewer = forwardRef(function Viewer(
       fillAxCorSagRef.current = nv.screenSlices[tile].axCorSag
       fillPtsRef.current = []
       markerPtsRef.current = [{ x: pos.x, y: pos.y }]
+      activePointerIdRef.current = event.pointerId
+      canvas.setPointerCapture?.(event.pointerId)
+      const frac0 = nv.canvasPos2frac([pos.x * dpr, pos.y * dpr])
+      if (frac0 && frac0[0] >= 0) {
+        const vox0 = nv.frac2vox(frac0)
+        fillPtsRef.current.push([vox0[0], vox0[1], vox0[2]])
+      }
       drawStrokeMarkers()
       fillActiveRef.current = true
     }
@@ -458,6 +660,7 @@ const Viewer = forwardRef(function Viewer(
     const onPointerMove = (event) => {
       if (!fillActiveRef.current) return
       if (toolRef.current !== 'brush') return
+      if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
       const pos = getCanvasPos(event)
       // niivue 的坐标换算使用 dpr 缩放后的画布坐标；
       // 这里若直接用 CSS 像素，会在 2D/3D 上引入系统性偏移。
@@ -465,34 +668,77 @@ const Viewer = forwardRef(function Viewer(
       const frac = nv.canvasPos2frac([pos.x * dpr, pos.y * dpr])
       if (!frac || frac[0] < 0) return
       const vox = nv.frac2vox(frac)
-      fillPtsRef.current.push([vox[0], vox[1], vox[2]])
-      markerPtsRef.current.push({ x: pos.x, y: pos.y })
-      if (markerPtsRef.current.length > 800) {
-        markerPtsRef.current.splice(0, markerPtsRef.current.length - 800)
+      const prevVox = fillPtsRef.current[fillPtsRef.current.length - 1]
+      const prevMarker = markerPtsRef.current[markerPtsRef.current.length - 1]
+      if (prevVox) {
+        const stepCount = Math.max(
+          1,
+          Math.ceil(
+            Math.max(
+              Math.abs(vox[0] - prevVox[0]),
+              Math.abs(vox[1] - prevVox[1]),
+              Math.abs(vox[2] - prevVox[2]),
+              prevMarker ? Math.hypot(pos.x - prevMarker.x, pos.y - prevMarker.y) / 2 : 1
+            )
+          )
+        )
+        for (let s = 1; s <= stepCount; s += 1) {
+          const t = s / stepCount
+          fillPtsRef.current.push([
+            prevVox[0] + (vox[0] - prevVox[0]) * t,
+            prevVox[1] + (vox[1] - prevVox[1]) * t,
+            prevVox[2] + (vox[2] - prevVox[2]) * t
+          ])
+          if (prevMarker) {
+            markerPtsRef.current.push({
+              x: prevMarker.x + (pos.x - prevMarker.x) * t,
+              y: prevMarker.y + (pos.y - prevMarker.y) * t
+            })
+          }
+        }
+      } else {
+        fillPtsRef.current.push([vox[0], vox[1], vox[2]])
+        markerPtsRef.current.push({ x: pos.x, y: pos.y })
       }
+      fillPtsRef.current = compactPoints(fillPtsRef.current, MAX_FILL_POINTS)
+      markerPtsRef.current = compactPoints(markerPtsRef.current, MAX_MARKER_POINTS)
       drawStrokeMarkers()
     }
 
-    const onPointerUp = () => {
+    const onPointerUp = (event) => {
       if (!fillActiveRef.current) return
+      if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
+      const pos = getCanvasPos(event)
+      const dpr = nv.uiData?.dpr || 1
+      const frac = nv.canvasPos2frac([pos.x * dpr, pos.y * dpr])
+      if (frac && frac[0] >= 0) {
+        const vox = nv.frac2vox(frac)
+        fillPtsRef.current.push([vox[0], vox[1], vox[2]])
+        markerPtsRef.current.push({ x: pos.x, y: pos.y })
+      }
+      if (activePointerIdRef.current !== null) {
+        canvas.releasePointerCapture?.(activePointerIdRef.current)
+      }
+      activePointerIdRef.current = null
       maybeFillClosedStroke()
     }
 
-    const onPointerLeave = () => {
+    const onPointerCancel = () => {
+      activePointerIdRef.current = null
       resetFillTracking()
     }
 
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
-    canvas.addEventListener('pointerleave', onPointerLeave)
+    canvas.addEventListener('pointercancel', onPointerCancel)
 
     return () => {
       resizeObserver.disconnect()
       canvas.removeEventListener('pointerdown', onPointerDown)
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
-      canvas.removeEventListener('pointerleave', onPointerLeave)
+      canvas.removeEventListener('pointercancel', onPointerCancel)
     }
   }, [])
 

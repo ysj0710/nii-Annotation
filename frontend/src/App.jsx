@@ -11,7 +11,8 @@ import {
   Tooltip,
   Popover,
   Switch,
-  Message
+  Message,
+  Modal
 } from '@arco-design/web-react'
 import {
   IconUpload,
@@ -37,6 +38,7 @@ const { Header, Sider, Content } = Layout
 
 const labelPalette = ['#FF6B6B', '#4D96FF', '#6BCB77', '#FFD93D', '#845EC2', '#FF9671']
 const THUMBNAIL_SIZE = 240
+const RASTER_CONVERSION_VERSION = 8
 
 const normalizeBaseName = (name) => {
   if (!name) return ''
@@ -65,8 +67,7 @@ const isDicomFile = (name) => /\.(dcm|dicom)$/i.test(name)
 const isImageFile = (name) => /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name)
 const isZipFile = (name) => /\.zip$/i.test(name)
 const isMaskName = (name) => /(mask|seg|label)/i.test(name)
-const isSupportedImageFile = (name) =>
-  isNiftiFile(name) || isNrrdFile(name) || isDicomFile(name) || isImageFile(name)
+const isSupportedImageFile = (name) => isNiftiFile(name)
 
 const getMimeFromName = (name) => {
   const lower = String(name || '').toLowerCase()
@@ -79,6 +80,31 @@ const getMimeFromName = (name) => {
 }
 
 const toInternalNiftiName = (name) => `${fileStem(name)}.nii`
+const getLeafName = (name) => String(name || '').split('/').pop() || ''
+const isMaskPath = (name) => {
+  const segments = String(name || '')
+    .toLowerCase()
+    .split('/')
+    .filter(Boolean)
+  return segments.some(
+    (segment) =>
+      segment === 'mask' ||
+      segment === 'masks' ||
+      segment === 'label' ||
+      segment === 'labels' ||
+      segment === 'seg' ||
+      segment === 'segs' ||
+      segment.startsWith('mask_')
+  )
+}
+
+const isImagePath = (name) => {
+  const segments = String(name || '')
+    .toLowerCase()
+    .split('/')
+    .filter(Boolean)
+  return segments.some((segment) => segment === 'img' || segment === 'image' || segment === 'images')
+}
 
 const getPngSpacingMM = (buffer) => {
   const bytes = new Uint8Array(buffer)
@@ -154,6 +180,7 @@ const readRasterSpacingMM = (buffer, name) => {
   return [1, 1]
 }
 
+
 const isNiftiBuffer = (buffer) => {
   if (!(buffer instanceof ArrayBuffer)) return false
   if (nifti.isNIFTI(buffer)) return true
@@ -168,7 +195,27 @@ const isNiftiBuffer = (buffer) => {
   return false
 }
 
-const encodeNiftiUInt8 = ({ width, height, depth = 1, components = 1, voxels, spacing = [1, 1, 1] }) => {
+const clampByte = (value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0)))
+
+const getOrientationDirection = (orientation, spacing) => {
+  const sx = Number(spacing?.[0] || 1)
+  const sy = Number(spacing?.[1] || 1)
+  const sz = Number(spacing?.[2] || 1)
+  if (orientation === 'LPS') return [sx, 0, 0, 0, sy, 0, 0, 0, sz]
+  return [-sx, 0, 0, 0, -sy, 0, 0, 0, sz]
+}
+
+const encodeNiftiUInt8 = ({
+  width,
+  height,
+  depth = 1,
+  components = 1,
+  voxels,
+  spacing = [1, 1, 1],
+  origin = [0, 0, 0],
+  orientation = 'RAI',
+  headerTemplate = null
+}) => {
   const headerSize = 348
   const extSize = 4
   const imageSize = width * height * depth * components
@@ -187,37 +234,57 @@ const encodeNiftiUInt8 = ({ width, height, depth = 1, components = 1, voxels, sp
   dv.setInt16(72, 8, true)
   dv.setInt16(68, components > 1 ? 1007 : 0, true)
 
-  dv.setFloat32(76, 1, true)
+  const pix0 = Number(headerTemplate?.pixDims?.[0] || 1) || 1
+  dv.setFloat32(76, pix0, true)
   dv.setFloat32(80, Number(spacing[0] || 1), true)
   dv.setFloat32(84, Number(spacing[1] || 1), true)
   dv.setFloat32(88, Number(spacing[2] || 1), true)
 
   dv.setFloat32(108, headerSize + extSize, true)
-  dv.setInt16(254, 0, true)
-  dv.setInt16(252, 1, true)
-  dv.setInt8(123, 10)
+  // 显式设置缩放与显示范围，避免部分查看器把 uint8 影像按 0 缩放后呈现全黑。
+  dv.setFloat32(112, 1, true) // scl_slope
+  dv.setFloat32(116, 0, true) // scl_inter
+  dv.setFloat32(124, 255, true) // cal_max
+  dv.setFloat32(128, 0, true) // cal_min
+  dv.setInt16(254, Number(headerTemplate?.sform_code || 0), true)
+  dv.setInt16(252, Number(headerTemplate?.qform_code || 1), true)
+  dv.setInt8(123, Number(headerTemplate?.xyzt_units || 10))
   // 与 ITK-SNAP 常见 2D 影像约定对齐：X/Y 负方向，避免 JPG 与配对 NII 方向不一致。
-  dv.setFloat32(256, 0, true)
-  dv.setFloat32(260, 0, true)
-  dv.setFloat32(264, 1, true)
-  dv.setFloat32(268, 0, true)
-  dv.setFloat32(272, 0, true)
-  dv.setFloat32(276, 0, true)
+  dv.setFloat32(256, Number(headerTemplate?.quatern_b || 0), true)
+  dv.setFloat32(260, Number(headerTemplate?.quatern_c || 0), true)
+  dv.setFloat32(264, Number(headerTemplate?.quatern_d || 0), true)
+  dv.setFloat32(268, Number(headerTemplate?.qoffset_x || 0), true)
+  dv.setFloat32(272, Number(headerTemplate?.qoffset_y || 0), true)
+  dv.setFloat32(276, Number(headerTemplate?.qoffset_z || 0), true)
 
-  const sx = Number(spacing[0] || 1)
-  const sy = Number(spacing[1] || 1)
-  dv.setFloat32(280, -sx, true)
-  dv.setFloat32(284, 0, true)
-  dv.setFloat32(288, 0, true)
-  dv.setFloat32(292, 0, true)
-  dv.setFloat32(296, 0, true)
-  dv.setFloat32(300, -sy, true)
-  dv.setFloat32(304, 0, true)
-  dv.setFloat32(308, 0, true)
-  dv.setFloat32(312, 0, true)
-  dv.setFloat32(316, 0, true)
-  dv.setFloat32(320, 1, true)
-  dv.setFloat32(324, 0, true)
+  if (Array.isArray(headerTemplate?.affine) && headerTemplate.affine.length >= 3) {
+    dv.setFloat32(280, Number(headerTemplate.affine[0]?.[0] || 0), true)
+    dv.setFloat32(284, Number(headerTemplate.affine[0]?.[1] || 0), true)
+    dv.setFloat32(288, Number(headerTemplate.affine[0]?.[2] || 0), true)
+    dv.setFloat32(292, Number(headerTemplate.affine[0]?.[3] || 0), true)
+    dv.setFloat32(296, Number(headerTemplate.affine[1]?.[0] || 0), true)
+    dv.setFloat32(300, Number(headerTemplate.affine[1]?.[1] || 0), true)
+    dv.setFloat32(304, Number(headerTemplate.affine[1]?.[2] || 0), true)
+    dv.setFloat32(308, Number(headerTemplate.affine[1]?.[3] || 0), true)
+    dv.setFloat32(312, Number(headerTemplate.affine[2]?.[0] || 0), true)
+    dv.setFloat32(316, Number(headerTemplate.affine[2]?.[1] || 0), true)
+    dv.setFloat32(320, Number(headerTemplate.affine[2]?.[2] || 1), true)
+    dv.setFloat32(324, Number(headerTemplate.affine[2]?.[3] || 0), true)
+  } else {
+    const dir = getOrientationDirection(orientation, spacing)
+    dv.setFloat32(280, Number(dir[0] || 0), true)
+    dv.setFloat32(284, 0, true)
+    dv.setFloat32(288, 0, true)
+    dv.setFloat32(292, Number(origin[0] || 0), true)
+    dv.setFloat32(296, 0, true)
+    dv.setFloat32(300, Number(dir[4] || 0), true)
+    dv.setFloat32(304, 0, true)
+    dv.setFloat32(308, Number(origin[1] || 0), true)
+    dv.setFloat32(312, 0, true)
+    dv.setFloat32(316, 0, true)
+    dv.setFloat32(320, Number(dir[8] || 1), true)
+    dv.setFloat32(324, Number(origin[2] || 0), true)
+  }
 
   bytes[344] = 0x6e
   bytes[345] = 0x2b
@@ -228,120 +295,112 @@ const encodeNiftiUInt8 = ({ width, height, depth = 1, components = 1, voxels, sp
   return out
 }
 
-const rasterToNifti = async (buffer, name) => {
+const rasterToNifti = async (
+  buffer,
+  name,
+  { spacing = null, origin = [0, 0, 0], orientation = 'RAI', fileFormat = 'Generic ITK Image' } = {}
+) => {
   const blob = new Blob([buffer], { type: getMimeFromName(name) })
-  let bitmap = null
-  try {
-    bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' })
-  } catch {
-    bitmap = await createImageBitmap(blob)
-  }
-  const width = Math.max(1, bitmap.width)
-  const height = Math.max(1, bitmap.height)
-
+  const bitmap = await createImageBitmap(blob)
   const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
+  canvas.width = bitmap.width
+  canvas.height = bitmap.height
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) {
     bitmap.close?.()
-    throw new Error('无法创建图片解码画布')
+    throw new Error('无法初始化栅格转换画布')
   }
-
   ctx.drawImage(bitmap, 0, 0)
+  const { data } = ctx.getImageData(0, 0, bitmap.width, bitmap.height)
   bitmap.close?.()
-  const imageData = ctx.getImageData(0, 0, width, height)
-  const rgba = imageData.data
-  const voxels = new Uint8Array(width * height)
-  for (let i = 0, j = 0; i < rgba.length; i += 4, j += 1) {
-    const r = rgba[i]
-    const g = rgba[i + 1]
-    const b = rgba[i + 2]
-    voxels[j] = Math.max(0, Math.min(255, Math.round(0.299 * r + 0.587 * g + 0.114 * b)))
+
+  const out = new Uint8Array(bitmap.width * bitmap.height)
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+    const alpha = Number(data[i + 3] || 255) / 255
+    const r = Number(data[i] || 0) * alpha
+    const g = Number(data[i + 1] || 0) * alpha
+    const b = Number(data[i + 2] || 0) * alpha
+    out[p] = clampByte(0.299 * r + 0.587 * g + 0.114 * b)
   }
 
-  const [sx, sy] = readRasterSpacingMM(buffer, name)
-  const niiBuffer = encodeNiftiUInt8({
-    width,
-    height,
+  const [defaultSX, defaultSY] = readRasterSpacingMM(buffer, name)
+  const sx = Math.max(1e-6, Number(spacing?.[0] || defaultSX || 1))
+  const sy = Math.max(1e-6, Number(spacing?.[1] || defaultSY || 1))
+  const sz = Math.max(1e-6, Number(spacing?.[2] || 1))
+  const ox = Number(origin?.[0] || 0)
+  const oy = Number(origin?.[1] || 0)
+  const oz = Number(origin?.[2] || 0)
+  const normalized = encodeNiftiUInt8({
+    width: bitmap.width,
+    height: bitmap.height,
     depth: 1,
     components: 1,
-    voxels,
-    spacing: [sx, sy, 1]
+    voxels: out,
+    spacing: [sx, sy, sz],
+    origin: [ox, oy, oz],
+    orientation
   })
+  const direction = getOrientationDirection(orientation, [sx, sy, sz])
+  const rgbBytes = bitmap.width * bitmap.height * 3
+  const sourceSummary = {
+    fileName: name || 'image',
+    dimensions: [bitmap.width, bitmap.height, 1],
+    timePoints: 1,
+    componentsPerVoxel: 3,
+    voxelSpacing: [sx, sy, sz],
+    origin: [ox, oy, oz],
+    orientation,
+    byteOrder: 'Little Endian',
+    dataType: 'unsigned_char',
+    fileSize: `${Math.round(rgbBytes / 1024)} KB`,
+    metadata: {
+      spacingMM: [sx, sy, sz],
+      fileFormat,
+      generatedBy: 'Nii Annotation Generic ITK Converter'
+    }
+  }
 
   return {
-    buffer: niiBuffer,
-    internalName: toInternalNiftiName(name),
+    buffer: normalized,
+    internalName: toInternalNiftiName(name || 'image'),
     spatialMeta: {
-      origin: [0, 0, 0],
-      spacing: [sx, sy, 1],
-      direction: [-1, 0, 0, 0, -1, 0, 0, 0, 1],
-      sourceSummary: {
-        dimensions: [width, height, 1],
-        timePoints: 1,
-        componentsPerVoxel: 3,
-        voxelSpacing: [sx, sy, 1],
-        origin: [0, 0, 0],
-        orientation: 'RAI',
-        dataType: 'unsigned_char'
-      },
-      width,
-      height
+      origin: [ox, oy, oz],
+      spacing: [sx, sy, sz],
+      direction,
+      sourceSummary,
+      width: bitmap.width,
+      height: bitmap.height
     }
   }
 }
 
-const normalizeRasterNiftiToScalar = (buffer, sourceName = '') => {
-  const { header, voxels, width, height, depth, components } = decodeNifti(buffer)
-  const sx = Math.max(1e-6, Number(header?.pixDims?.[1] || 1))
-  const sy = Math.max(1e-6, Number(header?.pixDims?.[2] || 1))
-  const sz = Math.max(1e-6, Number(header?.pixDims?.[3] || 1))
+const normalizeRasterNiftiToScalar = (buffer, sourceName = '', { spacingOverride = null } = {}) => {
+  const { header, voxels, width, height, depth, components, datatypeCode } = decodeNifti(buffer)
+  const sx = Math.max(1e-6, Number(spacingOverride?.[0] || header?.pixDims?.[1] || 1))
+  const sy = Math.max(1e-6, Number(spacingOverride?.[1] || header?.pixDims?.[2] || 1))
+  const sz = Math.max(1e-6, Number(spacingOverride?.[2] || header?.pixDims?.[3] || 1))
 
-  if (components <= 1 && header?.datatypeCode === nifti.NIFTI1.TYPE_UINT8) {
-    return {
-      buffer,
-      internalName: toInternalNiftiName(sourceName || 'image'),
-      spatialMeta: {
-        origin: [0, 0, 0],
-        spacing: [sx, sy, sz],
-        direction: [-1, 0, 0, 0, -1, 0, 0, 0, 1],
-        sourceSummary: {
-          dimensions: [width, height, depth],
-          timePoints: 1,
-          componentsPerVoxel: 3,
-          voxelSpacing: [sx, sy, sz],
-          origin: [0, 0, 0],
-          orientation: 'RAI',
-          dataType: 'unsigned_char'
-        },
-        width,
-        height
-      }
+  const voxelCount = width * height * depth
+  const out = new Uint8Array(voxelCount)
+  const isRgb24 = datatypeCode === nifti.NIFTI1.TYPE_RGB24
+  for (let i = 0; i < voxelCount; i += 1) {
+    if (isRgb24) {
+      const base = i * 3
+      const r = Number(voxels[base] || 0)
+      const g = Number(voxels[base + 1] || 0)
+      const b = Number(voxels[base + 2] || 0)
+      out[i] = clampByte(0.299 * r + 0.587 * g + 0.114 * b)
+      continue
     }
-  }
-
-  const out = new Uint8Array(width * height * depth)
-  const wh = width * height
-  const frameSize = wh * depth
-  for (let z = 0; z < depth; z += 1) {
-    const zOff = z * wh
-    for (let y = 0; y < height; y += 1) {
-      const yOff = zOff + y * width
-      for (let x = 0; x < width; x += 1) {
-        const outIdx = yOff + x
-        let gray = 0
-        if (components >= 3) {
-          const r = Number(voxels[outIdx] || 0)
-          const g = Number(voxels[outIdx + frameSize] || 0)
-          const b = Number(voxels[outIdx + 2 * frameSize] || 0)
-          gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b)
-        } else {
-          gray = Number(voxels[outIdx] || 0)
-        }
-        out[outIdx] = Math.max(0, Math.min(255, gray))
-      }
+    if (components >= 3) {
+      // dim[5] 向量数据按 NIfTI 规范通常为平面布局：C0..Cn 逐平面存储。
+      const r = Number(voxels[i] || 0)
+      const g = Number(voxels[i + voxelCount] || 0)
+      const b = Number(voxels[i + 2 * voxelCount] || 0)
+      out[i] = clampByte(0.299 * r + 0.587 * g + 0.114 * b)
+      continue
     }
+    out[i] = clampByte(voxels[i])
   }
 
   const normalized = encodeNiftiUInt8({
@@ -363,7 +422,7 @@ const normalizeRasterNiftiToScalar = (buffer, sourceName = '') => {
       sourceSummary: {
         dimensions: [width, height, depth],
         timePoints: 1,
-        componentsPerVoxel: 3,
+        componentsPerVoxel: components,
         voxelSpacing: [sx, sy, sz],
         origin: [0, 0, 0],
         orientation: 'RAI',
@@ -518,8 +577,37 @@ const decodeNifti = (buffer) => {
   const width = Math.max(1, Number(header.dims?.[1] || 1))
   const height = Math.max(1, Number(header.dims?.[2] || 1))
   const depth = Math.max(1, Number(header.dims?.[3] || 1))
-  const components = Math.max(1, Number(header.dims?.[5] || 1))
-  return { header, voxels, width, height, depth, components }
+  const dimComponents = Math.max(1, Number(header.dims?.[5] || 1))
+  const components = header.datatypeCode === nifti.NIFTI1.TYPE_RGB24 ? 3 : dimComponents
+  return { header, voxels, width, height, depth, components, datatypeCode: Number(header.datatypeCode || 0) }
+}
+
+const isRasterOriginRecord = (record) => {
+  const sourceName = record?.sourceName || record?.displayName || ''
+  if (isImageFile(sourceName)) return true
+  const sourceData = arrayBufferFrom(record?.sourceData)
+  if (sourceData && !isNiftiBuffer(sourceData)) return true
+  return false
+}
+
+const isLikelyMaskNiftiBuffer = (buffer) => {
+  const source = arrayBufferFrom(buffer)
+  if (!source || !isNiftiBuffer(source)) return false
+  try {
+    const { voxels } = decodeNifti(source)
+    const unique = new Set()
+    let nonZero = 0
+    const maxCheck = Math.min(voxels.length, 200000)
+    for (let i = 0; i < maxCheck; i += 1) {
+      const v = clampByte(voxels[i])
+      unique.add(v)
+      if (v > 0) nonZero += 1
+      if (unique.size > 12) return false
+    }
+    return nonZero > 0 && nonZero / maxCheck < 0.4
+  } catch {
+    return false
+  }
 }
 
 const createNiftiThumbnail = async (buffer, _name, { isMask = false } = {}) => {
@@ -732,36 +820,42 @@ export default function App() {
 
   const refreshImageList = async () => {
     const records = await getAllImages()
-    // 将历史普通图片迁移到显式空间的 NIfTI 数据，避免坐标信息缺失。
+    // 历史图片记录回迁为浏览器原始图显示，避免由错误转换导致全黑/纯色显示。
     for (const record of records) {
       if (!record.data) continue
-      const sourceName = record.displayName || record.name
-      if (!isImageFile(sourceName)) continue
-      if ((record.rasterConversionVersion || 0) >= 4) continue
+      const sourceName = record.sourceName || record.displayName || record.name
+      if (!isRasterOriginRecord(record)) continue
+      if ((record.rasterConversionVersion || 0) >= RASTER_CONVERSION_VERSION) continue
       const originalSourceData = record.sourceData || record.data
-      const dataBuffer = arrayBufferFrom(record.data)
-      const migrated = dataBuffer && isNiftiBuffer(dataBuffer)
-        ? normalizeRasterNiftiToScalar(dataBuffer, sourceName)
-        : await rasterToNifti(record.data, sourceName).catch(() => null)
-      if (!migrated) continue
-      const regenerated = await createThumbnail(migrated.buffer, migrated.internalName)
-      record.data = migrated.buffer
-      record.name = migrated.internalName
+      const regenerated = await createThumbnail(originalSourceData, sourceName)
+      const shouldResetAutoMask =
+        !record.modifiedByUser && !record.sourceMask && !!record.mask && isImageFile(sourceName)
+      record.data = originalSourceData
+      record.name = sourceName
       record.displayName = sourceName
-      record.spatialMeta = migrated.spatialMeta
-      record.rasterConversionVersion = 4
+      record.isMaskOnly = false
+      record.spatialMeta = record.spatialMeta || null
+      record.rasterConversionVersion = RASTER_CONVERSION_VERSION
       record.sourceName = sourceName
       record.sourceData = originalSourceData
       record.thumbnail = regenerated || record.thumbnail
       await updateImage(record.id, {
-        data: migrated.buffer,
-        name: migrated.internalName,
+        data: originalSourceData,
+        name: sourceName,
         displayName: sourceName,
-        spatialMeta: migrated.spatialMeta,
-        rasterConversionVersion: 4,
+        isMaskOnly: false,
+        spatialMeta: record.spatialMeta || null,
+        rasterConversionVersion: RASTER_CONVERSION_VERSION,
         sourceName,
         sourceData: originalSourceData,
         thumbnail: record.thumbnail,
+        ...(shouldResetAutoMask
+          ? {
+              mask: null,
+              maskName: null,
+              maskAttached: false
+            }
+          : {}),
         updatedAt: Date.now()
       })
     }
@@ -786,11 +880,11 @@ export default function App() {
 
   const persistActiveDrawing = async () => {
     if (!activeImage?.id) return
-    // 如果是“从原始mask临时拿下叠加”的状态，则不覆盖原始mask，也不持久化空绘图。
-    if (activeImage?.maskAttached === false && activeImage?.sourceMask) return
     const exported = await viewerRef.current?.exportDrawing()
     if (!exported) return
-    const buffer = arrayBufferFrom(exported)
+    const raw = arrayBufferFrom(exported)
+    if (!raw) return
+    const buffer = sanitizeMaskBuffer(raw, { templateBuffer: activeImage?.data })
     if (!buffer) return
 
     await updateImage(activeImage.id, {
@@ -873,10 +967,12 @@ export default function App() {
   }
 
   const applyMaskToImage = async (imageId, maskBuffer, maskName) => {
+    const normalizedMask = sanitizeMaskBuffer(maskBuffer)
+    if (!normalizedMask) return
     await updateImage(imageId, {
-      sourceMask: maskBuffer,
+      sourceMask: normalizedMask,
       sourceMaskName: maskName,
-      mask: maskBuffer,
+      mask: normalizedMask,
       maskName,
       maskAttached: true,
       updatedAt: Date.now()
@@ -887,9 +983,9 @@ export default function App() {
     if (activeImage?.id === imageId) {
       setActiveImage((prev) => ({
         ...prev,
-        sourceMask: maskBuffer,
+        sourceMask: normalizedMask,
         sourceMaskName: maskName,
-        mask: maskBuffer,
+        mask: normalizedMask,
         maskName,
         maskAttached: true,
         maskVersion: (prev?.maskVersion || 0) + 1
@@ -924,7 +1020,7 @@ export default function App() {
     const finalSourceMaskName = sourceMaskName || maskName || null
     const finalMaskAttached = finalSourceMask ? true : maskAttached
 
-    return {
+  return {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       name,
       displayName,
@@ -947,53 +1043,103 @@ export default function App() {
       updatedAt: Date.now(),
       hash,
       thumbnail
+  }
+}
+
+const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
+  const { header, voxels, width, height, depth, components, datatypeCode } = decodeNifti(buffer)
+  const voxelCount = width * height * depth
+  const out = new Uint8Array(voxelCount)
+  const isRgb24 = datatypeCode === nifti.NIFTI1.TYPE_RGB24
+
+  for (let i = 0; i < voxelCount; i += 1) {
+    let value = 0
+    if (isRgb24) {
+      const base = i * 3
+      value = Math.max(Number(voxels[base] || 0), Number(voxels[base + 1] || 0), Number(voxels[base + 2] || 0))
+    } else if (components > 1) {
+      for (let c = 0; c < components; c += 1) {
+        value = Math.max(value, Number(voxels[c * voxelCount + i] || 0))
+      }
+    } else {
+      value = Number(voxels[i] || 0)
+    }
+    out[i] = clampByte(value)
+  }
+
+  let templateHeader = null
+  const template = arrayBufferFrom(templateBuffer)
+  if (template && isNiftiBuffer(template)) {
+    try {
+      templateHeader = decodeNifti(template).header
+    } catch {
+      templateHeader = null
     }
   }
+  const referenceHeader = templateHeader || header
+  const spacing = [
+    Math.max(1e-6, Number(referenceHeader?.pixDims?.[1] || 1)),
+    Math.max(1e-6, Number(referenceHeader?.pixDims?.[2] || 1)),
+    Math.max(1e-6, Number(referenceHeader?.pixDims?.[3] || 1))
+  ]
+
+  return encodeNiftiUInt8({
+    width,
+    height,
+    depth,
+    components: 1,
+    voxels: out,
+    spacing,
+    headerTemplate: referenceHeader
+  })
+}
+
+const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
+  const source = arrayBufferFrom(maskBuffer)
+  if (!source || !isNiftiBuffer(source)) return source
+  try {
+    return normalizeMaskNiftiToScalar(source, { templateBuffer })
+  } catch (error) {
+    console.warn('mask 规范化失败，保留原始输出', error)
+    return source
+  }
+}
 
   const isDuplicateHash = (hash, hashSet) => hashSet.has(hash)
 
   const importImageFile = async (file, hashSet, importBatchId = null) => {
     const originalBuffer = await file.arrayBuffer()
-    const likelyDicomByMagic = !isSupportedImageFile(file.name) && isLikelyDicomBuffer(originalBuffer)
-    if (!isSupportedImageFile(file.name) && !likelyDicomByMagic) return
-
-    const effectiveName =
-      likelyDicomByMagic && !isDicomFile(file.name) ? `${file.name}.dcm` : file.name
+    if (isImageFile(file.name)) {
+      Message.warning('已移除 JPG/PNG 等原始图片导入，请先转换为 NIfTI(.nii/.nii.gz)')
+      return
+    }
+    if (!isSupportedImageFile(file.name)) return
+    const effectiveName = file.name
 
     let buffer = originalBuffer
     let internalName = effectiveName
     let spatialMeta = null
-    if (isImageFile(effectiveName)) {
-      const converted = await rasterToNifti(originalBuffer, effectiveName)
-      buffer = converted.buffer
-      internalName = converted.internalName
-      spatialMeta = converted.spatialMeta
-    }
-
-    const baseName = normalizeBaseName(effectiveName)
+    let isMaskOnly = false
     const maskFile = isMaskName(file.name)
-    const hash = await hashBuffer(buffer)
-
-    if (maskFile) {
-      const target = findImageByBase(stripMaskTokens(baseName)) || findImageByBase(baseName)
-      if (target) {
-        await applyMaskToImage(target.id, buffer, file.name)
-        return
-      }
+    if (maskFile || (isNiftiFile(effectiveName) && isLikelyMaskNiftiBuffer(originalBuffer))) {
+      isMaskOnly = true
+      buffer = sanitizeMaskBuffer(originalBuffer)
     }
+
+    const hash = await hashBuffer(buffer)
 
     if (isDuplicateHash(hash, hashSet)) return
 
-    const thumbnail = await createThumbnail(buffer, internalName, { isMask: maskFile })
+    const thumbnail = await createThumbnail(buffer, internalName, { isMask: isMaskOnly })
     const record = createImageRecord(internalName, buffer, hash, thumbnail, {
       displayName: effectiveName,
-      isMaskOnly: maskFile,
+      isMaskOnly,
       rasterHFlipNormalized: false,
       spatialMeta,
-      rasterConversionVersion: isImageFile(effectiveName) ? 4 : 0,
+      rasterConversionVersion: 0,
       importBatchId,
       sourceName: effectiveName,
-      sourceData: isImageFile(effectiveName) ? originalBuffer : buffer,
+      sourceData: buffer,
       modifiedByUser: false
     })
     await saveImages([record])
@@ -1011,51 +1157,80 @@ export default function App() {
 
     const imageEntries = []
     const maskEntries = []
+    const unresolved = []
 
     for (const entry of Object.values(zip.files)) {
       if (entry.dir) continue
       const name = entry.name
       if (!isSupportedImageFile(name)) continue
-      const lower = name.toLowerCase()
-      if (lower.includes('/mask/') || lower.startsWith('mask/')) {
+      const leaf = getLeafName(name)
+      if (isMaskPath(name) || isMaskName(leaf)) {
         maskEntries.push(entry)
-      } else {
+        continue
+      }
+      if (isImagePath(name)) {
         imageEntries.push(entry)
+        continue
+      }
+      unresolved.push(entry)
+    }
+
+    const unresolvedByBase = new Map()
+    for (const entry of unresolved) {
+      const base = normalizeBaseName(getLeafName(entry.name))
+      const list = unresolvedByBase.get(base) || []
+      list.push(entry)
+      unresolvedByBase.set(base, list)
+    }
+    for (const list of unresolvedByBase.values()) {
+      if (!list.length) continue
+      imageEntries.push(list[0])
+      for (let i = 1; i < list.length; i += 1) {
+        maskEntries.push(list[i])
       }
     }
 
+    const maskByBase = new Map()
     const masks = []
     for (const entry of maskEntries) {
       const content = await entry.async('arraybuffer')
-      const rawBaseName = normalizeBaseName(entry.name)
-      masks.push({
-        name: entry.name.split('/').pop(),
+      const normalizedMask = sanitizeMaskBuffer(content)
+      const displayName = entry.name.split('/').pop()
+      const rawBaseName = normalizeBaseName(displayName)
+      const matchBaseName = stripMaskTokens(rawBaseName)
+      const maskItem = {
+        name: displayName,
         baseName: rawBaseName,
-        matchBaseName: stripMaskTokens(rawBaseName),
-        buffer: content
-      })
+        matchBaseName,
+        buffer: normalizedMask,
+        used: false
+      }
+      masks.push(maskItem)
+      if (matchBaseName) maskByBase.set(matchBaseName, maskItem)
+      if (rawBaseName) maskByBase.set(rawBaseName, maskItem)
     }
 
-    const maskByBase = new Map(masks.map((mask) => [mask.matchBaseName || mask.baseName, mask]))
-
     const newRecords = []
+    const importedImageBaseSet = new Set()
+
     for (const entry of imageEntries) {
       const rawContent = await entry.async('arraybuffer')
       const name = entry.name.split('/').pop()
-      const baseName = normalizeBaseName(entry.name)
+      const baseName = normalizeBaseName(name)
+      if (importedImageBaseSet.has(baseName)) continue
       let content = rawContent
       let internalName = name
       let spatialMeta = null
       if (isImageFile(name)) {
-        const converted = await rasterToNifti(rawContent, name)
-        content = converted.buffer
-        internalName = converted.internalName
-        spatialMeta = converted.spatialMeta
+        content = rawContent
+        internalName = name
+        spatialMeta = null
       }
       const hash = await hashBuffer(content)
       if (isDuplicateHash(hash, hashSet)) continue
 
       const maskMatch = maskByBase.get(baseName) || maskByBase.get(stripMaskTokens(baseName))
+      if (maskMatch) maskMatch.used = true
       const thumbnail = await createThumbnail(content, internalName)
       const record = createImageRecord(internalName, content, hash, thumbnail, {
         displayName: name,
@@ -1066,10 +1241,33 @@ export default function App() {
         maskAttached: !!maskMatch,
         rasterHFlipNormalized: false,
         spatialMeta,
-        rasterConversionVersion: isImageFile(name) ? 4 : 0,
+        rasterConversionVersion: isImageFile(name) ? RASTER_CONVERSION_VERSION : 0,
         importBatchId,
         sourceName: name,
         sourceData: isImageFile(name) ? rawContent : content,
+        modifiedByUser: false
+      })
+      newRecords.push(record)
+      hashSet.add(hash)
+      importedImageBaseSet.add(baseName)
+    }
+
+    for (const maskItem of masks) {
+      if (maskItem.used) continue
+      const displayName = maskItem.name
+      const internalName = toInternalNiftiName(displayName)
+      const hash = await hashBuffer(maskItem.buffer)
+      if (isDuplicateHash(hash, hashSet)) continue
+      const thumbnail = await createThumbnail(maskItem.buffer, internalName, { isMask: true })
+      const record = createImageRecord(internalName, maskItem.buffer, hash, thumbnail, {
+        displayName,
+        isMaskOnly: true,
+        rasterHFlipNormalized: false,
+        spatialMeta: null,
+        rasterConversionVersion: 0,
+        importBatchId,
+        sourceName: displayName,
+        sourceData: maskItem.buffer,
         modifiedByUser: false
       })
       newRecords.push(record)
@@ -1085,15 +1283,6 @@ export default function App() {
       }
     }
 
-    for (const mask of masks) {
-      const target =
-        findImageByBase(mask.matchBaseName) ||
-        findImageByBase(stripMaskTokens(mask.baseName)) ||
-        findImageByBase(mask.baseName)
-      if (target) {
-        await applyMaskToImage(target.id, mask.buffer, mask.name)
-      }
-    }
   }
 
   const handleUploadChange = async (fileList) => {
@@ -1123,7 +1312,9 @@ export default function App() {
     setExportDirHandle(dirHandle)
 
     const imgHandle = await dirHandle.getDirectoryHandle('img', { create: false }).catch(() => null)
-    const maskHandle = await dirHandle.getDirectoryHandle('mask', { create: false }).catch(() => null)
+    const maskHandle =
+      (await dirHandle.getDirectoryHandle('mask', { create: false }).catch(() => null)) ||
+      (await dirHandle.getDirectoryHandle('masks', { create: false }).catch(() => null))
     const imageRootHandle = imgHandle || dirHandle
     const importBatchId = makeImportBatchId()
 
@@ -1132,15 +1323,8 @@ export default function App() {
     const imageEntries = []
     for await (const [name, handle] of imageRootHandle.entries()) {
       if (handle.kind !== 'file') continue
-      if (!isSupportedImageFile(name) && !imgHandle) {
-        // 兼容无扩展名的 DICOM 文件（文件夹导入场景）
-        const file = await handle.getFile()
-        const content = await file.arrayBuffer()
-        if (isLikelyDicomBuffer(content)) {
-          imageEntries.push(handle)
-        }
-        continue
-      }
+      if (isMaskName(name)) continue
+      if (!isSupportedImageFile(name)) continue
       if (isSupportedImageFile(name)) imageEntries.push(handle)
     }
 
@@ -1151,35 +1335,44 @@ export default function App() {
         if (!isSupportedImageFile(name)) continue
         const file = await handle.getFile()
         const content = await file.arrayBuffer()
+        const normalizedMask = sanitizeMaskBuffer(content)
         const rawBaseName = normalizeBaseName(name)
         masks.push({
           name,
           baseName: rawBaseName,
           matchBaseName: stripMaskTokens(rawBaseName),
-          buffer: content
+          buffer: normalizedMask
         })
       }
     }
 
-    const maskByBase = new Map(masks.map((mask) => [mask.matchBaseName || mask.baseName, mask]))
+    const maskByBase = new Map()
+    for (const mask of masks) {
+      const item = { ...mask, used: false }
+      if (item.matchBaseName) maskByBase.set(item.matchBaseName, item)
+      if (item.baseName) maskByBase.set(item.baseName, item)
+      mask.__item = item
+    }
 
     const newRecords = []
+    const importedImageBaseSet = new Set()
     for (const handle of imageEntries) {
       const file = await handle.getFile()
       const rawContent = await file.arrayBuffer()
+      const baseName = normalizeBaseName(file.name)
+      if (importedImageBaseSet.has(baseName)) continue
       let content = rawContent
       let internalName = file.name
       let spatialMeta = null
       if (isImageFile(file.name)) {
-        const converted = await rasterToNifti(rawContent, file.name)
-        content = converted.buffer
-        internalName = converted.internalName
-        spatialMeta = converted.spatialMeta
+        content = rawContent
+        internalName = file.name
+        spatialMeta = null
       }
       const hash = await hashBuffer(content)
       if (isDuplicateHash(hash, hashSet)) continue
-      const baseName = normalizeBaseName(file.name)
       const maskMatch = maskByBase.get(baseName) || maskByBase.get(stripMaskTokens(baseName))
+      if (maskMatch) maskMatch.used = true
       const thumbnail = await createThumbnail(content, internalName)
       const record = createImageRecord(internalName, content, hash, thumbnail, {
         displayName: file.name,
@@ -1190,10 +1383,32 @@ export default function App() {
         maskAttached: !!maskMatch,
         rasterHFlipNormalized: false,
         spatialMeta,
-        rasterConversionVersion: isImageFile(file.name) ? 4 : 0,
+        rasterConversionVersion: isImageFile(file.name) ? RASTER_CONVERSION_VERSION : 0,
         importBatchId,
         sourceName: file.name,
         sourceData: isImageFile(file.name) ? rawContent : content,
+        modifiedByUser: false
+      })
+      newRecords.push(record)
+      hashSet.add(hash)
+      importedImageBaseSet.add(baseName)
+    }
+
+    for (const mask of masks.map((m) => m.__item).filter(Boolean)) {
+      if (mask.used) continue
+      const internalName = toInternalNiftiName(mask.name)
+      const hash = await hashBuffer(mask.buffer)
+      if (isDuplicateHash(hash, hashSet)) continue
+      const thumbnail = await createThumbnail(mask.buffer, internalName, { isMask: true })
+      const record = createImageRecord(internalName, mask.buffer, hash, thumbnail, {
+        displayName: mask.name,
+        isMaskOnly: true,
+        rasterHFlipNormalized: false,
+        spatialMeta: null,
+        rasterConversionVersion: 0,
+        importBatchId,
+        sourceName: mask.name,
+        sourceData: mask.buffer,
         modifiedByUser: false
       })
       newRecords.push(record)
@@ -1242,7 +1457,7 @@ export default function App() {
   const attachSourceMaskToImage = async (id, knownRecord = null) => {
     const record = knownRecord || (await getImageById(id))
     if (!record) return
-    const sourceMask = record.sourceMask || record.mask
+    const sourceMask = sanitizeMaskBuffer(record.sourceMask || record.mask, { templateBuffer: record.data })
     const sourceMaskName = record.sourceMaskName || record.maskName
     if (!sourceMask) return
 
@@ -1348,23 +1563,53 @@ export default function App() {
     for (const record of annotatedRecords) {
       const imgName = record.sourceName || record.displayName || record.name
       const imgData = record.sourceData || record.data
+      const maskData = sanitizeMaskBuffer(record.mask, { templateBuffer: record.data })
       if (imgData && imgFolder) {
         imgFolder.file(imgName, imgData)
       }
-      if (record.mask && maskFolder) {
+      if (maskData && maskFolder) {
         const maskName = `${fileStem(imgName)}.nii.gz`
-        maskFolder.file(maskName, record.mask)
+        maskFolder.file(maskName, maskData)
       }
     }
 
     const blob = await zip.generateAsync({ type: 'blob' })
     const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download =
+    const defaultZipName =
       annotatedRecords.length === 1
         ? `${fileStem(annotatedRecords[0].sourceName || annotatedRecords[0].displayName || annotatedRecords[0].name)}.zip`
         : 'nii_annotations.zip'
+    const userInput = await new Promise((resolve) => {
+      let nextName = defaultZipName
+      Modal.confirm({
+        title: '导出文件名',
+        content: (
+          <Input
+            defaultValue={defaultZipName}
+            placeholder="请输入导出压缩包文件名"
+            onChange={(value) => {
+              nextName = String(value || '')
+            }}
+          />
+        ),
+        okText: '确认导出',
+        cancelText: '取消',
+        onOk: () => resolve(nextName),
+        onCancel: () => resolve(null)
+      })
+    })
+    if (userInput === null) {
+      URL.revokeObjectURL(url)
+      return
+    }
+    const normalizedName = String(userInput || '')
+      .trim()
+      .replace(/[\\/:*?"<>|]/g, '_')
+      .replace(/\.zip$/i, '')
+    const finalZipName = `${normalizedName || defaultZipName.replace(/\.zip$/i, '')}.zip`
+    const link = document.createElement('a')
+    link.href = url
+    link.download = finalZipName
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -1383,11 +1628,12 @@ export default function App() {
             await imgWritable.write(imgData)
             await imgWritable.close()
           }
-          if (!record.mask) continue
+          const maskData = sanitizeMaskBuffer(record.mask, { templateBuffer: record.data })
+          if (!maskData) continue
           const maskName = `${fileStem(imgName)}.nii.gz`
           const fileHandle = await maskDir.getFileHandle(maskName, { create: true })
           const writable = await fileHandle.createWritable()
-          await writable.write(record.mask)
+          await writable.write(maskData)
           await writable.close()
         }
       } catch (error) {
@@ -1518,7 +1764,7 @@ export default function App() {
             </Button>
           </Tooltip>
           <Upload
-            accept=".nii,.nii.gz,.nrrd,.dcm,.dicom,.png,.jpg,.jpeg,.bmp,.webp,.tif,.tiff,.zip"
+            accept=".nii,.nii.gz,.zip"
             showUploadList={false}
             autoUpload={false}
             multiple
@@ -1536,7 +1782,7 @@ export default function App() {
         <Sider className="sidebar" width={320}>
           <Card size="small" title="影像列表">
             {images.length === 0 ? (
-              <div className="sidebar-empty">暂无影像，请导入 .nii/.nrrd/.dcm/图片/.zip 或文件夹</div>
+              <div className="sidebar-empty">暂无影像，请导入 .nii/.nii.gz 或 .zip（含 NIfTI）</div>
             ) : (
               <div className="image-grid">
                 {images.map((img) => (
