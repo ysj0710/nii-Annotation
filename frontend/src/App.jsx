@@ -74,6 +74,23 @@ const isZipFile = (name) => /\.zip$/i.test(name)
 const isMaskName = (name) => /(mask|seg|label)/i.test(name)
 const isSupportedImageFile = (name) => isNiftiFile(name)
 
+const isZipBuffer = (buffer) => {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4) return false
+  const bytes = new Uint8Array(buffer)
+  return bytes[0] === 0x50 && bytes[1] === 0x4b && (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07)
+}
+
+const normalizeIncomingFileName = (name, buffer, fallbackBase = 'image') => {
+  const leaf = getLeafName(name) || fallbackBase
+  if (isZipFile(leaf) || isSupportedImageFile(leaf) || isDicomFile(leaf) || isImageFile(leaf)) {
+    return leaf
+  }
+  if (isNiftiBuffer(buffer)) return `${leaf}.nii.gz`
+  if (isZipBuffer(buffer)) return `${leaf}.zip`
+  if (isDicomContentBuffer(buffer)) return `${leaf}.dcm`
+  return leaf
+}
+
 const getMimeFromName = (name) => {
   const lower = String(name || '').toLowerCase()
   if (lower.endsWith('.png')) return 'image/png'
@@ -1090,15 +1107,33 @@ export default function App() {
       if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
 
       const blob = await resp.blob()
+      const rawBuffer = await blob.arrayBuffer()
+      const contentType = String(resp.headers.get('content-type') || '').toLowerCase()
       const headerName = parseFileNameFromDisposition(resp.headers.get('content-disposition'))
-      const fallbackName = externalCtx.originalName || headerName || `image-${externalCtx.imageId}.zip`
-      const file = new File([blob], fallbackName, {
+      const fallbackName = externalCtx.originalName || headerName || `image-${externalCtx.imageId || Date.now()}`
+      const normalizedName = normalizeIncomingFileName(fallbackName, rawBuffer, `image-${externalCtx.imageId || 'remote'}`)
+
+      if (
+        !isZipFile(normalizedName) &&
+        !isSupportedImageFile(normalizedName) &&
+        !isDicomFile(normalizedName) &&
+        !isDicomContentBuffer(rawBuffer)
+      ) {
+        if (contentType.includes('application/json') || contentType.includes('text/plain')) {
+          const text = new TextDecoder('utf-8').decode(new Uint8Array(rawBuffer).slice(0, 300))
+          throw new Error(`remote payload is not image binary (content-type=${contentType}): ${text}`)
+        }
+        throw new Error(`unsupported remote payload: name=${normalizedName}, content-type=${contentType || 'unknown'}`)
+      }
+
+      const file = new File([rawBuffer], normalizedName, {
         type: blob.type || 'application/octet-stream'
       })
 
       const existing = await getAllImages()
       const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean))
       const batchId = makeImportBatchId()
+      const beforeCount = existing.length
 
       if (isZipFile(file.name)) {
         await importZipFile(file, hashSet, batchId)
@@ -1107,6 +1142,10 @@ export default function App() {
       }
 
       await refreshImageList()
+      const afterCount = (await getAllImages()).length
+      if (afterCount <= beforeCount) {
+        throw new Error('auto import finished but no image record was added')
+      }
       Message.success('已自动接收科研平台影像')
     } catch (error) {
       console.error(error)
