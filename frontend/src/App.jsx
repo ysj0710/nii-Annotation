@@ -2,34 +2,23 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Layout,
   Button,
-  Upload,
   Space,
-  Card,
-  Radio,
   Input,
-  Slider,
   Tooltip,
   Popover,
-  Switch,
   Message,
   Modal
 } from '@arco-design/web-react'
 import {
-  IconUpload,
   IconPlus,
-  IconUndo,
-  IconRedo,
   IconDelete,
-  IconFolder,
-  IconBrush,
-  IconEraser,
-  IconDragArrow,
   IconTool,
-  IconTags,
   IconSearch
 } from '@arco-design/web-react/icon'
 import JSZip from 'jszip'
 import * as nifti from 'nifti-reader-js'
+import dicomParser from 'dicom-parser'
+import { dicomLoader as niivueDicomLoader } from '@niivue/dicom-loader'
 import { Niivue } from '@niivue/niivue'
 import Viewer from './components/Viewer.jsx'
 import { getAllImages, getImageById, saveImages, updateImage, deleteImage } from './utils/imageStore.js'
@@ -37,6 +26,22 @@ import { getAllImages, getImageById, saveImages, updateImage, deleteImage } from
 const { Header, Sider, Content } = Layout
 
 const labelPalette = ['#FF6B6B', '#4D96FF', '#6BCB77', '#FFD93D', '#845EC2', '#FF9671']
+const DEFAULT_LABEL_COLOR = '#FF4D4F'
+const annotationToolKeys = new Set([
+  'hu',
+  'ellipse',
+  'rect',
+  'angle',
+  'cobb',
+  'length',
+  'arrow',
+  'text',
+  'ratio',
+  'curve',
+  'dynamic',
+  'freehand',
+  'bidirectional'
+])
 const THUMBNAIL_SIZE = 240
 const RASTER_CONVERSION_VERSION = 8
 
@@ -440,6 +445,105 @@ const isLikelyDicomBuffer = (buffer) => {
   return bytes[0] === 68 && bytes[1] === 73 && bytes[2] === 67 && bytes[3] === 77
 }
 
+const hasDicomLikeName = (name) => {
+  const leaf = getLeafName(name)
+  if (!leaf) return false
+  if (isDicomFile(leaf)) return true
+  // 常见无扩展名 DICOM 文件名样式：IM-0001-0001、纯数字、.IMA
+  if (/\.ima$/i.test(leaf)) return true
+  if (/^im[-_]/i.test(leaf)) return true
+  if (/^\d+$/.test(leaf)) return true
+  return false
+}
+
+const toNumeric = (value, fallback = 0) => {
+  const parsed = Number.parseFloat(String(value ?? '').trim())
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+const readDicomIdentity = (buffer, name = '') => {
+  const source = arrayBufferFrom(buffer)
+  if (!source) return null
+  try {
+    const dataSet = dicomParser.parseDicom(new Uint8Array(source), { untilTag: 'x00200013' })
+    const studyUID = String(dataSet.string('x0020000d') || '').trim()
+    const seriesUID = String(dataSet.string('x0020000e') || '').trim()
+    const seriesDescription = String(dataSet.string('x0008103e') || '').trim()
+    const studyID = String(dataSet.string('x00200010') || '').trim()
+    const accessionNumber = String(dataSet.string('x00080050') || '').trim()
+    const seriesNumber = toNumeric(dataSet.intString('x00200011') ?? dataSet.string('x00200011'), 0)
+    const instanceNumber = toNumeric(dataSet.intString('x00200013') ?? dataSet.string('x00200013'), 0)
+    return {
+      sourceName: name,
+      studyUID,
+      seriesUID,
+      seriesDescription,
+      studyID,
+      accessionNumber,
+      seriesNumber,
+      instanceNumber
+    }
+  } catch {
+    return null
+  }
+}
+
+const isDicomContentBuffer = (buffer) => {
+  const source = arrayBufferFrom(buffer)
+  if (!source) return false
+  if (isLikelyDicomBuffer(source)) return true
+  const meta = readDicomIdentity(source)
+  if (!meta) return false
+  if (meta.studyUID || meta.seriesUID) return true
+  if (meta.seriesNumber > 0 || meta.instanceNumber > 0) return true
+  return false
+}
+
+const groupDicomInputsBySeries = (items) => {
+  const groups = new Map()
+  const UNKNOWN_STUDY = 'unknown-study'
+  let unknownSeriesIndex = 1
+
+  for (const item of items) {
+    const meta = readDicomIdentity(item?.data, item?.name)
+    const studyUID = meta?.studyUID || UNKNOWN_STUDY
+    const seriesUID = meta?.seriesUID || `unknown-series-${unknownSeriesIndex++}`
+    const key = `${studyUID}::${seriesUID}`
+    if (!groups.has(key)) {
+      groups.set(key, {
+        studyUID,
+        seriesUID,
+        studyID: meta?.studyID || '',
+        accessionNumber: meta?.accessionNumber || '',
+        seriesDescription: meta?.seriesDescription || '',
+        seriesNumber: Number(meta?.seriesNumber || 0),
+        items: []
+      })
+    }
+    groups.get(key).items.push({
+      name: item?.name || `dicom_${Date.now()}`,
+      data: item?.data,
+      instanceNumber: Number(meta?.instanceNumber || 0)
+    })
+  }
+
+  const output = Array.from(groups.values())
+  for (const group of output) {
+    group.items.sort((a, b) => {
+      if (a.instanceNumber !== b.instanceNumber) return a.instanceNumber - b.instanceNumber
+      return String(a.name).localeCompare(String(b.name), 'en')
+    })
+  }
+  output.sort((a, b) => {
+    if (a.seriesNumber !== b.seriesNumber) return a.seriesNumber - b.seriesNumber
+    if (a.seriesDescription !== b.seriesDescription) {
+      return String(a.seriesDescription).localeCompare(String(b.seriesDescription), 'en')
+    }
+    return String(a.seriesUID).localeCompare(String(b.seriesUID), 'en')
+  })
+  return output
+}
+
 const arrayBufferFrom = (data) => {
   if (!data) return null
   if (data instanceof ArrayBuffer) return data
@@ -754,6 +858,14 @@ const toListItem = (record) => ({
   displayName: record.displayName || record.name,
   baseName: record.baseName || normalizeBaseName(record.name),
   createdAt: record.createdAt,
+  sourceFormat: record.sourceFormat || 'nifti',
+  dicomStudyUID: record.dicomStudyUID || '',
+  dicomStudyID: record.dicomStudyID || '',
+  dicomSeriesUID: record.dicomSeriesUID || '',
+  dicomSeriesDescription: record.dicomSeriesDescription || '',
+  dicomSeriesNumber: Number(record.dicomSeriesNumber || 0),
+  dicomSeriesOrder: Number(record.dicomSeriesOrder || 0),
+  dicomAccessionNumber: record.dicomAccessionNumber || '',
   hasMask: !!(record.sourceMask || record.mask),
   maskAttached: record.maskAttached !== false,
   thumbnail: record.thumbnail || ''
@@ -764,9 +876,23 @@ const hasAttachedMask = (record) =>
 
 const makeImportBatchId = () => `batch-${Date.now()}-${Math.random().toString(16).slice(2)}`
 
+const parseFileNameFromDisposition = (contentDisposition) => {
+  if (!contentDisposition) return ''
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]).replace(/^"(.*)"$/, '$1')
+    } catch {
+      return utf8Match[1].replace(/^"(.*)"$/, '$1')
+    }
+  }
+  const plainMatch = contentDisposition.match(/filename="?([^";]+)"?/i)
+  return plainMatch?.[1] || ''
+}
+
 export default function App() {
   const [labels, setLabels] = useState([
-    { id: 1, name: 'Label 1', color: labelPalette[0], value: 1 }
+    { id: 1, name: 'Label 1', color: DEFAULT_LABEL_COLOR, value: 1 }
   ])
   const [activeLabelId, setActiveLabelId] = useState(1)
   const [newLabelName, setNewLabelName] = useState('')
@@ -774,20 +900,79 @@ export default function App() {
   const [brushSize, setBrushSize] = useState(6)
   const [radiological2D, setRadiological2D] = useState(true)
   const [labelStats, setLabelStats] = useState({})
+  const [viewerMode, setViewerMode] = useState('default')
+  const [showImageSidebar, setShowImageSidebar] = useState(true)
+  const [annotationMenuVisible, setAnnotationMenuVisible] = useState(false)
+  const [colorPickerLabelId, setColorPickerLabelId] = useState(null)
 
   const [images, setImages] = useState([])
   const [activeImage, setActiveImage] = useState(null)
   const [exportDirHandle, setExportDirHandle] = useState(null)
 
   const viewerRef = useRef(null)
+  const viewerHostRef = useRef(null)
+  const annotationToolsRef = useRef(null)
   const processedFilesRef = useRef(new Set())
   const saveTimerRef = useRef(null)
   const statsTimerRef = useRef(null)
+  const dicomWheelSwitchAtRef = useRef(0)
+  const autoImportedRef = useRef(false)
+
+  const externalCtx = useMemo(() => {
+    const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {}
+    const p = new URLSearchParams(window.location.search)
+    return {
+      imageId: p.get('imageId') || globalCtx.imageId || '',
+      imageUrl: p.get('imageUrl') || globalCtx.imageUrl || '',
+      token: p.get('token') || globalCtx.token || '',
+      platformOrigin: p.get('platformOrigin') || globalCtx.platformOrigin || '',
+      originalName: p.get('originalName') || p.get('imageName') || globalCtx.originalName || globalCtx.imageName || ''
+    }
+  }, [])
 
   const activeLabel = useMemo(
     () => labels.find((label) => label.id === activeLabelId) || labels[0],
     [labels, activeLabelId]
   )
+
+  const activeDicomSeries = useMemo(() => {
+    if (activeImage?.sourceFormat !== 'dicom') return []
+    const studyUID = String(activeImage?.dicomStudyUID || '')
+    const studyID = String(activeImage?.dicomStudyID || '')
+    const accessionNumber = String(activeImage?.dicomAccessionNumber || '')
+    const scoped = images.filter((img) => {
+      if (img.sourceFormat !== 'dicom') return false
+      if (studyUID) return String(img.dicomStudyUID || '') === studyUID
+      if (studyID) return String(img.dicomStudyID || '') === studyID
+      if (accessionNumber) return String(img.dicomAccessionNumber || '') === accessionNumber
+      return false
+    })
+    return [...scoped].sort((a, b) => {
+      if ((a.dicomSeriesOrder || 0) !== (b.dicomSeriesOrder || 0)) {
+        return (a.dicomSeriesOrder || 0) - (b.dicomSeriesOrder || 0)
+      }
+      if ((a.dicomSeriesNumber || 0) !== (b.dicomSeriesNumber || 0)) {
+        return (a.dicomSeriesNumber || 0) - (b.dicomSeriesNumber || 0)
+      }
+      return String(a.dicomSeriesDescription || '').localeCompare(String(b.dicomSeriesDescription || ''), 'zh')
+    })
+  }, [images, activeImage?.sourceFormat, activeImage?.dicomStudyUID, activeImage?.dicomStudyID, activeImage?.dicomAccessionNumber])
+
+  const activeDicomSeriesIndex = useMemo(() => {
+    if (!activeImage?.id || activeDicomSeries.length === 0) return -1
+    return activeDicomSeries.findIndex((item) => item.id === activeImage.id)
+  }, [activeDicomSeries, activeImage?.id])
+
+  const activeImageIndex = useMemo(
+    () => images.findIndex((item) => item.id === activeImage?.id),
+    [images, activeImage?.id]
+  )
+
+  useEffect(() => {
+    if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
+      setViewerMode('default')
+    }
+  }, [activeImage?.sourceFormat, viewerMode])
 
   const scheduleLabelStatsRefresh = () => {
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current)
@@ -800,10 +985,10 @@ export default function App() {
   const addLabel = () => {
     const nextId = labels.length ? Math.max(...labels.map((l) => l.id)) + 1 : 1
     const nextValue = labels.length ? Math.max(...labels.map((l) => l.value)) + 1 : 1
-    const color = labelPalette[(nextId - 1) % labelPalette.length]
     const name = newLabelName.trim() || `Label ${nextId}`
-    setLabels((prev) => [...prev, { id: nextId, name, color, value: nextValue }])
+    setLabels((prev) => [...prev, { id: nextId, name, color: DEFAULT_LABEL_COLOR, value: nextValue }])
     setActiveLabelId(nextId)
+    setColorPickerLabelId(nextId)
     setNewLabelName('')
   }
 
@@ -816,6 +1001,16 @@ export default function App() {
       }
       return next
     })
+  }
+
+  const renameLabel = (id, name) => {
+    setLabels((prev) =>
+      prev.map((label) => (label.id === id ? { ...label, name: String(name || '').slice(0, 40) || '未命名标签' } : label))
+    )
+  }
+
+  const setLabelColor = (id, color) => {
+    setLabels((prev) => prev.map((label) => (label.id === id ? { ...label, color } : label)))
   }
 
   const refreshImageList = async () => {
@@ -870,22 +1065,111 @@ export default function App() {
     }
   }
 
+  const fetchAndImportByImageId = async () => {
+    if (autoImportedRef.current) return
+    const hasDirectImageUrl = !!externalCtx.imageUrl
+    const hasImageIdDownload = !!externalCtx.imageId && !!externalCtx.platformOrigin
+    if (!hasDirectImageUrl && !hasImageIdDownload) return
+
+    autoImportedRef.current = true
+    try {
+      const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
+      const url = hasDirectImageUrl
+        ? externalCtx.imageUrl
+        : `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?imageId=${encodeURIComponent(externalCtx.imageId)}`
+      const resp = await fetch(url, {
+        headers: externalCtx.token ? { Authorization: `Bearer${externalCtx.token}` } : {}
+      })
+      if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
+
+      const blob = await resp.blob()
+      const headerName = parseFileNameFromDisposition(resp.headers.get('content-disposition'))
+      const fallbackName = externalCtx.originalName || headerName || `image-${externalCtx.imageId}.zip`
+      const file = new File([blob], fallbackName, {
+        type: blob.type || 'application/octet-stream'
+      })
+
+      const existing = await getAllImages()
+      const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean))
+      const batchId = makeImportBatchId()
+
+      if (isZipFile(file.name)) {
+        await importZipFile(file, hashSet, batchId)
+      } else {
+        await importImageFile(file, hashSet, batchId)
+      }
+
+      await refreshImageList()
+      Message.success('已自动接收科研平台影像')
+    } catch (error) {
+      console.error(error)
+      Message.error('自动加载影像失败，请检查科研平台传参与下载接口')
+    }
+  }
+
   useEffect(() => {
-    refreshImageList()
+    ;(async () => {
+      await refreshImageList()
+      await fetchAndImportByImageId()
+    })()
   }, [])
+
+  useEffect(() => {
+    const onClickOutside = (event) => {
+      if (!annotationMenuVisible) return
+      const host = annotationToolsRef.current
+      if (!host) return
+      if (!host.contains(event.target)) {
+        setAnnotationMenuVisible(false)
+      }
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [annotationMenuVisible])
 
   useEffect(() => {
     scheduleLabelStatsRefresh()
   }, [activeImage?.id, activeImage?.maskVersion, labels.length])
 
   const persistActiveDrawing = async () => {
-    if (!activeImage?.id) return
+    if (!activeImage?.id) return false
     const exported = await viewerRef.current?.exportDrawing()
-    if (!exported) return
+    if (!exported) return false
     const raw = arrayBufferFrom(exported)
-    if (!raw) return
+    if (!raw) return false
     const buffer = sanitizeMaskBuffer(raw, { templateBuffer: activeImage?.data })
-    if (!buffer) return
+    if (!buffer) return false
+    const hasMask = hasNonZeroMaskNifti(buffer)
+    if (!hasMask) {
+      await updateImage(activeImage.id, {
+        mask: null,
+        maskName: null,
+        maskAttached: false,
+        modifiedByUser: true,
+        updatedAt: Date.now()
+      })
+      const hasSourceMask = !!activeImage.sourceMask
+      setImages((prev) =>
+        prev.map((img) =>
+          img.id === activeImage.id
+            ? { ...img, hasMask: hasSourceMask, maskAttached: false }
+            : img
+        )
+      )
+      setActiveImage((prev) =>
+        prev
+          ? {
+              ...prev,
+              mask: null,
+              maskName: null,
+              maskAttached: false,
+              modifiedByUser: true,
+              maskVersion: (prev.maskVersion || 0) + 1
+            }
+          : prev
+      )
+      return true
+    }
 
     await updateImage(activeImage.id, {
       mask: buffer,
@@ -909,6 +1193,62 @@ export default function App() {
           }
         : prev
     )
+    return true
+  }
+
+  const syncActiveAnnotationToPlatform = async () => {
+    if (!externalCtx?.imageId || !externalCtx?.platformOrigin || !activeImage?.id) return false
+    const record = await getImageById(activeImage.id)
+    const maskBuffer = record?.mask || record?.sourceMask
+    if (!maskBuffer) return false
+
+    const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
+    const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationByImageId`
+    const payload = new FormData()
+    payload.append('imageId', String(externalCtx.imageId))
+    payload.append(
+      'maskFile',
+      new File([maskBuffer], `${fileStem(record?.sourceName || record?.name || 'mask')}.nii.gz`, {
+        type: 'application/octet-stream'
+      })
+    )
+    payload.append('sourceImageName', String(record?.sourceName || record?.name || ''))
+    payload.append('annotations', JSON.stringify({ labels }))
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: externalCtx.token ? { Authorization: `Bearer${externalCtx.token}` } : {},
+      body: payload
+    })
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      throw new Error(errText || `sync failed: ${resp.status}`)
+    }
+    return true
+  }
+
+  const saveCurrentAnnotation = async () => {
+    if (!activeImage?.id) {
+      Message.warning('当前没有可保存的影像')
+      return
+    }
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+    const saved = await persistActiveDrawing()
+    if (!saved) return
+    try {
+      const synced = await syncActiveAnnotationToPlatform()
+      if (synced) {
+        Message.success('当前标注已保存并同步科研平台')
+      } else {
+        Message.success('当前标注状态已保存')
+      }
+    } catch (error) {
+      console.error(error)
+      Message.error('标注已本地保存，但同步科研平台失败')
+    }
   }
 
   const onViewerEvent = (reason = 'draw') => {
@@ -941,6 +1281,37 @@ export default function App() {
       maskVersion: hasAttachedMask(record) ? 1 : 0
     })
   }
+
+  useEffect(() => {
+    const host = viewerHostRef.current
+    if (!host) return
+
+    const onWheelSwitchSeries = (event) => {
+      if (viewerMode !== 'dicom') return
+      if (activeImage?.sourceFormat !== 'dicom') return
+      if (activeDicomSeries.length <= 1) return
+      const now = Date.now()
+      if (now - dicomWheelSwitchAtRef.current < 180) {
+        event.preventDefault()
+        return
+      }
+      const currentIndex = activeDicomSeries.findIndex((item) => item.id === activeImage.id)
+      if (currentIndex < 0) return
+
+      event.preventDefault()
+      const direction = event.deltaY > 0 ? 1 : -1
+      const nextIndex = (currentIndex + direction + activeDicomSeries.length) % activeDicomSeries.length
+      const next = activeDicomSeries[nextIndex]
+      if (!next || next.id === activeImage.id) return
+      dicomWheelSwitchAtRef.current = now
+      selectImage(next.id)
+    }
+
+    host.addEventListener('wheel', onWheelSwitchSeries, { passive: false })
+    return () => {
+      host.removeEventListener('wheel', onWheelSwitchSeries)
+    }
+  }, [viewerMode, activeImage?.id, activeImage?.sourceFormat, activeDicomSeries])
 
   const removeImage = async (id) => {
     const nextImages = images.filter((img) => img.id !== id)
@@ -1012,7 +1383,16 @@ export default function App() {
       importBatchId = null,
       sourceName = null,
       sourceData = null,
-      modifiedByUser = false
+      modifiedByUser = false,
+      sourceFormat = 'nifti',
+      dicomSourceCount = 0,
+      dicomStudyUID = '',
+      dicomStudyID = '',
+      dicomSeriesUID = '',
+      dicomSeriesDescription = '',
+      dicomSeriesNumber = 0,
+      dicomSeriesOrder = 0,
+      dicomAccessionNumber = ''
     } = {}
   ) => {
     const baseName = normalizeBaseName(name)
@@ -1034,6 +1414,15 @@ export default function App() {
       sourceName,
       sourceData,
       modifiedByUser,
+      sourceFormat,
+      dicomSourceCount,
+      dicomStudyUID,
+      dicomStudyID,
+      dicomSeriesUID,
+      dicomSeriesDescription,
+      dicomSeriesNumber,
+      dicomSeriesOrder,
+      dicomAccessionNumber,
       sourceMask: finalSourceMask,
       sourceMaskName: finalSourceMaskName,
       mask: maskBuffer,
@@ -1094,7 +1483,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   })
 }
 
-const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
+  const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
   const source = arrayBufferFrom(maskBuffer)
   if (!source || !isNiftiBuffer(source)) return source
   try {
@@ -1107,8 +1496,80 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
 
   const isDuplicateHash = (hash, hashSet) => hashSet.has(hash)
 
+  const importDicomItems = async (items, hashSet, importBatchId = null) => {
+    if (!Array.isArray(items) || items.length === 0) return
+    try {
+      const groupedSeries = groupDicomInputsBySeries(items)
+      if (!groupedSeries.length) {
+        Message.warning('未识别到有效 DICOM 序列')
+        return
+      }
+
+      const newRecords = []
+      for (let groupIndex = 0; groupIndex < groupedSeries.length; groupIndex += 1) {
+        const group = groupedSeries[groupIndex]
+        const loadedFiles = await niivueDicomLoader(group.items.map((item) => ({ name: item.name, data: item.data })))
+        if (!loadedFiles.length) continue
+
+        for (const converted of loadedFiles) {
+          const content = converted?.data
+          const name = converted?.name || `dicom_${Date.now()}.nii`
+          if (!content || !isNiftiBuffer(content)) continue
+          const hash = await hashBuffer(content)
+          if (isDuplicateHash(hash, hashSet)) continue
+
+          const thumbnail = await createThumbnail(content, name)
+          const seriesNameParts = []
+          if (group.seriesNumber > 0) seriesNameParts.push(`S${group.seriesNumber}`)
+          if (group.seriesDescription) seriesNameParts.push(group.seriesDescription)
+          const seriesLabel = seriesNameParts.join(' ')
+          const record = createImageRecord(name, content, hash, thumbnail, {
+            displayName: seriesLabel || `${name} (DICOM)`,
+            sourceName: name,
+            sourceData: content,
+            sourceFormat: 'dicom',
+            dicomSourceCount: group.items.length,
+            dicomStudyUID: group.studyUID,
+            dicomStudyID: group.studyID,
+            dicomSeriesUID: group.seriesUID,
+            dicomSeriesDescription: group.seriesDescription,
+            dicomSeriesNumber: group.seriesNumber,
+            dicomSeriesOrder: groupIndex + 1,
+            dicomAccessionNumber: group.accessionNumber,
+            importBatchId,
+            modifiedByUser: false
+          })
+          newRecords.push(record)
+          hashSet.add(hash)
+        }
+      }
+
+      if (!newRecords.length) {
+        Message.warning('未从 DICOM 中解析出可用影像')
+        return
+      }
+
+      if (newRecords.length > 0) {
+        await saveImages(newRecords)
+        setImages((prev) => [...prev, ...newRecords.map(toListItem)])
+        if (!activeImage) {
+          const first = newRecords[0]
+          setActiveImage({ ...first, maskVersion: hasAttachedMask(first) ? 1 : 0 })
+          setViewerMode('dicom')
+        }
+      }
+    } catch (error) {
+      console.error('DICOM 导入失败', error)
+      Message.error('DICOM 导入失败，请确认文件完整并重试')
+    }
+  }
+
   const importImageFile = async (file, hashSet, importBatchId = null) => {
     const originalBuffer = await file.arrayBuffer()
+    if (isDicomFile(file.name) || isDicomContentBuffer(originalBuffer)) {
+      await importDicomItems([{ name: file.name || 'dicom_slice', data: originalBuffer }], hashSet, importBatchId)
+      return
+    }
     if (isImageFile(file.name)) {
       Message.warning('已移除 JPG/PNG 等原始图片导入，请先转换为 NIfTI(.nii/.nii.gz)')
       return
@@ -1157,12 +1618,21 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
 
     const imageEntries = []
     const maskEntries = []
+    const dicomEntries = []
+    const unknownEntries = []
     const unresolved = []
 
     for (const entry of Object.values(zip.files)) {
       if (entry.dir) continue
       const name = entry.name
-      if (!isSupportedImageFile(name)) continue
+      if (isDicomFile(name)) {
+        dicomEntries.push(entry)
+        continue
+      }
+      if (!isSupportedImageFile(name)) {
+        unknownEntries.push(entry)
+        continue
+      }
       const leaf = getLeafName(name)
       if (isMaskPath(name) || isMaskName(leaf)) {
         maskEntries.push(entry)
@@ -1173,6 +1643,22 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
         continue
       }
       unresolved.push(entry)
+    }
+
+    const dicomInputs = []
+    for (const entry of dicomEntries) {
+      const content = await entry.async('arraybuffer')
+      dicomInputs.push({ name: entry.name, data: content })
+    }
+    for (const entry of unknownEntries) {
+      const content = await entry.async('arraybuffer')
+      if (!isDicomContentBuffer(content)) continue
+      dicomInputs.push({ name: entry.name, data: content })
+    }
+    if (dicomInputs.length > 0) {
+      await importDicomItems(dicomInputs, hashSet, importBatchId)
+    } else if (imageEntries.length === 0 && maskEntries.length === 0) {
+      Message.warning('zip 内未识别到可导入的 NIfTI 或 DICOM 文件')
     }
 
     const unresolvedByBase = new Map()
@@ -1291,6 +1777,8 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     const existing = await getAllImages()
     const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean))
 
+    const regularFiles = []
+    const dicomInputs = []
     for (const item of fileList) {
       const originFile = item?.originFile
       if (!originFile) continue
@@ -1301,8 +1789,23 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
       if (isZipFile(originFile.name)) {
         await importZipFile(originFile, hashSet, importBatchId)
       } else {
-        await importImageFile(originFile, hashSet, importBatchId)
+        regularFiles.push(originFile)
       }
+    }
+
+    for (const file of regularFiles) {
+      if (isDicomFile(file.name) || hasDicomLikeName(file.name)) {
+        const buffer = await file.arrayBuffer()
+        if (isDicomContentBuffer(buffer)) {
+          dicomInputs.push({ name: file.name, data: buffer })
+          continue
+        }
+      }
+      await importImageFile(file, hashSet, importBatchId)
+    }
+
+    if (dicomInputs.length > 0) {
+      await importDicomItems(dicomInputs, hashSet, importBatchId)
     }
   }
 
@@ -1321,11 +1824,25 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     const existing = await getAllImages()
     const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean))
     const imageEntries = []
+    const dicomInputs = []
     for await (const [name, handle] of imageRootHandle.entries()) {
       if (handle.kind !== 'file') continue
       if (isMaskName(name)) continue
+      const file = await handle.getFile()
+      if (isDicomFile(name) || hasDicomLikeName(name)) {
+        const headerBuf = await file.slice(0, 512).arrayBuffer()
+        if (isDicomContentBuffer(headerBuf)) {
+          const content = await file.arrayBuffer()
+          dicomInputs.push({ name, data: content })
+          continue
+        }
+      }
       if (!isSupportedImageFile(name)) continue
       if (isSupportedImageFile(name)) imageEntries.push(handle)
+    }
+
+    if (dicomInputs.length > 0) {
+      await importDicomItems(dicomInputs, hashSet, importBatchId)
     }
 
     const masks = []
@@ -1642,195 +2159,306 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     }
   }
 
-  const toolsContent = (
-    <div className="floating-panel">
-      <div className="floating-title">Tools</div>
-      <div className="tool-icon-group">
-        <Tooltip content="Brush 画笔">
-          <Button
-            shape="circle"
-            type={tool === 'brush' ? 'primary' : 'secondary'}
-            icon={<IconBrush />}
-            onClick={() => setTool('brush')}
-          />
-        </Tooltip>
-        <Tooltip content="Eraser 橡皮擦">
-          <Button
-            shape="circle"
-            type={tool === 'eraser' ? 'primary' : 'secondary'}
-            icon={<IconEraser />}
-            onClick={() => setTool('eraser')}
-          />
-        </Tooltip>
-        <Tooltip content="Pan 拖动浏览">
-          <Button
-            shape="circle"
-            type={tool === 'pan' ? 'primary' : 'secondary'}
-            icon={<IconDragArrow />}
-            onClick={() => setTool('pan')}
-          />
-        </Tooltip>
-      </div>
-      <div className="tool-section">
-        <div className="tool-label">Brush Size</div>
-        <Slider min={1} max={30} value={brushSize} onChange={setBrushSize} />
-      </div>
-      <div className="tool-section">
-        <div className="tool-label">2D Orientation</div>
-        <Switch
-          checked={radiological2D}
-          checkedText="Radiological"
-          uncheckedText="Neurological"
-          onChange={setRadiological2D}
-        />
-      </div>
-      <div className="tool-icon-group">
-        <Tooltip content="Undo 撤销">
-          <Button shape="circle" icon={<IconUndo />} onClick={() => viewerRef.current?.undo()} />
-        </Tooltip>
-        <Tooltip content="Redo 重做">
-          <Button shape="circle" icon={<IconRedo />} onClick={() => viewerRef.current?.redo()} />
-        </Tooltip>
-        <Tooltip content="Clear 清空当前叠加标注">
-          <Button shape="circle" status="danger" icon={<IconDelete />} onClick={handleClear} />
-        </Tooltip>
-      </div>
+  const annotationMenuItems = [
+    { key: 'hu', name: 'HU', active: tool === 'hu', onClick: () => { setTool('hu'); setAnnotationMenuVisible(false) } },
+    { key: 'ellipse', name: '椭圆', active: tool === 'ellipse', onClick: () => { setTool('ellipse'); setAnnotationMenuVisible(false) } },
+    { key: 'rect', name: '矩形', active: tool === 'rect', onClick: () => { setTool('rect'); setAnnotationMenuVisible(false) } },
+    { key: 'angle', name: '角度', active: tool === 'angle', onClick: () => { setTool('angle'); setAnnotationMenuVisible(false) } },
+    { key: 'cobb', name: 'Cobb角', active: tool === 'cobb', onClick: () => { setTool('cobb'); setAnnotationMenuVisible(false) } },
+    { key: 'length', name: '长度', active: tool === 'length', onClick: () => { setTool('length'); setAnnotationMenuVisible(false) } },
+    { key: 'arrow', name: '箭头标注', active: tool === 'arrow', onClick: () => { setTool('arrow'); setAnnotationMenuVisible(false) } },
+    { key: 'text', name: '文字标注', active: tool === 'text', onClick: () => { setTool('text'); setAnnotationMenuVisible(false) } },
+    { key: 'ratio', name: '心胸比', active: tool === 'ratio', onClick: () => { setTool('ratio'); setAnnotationMenuVisible(false) } },
+    { key: 'curve', name: '样条曲线', active: tool === 'curve', onClick: () => { setTool('curve'); setAnnotationMenuVisible(false) } },
+    { key: 'dynamic', name: '动态轮廓', active: tool === 'dynamic', onClick: () => { setTool('dynamic'); setAnnotationMenuVisible(false) } },
+    {
+      key: 'freehand',
+      name: '自由曲线',
+      active: tool === 'freehand',
+      onClick: () => {
+        setTool('freehand')
+        setAnnotationMenuVisible(false)
+      }
+    },
+    { key: 'bidirectional', name: '双向', active: tool === 'bidirectional', onClick: () => { setTool('bidirectional'); setAnnotationMenuVisible(false) } },
+    {
+      key: 'undo',
+      name: '撤销',
+      onClick: () => {
+        const handled = viewerRef.current?.undoToolAction?.()
+        if (!handled) viewerRef.current?.undo?.()
+        setAnnotationMenuVisible(false)
+      }
+    },
+    {
+      key: 'clear',
+      name: '清除标注',
+      onClick: async () => {
+        if (annotationToolKeys.has(tool)) {
+          viewerRef.current?.clearAnnotations?.()
+        } else {
+          await handleClear()
+        }
+        setAnnotationMenuVisible(false)
+      }
+    }
+  ]
+
+  const renderAnnotationIcon = (key) => {
+    const iconProps = {
+      viewBox: '0 0 24 24',
+      fill: 'none',
+      stroke: 'currentColor',
+      strokeWidth: 1.8,
+      strokeLinecap: 'round',
+      strokeLinejoin: 'round',
+      className: 'annotation-menu-svg',
+      'aria-hidden': true
+    }
+    switch (key) {
+      case 'hu':
+        return (
+          <svg {...iconProps}>
+            <path d="M12 4v16M4 12h16" />
+            <circle cx="12" cy="12" r="7" />
+          </svg>
+        )
+      case 'ellipse':
+        return (
+          <svg {...iconProps}>
+            <ellipse cx="12" cy="12" rx="7" ry="4.8" />
+          </svg>
+        )
+      case 'rect':
+        return (
+          <svg {...iconProps}>
+            <rect x="5" y="6" width="14" height="12" rx="1.8" />
+          </svg>
+        )
+      case 'angle':
+        return (
+          <svg {...iconProps}>
+            <path d="M6 18V6M6 18h12" />
+            <path d="M10 14a4 4 0 0 0-4-4" />
+          </svg>
+        )
+      case 'cobb':
+        return (
+          <svg {...iconProps}>
+            <path d="M5 8l14-3" />
+            <path d="M5 16l14 3" />
+            <path d="M8 11a4.5 4.5 0 0 0 0 2" />
+          </svg>
+        )
+      case 'length':
+        return (
+          <svg {...iconProps}>
+            <path d="M6 17L18 7" />
+            <path d="M4 18h4M16 6h4" />
+          </svg>
+        )
+      case 'arrow':
+        return (
+          <svg {...iconProps}>
+            <path d="M6 17L18 7" />
+            <path d="M12 7h6v6" />
+          </svg>
+        )
+      case 'text':
+        return (
+          <svg {...iconProps}>
+            <path d="M6 7h12M12 7v10" />
+          </svg>
+        )
+      case 'ratio':
+        return (
+          <svg {...iconProps}>
+            <path d="M6 16c0-4 2-7 4-7s4 3 4 7" />
+            <path d="M10 16c0-3 1.4-5 3-5s3 2 3 5" />
+          </svg>
+        )
+      case 'curve':
+        return (
+          <svg {...iconProps}>
+            <path d="M4 16c4-10 8 10 16 0" />
+          </svg>
+        )
+      case 'dynamic':
+        return (
+          <svg {...iconProps}>
+            <path d="M4 16c2-4 6-4 8 0s6 4 8 0" />
+            <circle cx="6" cy="13.5" r="1.2" />
+            <circle cx="18" cy="13.5" r="1.2" />
+          </svg>
+        )
+      case 'freehand':
+        return (
+          <svg {...iconProps}>
+            <path d="M5 16c2-6 5-2 7-6 1.8-3.6 5 0 7-4" />
+          </svg>
+        )
+      case 'bidirectional':
+        return (
+          <svg {...iconProps}>
+            <path d="M5 12h14" />
+            <path d="M8 9l-3 3 3 3M16 9l3 3-3 3" />
+          </svg>
+        )
+      case 'undo':
+        return (
+          <svg {...iconProps}>
+            <path d="M9 8H5v4" />
+            <path d="M5 12a7 7 0 1 0 2-5" />
+          </svg>
+        )
+      case 'clear':
+        return (
+          <svg {...iconProps}>
+            <path d="M5 14l5-6h9l-5 8H7z" />
+            <path d="M13 11l3 3" />
+          </svg>
+        )
+      default:
+        return (
+          <svg {...iconProps}>
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        )
+    }
+  }
+
+  const annotationToolsMenuContent = (
+    <div className="annotation-menu">
+      {annotationMenuItems.map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          className={`annotation-menu-item${item.active ? ' active' : ''}${item.disabled ? ' disabled' : ''}`}
+          onClick={item.onClick}
+          disabled={item.disabled}
+        >
+          <span className="annotation-menu-icon">{renderAnnotationIcon(item.key)}</span>
+          <span className="annotation-menu-name">{item.name}</span>
+        </button>
+      ))}
     </div>
   )
 
-  const labelsContent = (
-    <div className="floating-panel">
-      <div className="floating-title">Labels</div>
-      <div className="label-create">
-        <Input
-          size="small"
-          placeholder="新标签名称"
-          value={newLabelName}
-          onChange={setNewLabelName}
-          onPressEnter={addLabel}
-        />
-        <Button size="small" icon={<IconPlus />} onClick={addLabel}>
-          添加
-        </Button>
-      </div>
-      <Radio.Group className="label-list" direction="vertical" value={activeLabelId} onChange={setActiveLabelId}>
-        {labels.map((label) => (
-          <Radio key={label.id} value={label.id}>
-            <span className="label-item">
-              <span className="label-left">
-                <span className="label-color" style={{ background: label.color }} />
-                {label.name}
-                <span className="label-stat">({labelStats[label.value] || 0})</span>
-              </span>
-              <span className="label-right-actions">
-                <Tooltip content="定位到该 Label 标注区域">
-                  <Button
-                    size="mini"
-                    type="text"
-                    icon={<IconSearch />}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      locateLabel(label.value)
-                    }}
-                  />
-                </Tooltip>
-                <Button
-                  size="mini"
-                  type="text"
-                  className="label-delete"
-                  icon={<IconDelete />}
-                  disabled={labels.length <= 1}
-                  onClick={(event) => {
-                    event.stopPropagation()
-                    removeLabel(label.id)
-                  }}
-                />
-              </span>
-            </span>
-          </Radio>
-        ))}
-      </Radio.Group>
+  const exportMenuContent = (
+    <div className="export-menu">
+      <Button type="text" className="export-menu-item" onClick={exportAll}>
+        导出当前标注
+      </Button>
     </div>
   )
 
   return (
     <Layout className="app">
       <Header className="topbar">
-        <div className="brand">Nii Annotation</div>
+        <div className="brand">影像标注平台</div>
         <Space className="topbar-actions">
-          <Tooltip content="导入文件夹">
-            <Button icon={<IconFolder />} onClick={importFolder} disabled={!window.showDirectoryPicker}>
-              导入文件夹
+          <div className="annotation-tools-wrap" ref={annotationToolsRef}>
+            <Button icon={<IconTool />} onClick={() => setAnnotationMenuVisible((prev) => !prev)}>
+              标注工具
             </Button>
-          </Tooltip>
-          <Upload
-            accept=".nii,.nii.gz,.zip"
-            showUploadList={false}
-            autoUpload={false}
-            multiple
-            onChange={handleUploadChange}
-          >
-            <Button icon={<IconUpload />}>导入影像</Button>
-          </Upload>
-          <Button type="primary" onClick={exportAll}>
-            导出
-          </Button>
+            {annotationMenuVisible && <div className="annotation-tools-dropdown">{annotationToolsMenuContent}</div>}
+          </div>
+          <Button onClick={saveCurrentAnnotation}>保存</Button>
+          <Popover trigger="click" position="bl" content={exportMenuContent}>
+            <Button type="primary">导出</Button>
+          </Popover>
         </Space>
       </Header>
 
       <Layout className="layout">
-        <Sider className="sidebar" width={320}>
-          <Card size="small" title="影像列表">
-            {images.length === 0 ? (
-              <div className="sidebar-empty">暂无影像，请导入 .nii/.nii.gz 或 .zip（含 NIfTI）</div>
-            ) : (
-              <div className="image-grid">
-                {images.map((img) => (
-                  <div
-                    key={img.id}
-                    className={`image-card${activeImage?.id === img.id ? ' active' : ''}`}
-                    onClick={() => selectImage(img.id)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="image-thumb">
-                      {img.thumbnail ? (
-                        <img src={img.thumbnail} alt={img.displayName || img.name} />
-                      ) : (
-                        <div className="image-thumb-fallback">NII</div>
-                      )}
-                      {img.hasMask && (
-                        <span
-                          className={`image-badge${img.maskAttached ? ' attached' : ' detached'}`}
-                          onClick={(event) => toggleMaskOverlay(img.id, event)}
-                          role="button"
-                          tabIndex={0}
-                        >
-                          MASK
+        <Sider className={`study-sidebar${showImageSidebar ? '' : ' collapsed'}`} width={showImageSidebar ? 300 : 40}>
+          <div className="study-sidebar-inner">
+            <div className="study-rail">
+              <button type="button" className="study-rail-btn" onClick={() => setShowImageSidebar((prev) => !prev)}>
+                ☰
+              </button>
+            </div>
+            {showImageSidebar && (
+              <div className="study-main">
+                <div className="study-main-header">{activeImage?.displayName || activeImage?.name || '影像列表'}</div>
+                <div className="study-main-sub">
+                  {activeImageIndex >= 0 ? `${activeImageIndex + 1}` : 0} / {images.length || 0}
+                </div>
+              {images.length === 0 ? (
+                  <div className="sidebar-empty">暂无影像，请从科研平台进入并传入待标注影像</div>
+              ) : (
+                  <div className="study-list">
+                  {images.map((img) => (
+                    <div
+                      key={img.id}
+                      className={`study-item${activeImage?.id === img.id ? ' active' : ''}`}
+                      onClick={() => selectImage(img.id)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="study-thumb">
+                        {img.sourceFormat === 'dicom' && <span className="image-format-badge">DICOM</span>}
+                        {img.thumbnail ? (
+                          <img src={img.thumbnail} alt={img.displayName || img.name} />
+                        ) : (
+                          <div className="image-thumb-fallback">NII</div>
+                        )}
+                        {img.hasMask && (
+                          <span
+                            className={`image-badge${img.maskAttached ? ' attached' : ' detached'}`}
+                            onClick={(event) => toggleMaskOverlay(img.id, event)}
+                            role="button"
+                            tabIndex={0}
+                          >
+                            MASK
+                          </span>
+                        )}
+                      </div>
+                      <div className="study-meta">
+                        <span className="study-name">{img.displayName || img.name}</span>
+                        <span className="study-desc">
+                          {img.sourceFormat === 'dicom' ? 'MR/DICOM' : 'NIfTI'} {img.hasMask ? '· 标注' : '· 未标注'}
                         </span>
-                      )}
+                        <Button
+                          size="mini"
+                          type="text"
+                          icon={<IconDelete />}
+                          className="image-delete"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            removeImage(img.id)
+                          }}
+                        />
+                      </div>
                     </div>
-                    <div className="image-meta">
-                      <span className="image-name">{img.displayName || img.name}</span>
-                      <Button
-                        size="mini"
-                        type="text"
-                        icon={<IconDelete />}
-                        className="image-delete"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          removeImage(img.id)
-                        }}
-                      />
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
+              )}
               </div>
             )}
-          </Card>
+          </div>
         </Sider>
 
-        <Content className="viewer">
+        <Content className="viewer" ref={viewerHostRef}>
+          {activeImage?.sourceFormat === 'dicom' && (
+            <div className="dicom-mode-toggle">
+              <Button
+                size="small"
+                type={viewerMode === 'dicom' ? 'primary' : 'secondary'}
+                onClick={() => setViewerMode((prev) => (prev === 'dicom' ? 'default' : 'dicom'))}
+              >
+                {viewerMode === 'dicom' ? 'DICOM 专用视口' : '切换 DICOM 专用视口'}
+              </Button>
+              {viewerMode === 'dicom' && activeDicomSeries.length > 0 && (
+                <div className="dicom-series-indicator">
+                  <div>
+                    序列 {Math.max(1, activeDicomSeriesIndex + 1)}/{activeDicomSeries.length}
+                  </div>
+                  <div>{activeImage?.dicomSeriesDescription || activeImage?.displayName || activeImage?.name}</div>
+                </div>
+              )}
+            </div>
+          )}
           <Viewer
             ref={viewerRef}
             image={activeImage}
@@ -1838,22 +2466,104 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
             brushSize={brushSize}
             activeLabelValue={activeLabel?.value || 1}
             labels={labels}
-            radiological2D={radiological2D}
+            radiological2D={viewerMode === 'dicom' ? true : radiological2D}
             onDrawingChange={onViewerEvent}
           />
-          <div className="quick-actions">
-            <Popover trigger="click" position="left" content={toolsContent}>
-              <Tooltip content="打开工具菜单">
-                <Button className="quick-btn" shape="circle" type="primary" icon={<IconTool />} />
-              </Tooltip>
-            </Popover>
-            <Popover trigger="click" position="left" content={labelsContent}>
-              <Tooltip content="打开标签菜单">
-                <Button className="quick-btn" shape="circle" type="primary" icon={<IconTags />} />
-              </Tooltip>
-            </Popover>
-          </div>
         </Content>
+
+        <Sider className="label-sidebar" width={360}>
+          <div className="label-side-head">
+            <div className="label-side-title">标注项</div>
+            <div className="label-side-stat">标注统计：{Object.values(labelStats).reduce((sum, v) => sum + Number(v || 0), 0)}</div>
+          </div>
+          <div className="label-side-create">
+            <Input
+              size="small"
+              placeholder="输入标签名（如：病灶1）"
+              value={newLabelName}
+              onChange={setNewLabelName}
+              onPressEnter={addLabel}
+            />
+            <Button size="small" icon={<IconPlus />} onClick={addLabel}>
+              新建
+            </Button>
+          </div>
+          <div className="label-side-list">
+            {labels.map((label) => (
+              <div
+                key={label.id}
+                className={`label-side-item${activeLabelId === label.id ? ' active' : ''}`}
+                onClick={() => setActiveLabelId(label.id)}
+                role="button"
+                tabIndex={0}
+              >
+                <div className="label-side-row">
+                  <button
+                    type="button"
+                    className="label-color label-color-trigger"
+                    style={{ background: label.color }}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setColorPickerLabelId((prev) => (prev === label.id ? null : label.id))
+                    }}
+                    aria-label="选择标签颜色"
+                  />
+                  <Input
+                    size="small"
+                    className="label-name-input"
+                    value={label.name}
+                    onChange={(value) => renameLabel(label.id, value)}
+                    onClick={(event) => event.stopPropagation()}
+                  />
+                  <span className="label-side-count">{labelStats[label.value] || 0}</span>
+                </div>
+                {colorPickerLabelId === label.id && (
+                  <div className="label-color-flyout" onClick={(event) => event.stopPropagation()}>
+                    <div className="label-color-palette">
+                      {labelPalette.map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          className={`label-color-option${label.color === color ? ' active' : ''}`}
+                          style={{ background: color }}
+                          onClick={() => {
+                            setLabelColor(label.id, color)
+                            setColorPickerLabelId(null)
+                          }}
+                          aria-label={`设置颜色 ${color}`}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="label-side-actions">
+                  <Tooltip content="定位到该 Label 标注区域">
+                    <Button
+                      size="mini"
+                      type="text"
+                      icon={<IconSearch />}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        locateLabel(label.value)
+                      }}
+                    />
+                  </Tooltip>
+                  <Button
+                    size="mini"
+                    type="text"
+                    className="label-delete"
+                    icon={<IconDelete />}
+                    disabled={labels.length <= 1}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      removeLabel(label.id)
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </Sider>
       </Layout>
     </Layout>
   )

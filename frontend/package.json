@@ -10,7 +10,9 @@
   },
   "dependencies": {
     "@arco-design/web-react": "^2.57.3",
+    "@niivue/dicom-loader": "^1.0.0",
     "@niivue/niivue": "^0.68.1",
+    "dicom-parser": "^1.8.21",
     "jszip": "^3.10.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
