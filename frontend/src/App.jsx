@@ -571,9 +571,25 @@ const arrayBufferFrom = (data) => {
 }
 
 const hashBuffer = async (buffer) => {
-  const digest = await crypto.subtle.digest('SHA-256', buffer)
-  const bytes = Array.from(new Uint8Array(digest))
-  return bytes.map((b) => b.toString(16).padStart(2, '0')).join('')
+  const subtle = globalThis?.crypto?.subtle
+  if (subtle && typeof subtle.digest === 'function') {
+    const digest = await subtle.digest('SHA-256', buffer)
+    const bytes = Array.from(new Uint8Array(digest))
+    return bytes.map((b) => b.toString(16).padStart(2, '0')).join('')
+  }
+  // Fallback for non-secure contexts where crypto.subtle is unavailable.
+  const bytes = new Uint8Array(buffer)
+  let h1 = 0x811c9dc5
+  let h2 = 0x811c9dc5
+  for (let i = 0; i < bytes.length; i += 1) {
+    const b = bytes[i]
+    h1 ^= b
+    h1 = Math.imul(h1, 0x01000193) >>> 0
+    h2 ^= bytes[bytes.length - 1 - i]
+    h2 = Math.imul(h2, 0x01000193) >>> 0
+  }
+  const sizeHex = (bytes.length >>> 0).toString(16).padStart(8, '0')
+  return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}${sizeHex}`
 }
 
 const hasNonZeroMaskNifti = (maskData) => {
