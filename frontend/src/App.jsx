@@ -890,6 +890,13 @@ const parseFileNameFromDisposition = (contentDisposition) => {
   return plainMatch?.[1] || ''
 }
 
+const buildAuthHeaders = (token) => {
+  const raw = String(token || '').trim()
+  if (!raw) return {}
+  const authValue = /^Bearer\s+/i.test(raw) ? raw : `Bearer ${raw}`
+  return { Authorization: authValue }
+}
+
 export default function App() {
   const [labels, setLabels] = useState([
     { id: 1, name: 'Label 1', color: DEFAULT_LABEL_COLOR, value: 1 }
@@ -1078,7 +1085,7 @@ export default function App() {
         ? externalCtx.imageUrl
         : `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?imageId=${encodeURIComponent(externalCtx.imageId)}`
       const resp = await fetch(url, {
-        headers: externalCtx.token ? { Authorization: `Bearer${externalCtx.token}` } : {}
+        headers: buildAuthHeaders(externalCtx.token)
       })
       if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
 
@@ -1217,7 +1224,7 @@ export default function App() {
 
     const resp = await fetch(endpoint, {
       method: 'POST',
-      headers: externalCtx.token ? { Authorization: `Bearer${externalCtx.token}` } : {},
+      headers: buildAuthHeaders(externalCtx.token),
       body: payload
     })
     if (!resp.ok) {
