@@ -2370,7 +2370,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
         </Space>
       </Header>
 
-      <Layout className="layout">
+      <Layout className="layout arco-layout-has-sider">
         <Sider className={`study-sidebar${showImageSidebar ? '' : ' collapsed'}`} width={showImageSidebar ? 300 : 40}>
           <div className="study-sidebar-inner">
             <div className="study-rail">

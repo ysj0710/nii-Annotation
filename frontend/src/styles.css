@@ -307,7 +307,13 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   font-size: 11px;
 }
 
-.layout { flex: 1; min-height: 0; overflow: hidden; }
+.layout {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: row;
+}
 .sidebar { border-right: 1px solid #e5e7eb; padding: 16px; background: #fafafa; overflow: hidden; }
 .viewer {
   position: relative;
