@@ -20,6 +20,28 @@ const ANNOTATION_TOOLS = new Set([
 ])
 
 const isAnnotationTool = (tool) => ANNOTATION_TOOLS.has(tool)
+const toArrayBuffer = (data) => {
+  if (!data) return null
+  if (data instanceof ArrayBuffer) return data
+  if (ArrayBuffer.isView(data)) {
+    const view = data
+    return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength)
+  }
+  return null
+}
+
+const shouldResetWindow = (volume) => {
+  const calMin = Number(volume?.cal_min)
+  const calMax = Number(volume?.cal_max)
+  const robustMin = Number(volume?.robust_min)
+  const robustMax = Number(volume?.robust_max)
+  if (!Number.isFinite(robustMin) || !Number.isFinite(robustMax) || robustMax <= robustMin) return false
+  if (!Number.isFinite(calMin) || !Number.isFinite(calMax) || calMax <= calMin) return true
+  const calSpan = calMax - calMin
+  const robustSpan = robustMax - robustMin
+  return calSpan <= Math.max(1e-6, robustSpan * 1e-3)
+}
+
 const formatNumber = (value, digits = 1) => {
   const num = Number(value)
   if (!Number.isFinite(num)) return '--'
@@ -805,6 +827,11 @@ const Viewer = forwardRef(function Viewer(
 
     let cancelled = false
     const load = async () => {
+      const imageBuffer = toArrayBuffer(image.data)
+      if (!imageBuffer) {
+        console.error('Viewer 无法识别影像数据类型，跳过渲染', image?.id)
+        return
+      }
       if (nv.volumes?.length) {
         const existing = [...nv.volumes]
         existing.forEach((vol) => nv.removeVolume(vol))
@@ -814,8 +841,19 @@ const Viewer = forwardRef(function Viewer(
       }
 
       historyRef.current = { stack: [], index: -1 }
-      await nv.loadFromArrayBuffer(image.data, image.name)
+      await nv.loadFromArrayBuffer(imageBuffer, image.name)
       if (cancelled) return
+
+      const baseVolume = nv.volumes?.[0]
+      if (baseVolume && !image.isMaskOnly && shouldResetWindow(baseVolume)) {
+        baseVolume.cal_min = Number(baseVolume.robust_min)
+        baseVolume.cal_max = Number(baseVolume.robust_max)
+        if (typeof nv.updateGLVolume === 'function') {
+          nv.updateGLVolume()
+        } else if (typeof nv.drawScene === 'function') {
+          nv.drawScene()
+        }
+      }
 
       const dims = nv.back?.dims
       const hdr = nv.volumes?.[0]?.hdr
@@ -842,9 +880,16 @@ const Viewer = forwardRef(function Viewer(
 
       if (!image.isMaskOnly && image.mask && image.maskAttached !== false) {
         const maskName = image.maskName || image.name
-        const maskVolume = await NVImage.loadFromUrl({ url: image.mask, name: maskName })
-        if (cancelled) return
-        nv.loadDrawing(maskVolume)
+        const maskBuffer = toArrayBuffer(image.mask)
+        if (maskBuffer) {
+          const maskVolume = await NVImage.loadFromUrl({
+            url: maskName,
+            name: maskName,
+            buffer: maskBuffer
+          })
+          if (cancelled) return
+          nv.loadDrawing(maskVolume)
+        }
       } else if (typeof nv.closeDrawing === 'function') {
         nv.closeDrawing()
       }
