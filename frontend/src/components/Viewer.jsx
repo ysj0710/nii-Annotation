@@ -854,6 +854,15 @@ const Viewer = forwardRef(function Viewer(
         console.error('Viewer 无法识别影像数据类型，跳过渲染', image?.id)
         return
       }
+
+      const nextVolume = await NVImage.loadFromUrl({
+        url: image.name,
+        name: image.name,
+        buffer: imageBuffer
+      })
+      if (cancelled) return
+
+      historyRef.current = { stack: [], index: -1 }
       if (nv.volumes?.length) {
         const existing = [...nv.volumes]
         existing.forEach((vol) => nv.removeVolume(vol))
@@ -861,9 +870,7 @@ const Viewer = forwardRef(function Viewer(
       if (typeof nv.closeDrawing === 'function') {
         nv.closeDrawing()
       }
-
-      historyRef.current = { stack: [], index: -1 }
-      await nv.loadFromArrayBuffer(imageBuffer, image.name)
+      nv.addVolume(nextVolume)
       if (cancelled) return
 
       if (typeof nv.setInterpolation === 'function') {
