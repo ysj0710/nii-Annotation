@@ -1023,6 +1023,8 @@ export default function App() {
   const initializedRef = useRef(false)
   const queueNavIndexRef = useRef(-1)
   const hasUnsavedChangesRef = useRef(false)
+  const activeImageIdRef = useRef('')
+  const queueSwitchingRef = useRef(false)
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {}
@@ -1159,6 +1161,10 @@ export default function App() {
     hasUnsavedChangesRef.current = false
   }, [activeImage?.id])
 
+  useEffect(() => {
+    activeImageIdRef.current = String(activeImage?.id || '')
+  }, [activeImage?.id])
+
   const scheduleLabelStatsRefresh = () => {
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current)
     statsTimerRef.current = setTimeout(() => {
@@ -1241,7 +1247,21 @@ export default function App() {
     }
     const sorted = records.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
     setImages(sorted.map(toListItem))
-    if (!activeImage && sorted.length > 0) {
+    const activeId = String(activeImageIdRef.current || '')
+    if (activeId) {
+      const matched = sorted.find((item) => String(item.id) === activeId)
+      if (matched) {
+        setActiveImage((prev) => {
+          if (String(prev?.id || '') !== activeId) return prev
+          return {
+            ...matched,
+            maskVersion: prev?.maskVersion || (hasAttachedMask(matched) ? 1 : 0)
+          }
+        })
+        return
+      }
+    }
+    if (sorted.length > 0) {
       const scoped = currentBatchId
         ? sorted.filter((item) => String(item.remoteBatchId || '') === String(currentBatchId))
         : sorted
@@ -1778,6 +1798,8 @@ export default function App() {
 
   const switchQueueImage = async (direction = 1) => {
     if (!queueImages.length) return
+    if (queueSwitchingRef.current) return
+    queueSwitchingRef.current = true
     const baseIndex =
       activeQueueIndex >= 0
         ? activeQueueIndex
@@ -1789,10 +1811,17 @@ export default function App() {
           )
     const targetIndex = (baseIndex + direction + queueImages.length) % queueImages.length
     const target = queueImages[targetIndex]
-    if (!target) return
+    if (!target) {
+      queueSwitchingRef.current = false
+      return
+    }
     queueNavIndexRef.current = targetIndex
-    const ok = await ensureQueueImageLoaded(target)
-    if (!ok) Message.error('切换影像失败，请检查批次数据与下载接口')
+    try {
+      const ok = await ensureQueueImageLoaded(target)
+      if (!ok) Message.error('切换影像失败，请检查批次数据与下载接口')
+    } finally {
+      queueSwitchingRef.current = false
+    }
   }
 
   useEffect(() => {
