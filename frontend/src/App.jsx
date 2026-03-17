@@ -1182,6 +1182,7 @@ export default function App() {
     imageUrl = externalCtx.imageUrl,
     originalName = externalCtx.originalName,
     remoteBatchId = externalCtx.batchId,
+    topicId = externalCtx.topicId,
     useAutoGuard = true
   } = {}) => {
     if (useAutoGuard && autoImportedRef.current) return null
@@ -1194,7 +1195,13 @@ export default function App() {
       const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
       const url = hasDirectImageUrl
         ? imageUrl
-        : `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?imageId=${encodeURIComponent(imageId)}`
+        : (() => {
+            const params = new URLSearchParams()
+            params.set('imageId', String(imageId))
+            if (remoteBatchId) params.set('batchId', String(remoteBatchId))
+            if (topicId) params.set('topicId', String(topicId))
+            return `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?${params.toString()}`
+          })()
       const resp = await fetch(url, {
         headers: buildAuthHeaders(externalCtx.token)
       })
@@ -1277,8 +1284,10 @@ export default function App() {
     }
     const imported = await fetchAndImportByImageId({
       imageId: remoteImageId,
+      imageUrl: queueItem?.imageUrl || queueItem?.downloadUrl || '',
       originalName: queueItem?.sourceImageName || queueItem?.fileName || `image-${remoteImageId}.nii.gz`,
       remoteBatchId: batchQueue?.batchId || externalCtx.batchId,
+      topicId: externalCtx.topicId,
       useAutoGuard: false
     })
     if (!imported?.id) return false
