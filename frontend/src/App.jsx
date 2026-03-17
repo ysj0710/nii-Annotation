@@ -21,7 +21,7 @@ import dicomParser from 'dicom-parser'
 import { dicomLoader as niivueDicomLoader } from '@niivue/dicom-loader'
 import { Niivue } from '@niivue/niivue'
 import Viewer from './components/Viewer.jsx'
-import { getAllImages, getImageById, saveImages, updateImage, deleteImage } from './utils/imageStore.js'
+import { getAllImages, getImageById, saveImages, updateImage, deleteImage, clearAllImages } from './utils/imageStore.js'
 
 const { Header, Sider, Content } = Layout
 
@@ -912,6 +912,7 @@ const toListItem = (record) => ({
   dicomAccessionNumber: record.dicomAccessionNumber || '',
   remoteImageId: record.remoteImageId ? String(record.remoteImageId) : '',
   remoteBatchId: record.remoteBatchId ? String(record.remoteBatchId) : '',
+  isMaskOnly: !!record.isMaskOnly,
   hasMask: !!(record.sourceMask || record.mask),
   maskAttached: record.maskAttached !== false,
   thumbnail: record.thumbnail || ''
@@ -977,6 +978,7 @@ export default function App() {
   const statsTimerRef = useRef(null)
   const dicomWheelSwitchAtRef = useRef(0)
   const autoImportedRef = useRef(false)
+  const initializedRef = useRef(false)
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {}
@@ -1038,7 +1040,7 @@ export default function App() {
   const currentBatchId = String(batchQueue?.batchId || externalCtx.batchId || '')
   const isBatchMode = !!currentBatchId
   const displayImages = useMemo(() => {
-    if (!isBatchMode) return images
+    if (!isBatchMode) return images.filter((img) => !img.isMaskOnly)
     if (queueImages.length > 0) {
       return queueImages.map((item) => {
         const remoteId = String(item?.imageId || '')
@@ -1059,7 +1061,7 @@ export default function App() {
         }
       })
     }
-    return images.filter((img) => String(img.remoteBatchId || '') === currentBatchId)
+    return images.filter((img) => !img.isMaskOnly && String(img.remoteBatchId || '') === currentBatchId)
   }, [isBatchMode, queueImages, images, currentBatchId])
   const displayActiveIndex = useMemo(() => {
     if (queueImages.length > 0) return activeQueueIndex
@@ -1304,6 +1306,13 @@ export default function App() {
 
   useEffect(() => {
     ;(async () => {
+      if (initializedRef.current) return
+      initializedRef.current = true
+      if (externalCtx.batchId) {
+        await clearAllImages()
+        setImages([])
+        setActiveImage(null)
+      }
       await refreshImageList()
       if (externalCtx.batchId) {
         try {
@@ -2442,28 +2451,30 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
     }
   }
 
+  const toggleAnnotationTool = (nextTool) => {
+    setTool((prev) => (prev === nextTool ? 'pan' : nextTool))
+    setAnnotationMenuVisible(false)
+  }
+
   const annotationMenuItems = [
-    { key: 'hu', name: 'HU', active: tool === 'hu', onClick: () => { setTool('hu'); setAnnotationMenuVisible(false) } },
-    { key: 'ellipse', name: '椭圆', active: tool === 'ellipse', onClick: () => { setTool('ellipse'); setAnnotationMenuVisible(false) } },
-    { key: 'rect', name: '矩形', active: tool === 'rect', onClick: () => { setTool('rect'); setAnnotationMenuVisible(false) } },
-    { key: 'angle', name: '角度', active: tool === 'angle', onClick: () => { setTool('angle'); setAnnotationMenuVisible(false) } },
-    { key: 'cobb', name: 'Cobb角', active: tool === 'cobb', onClick: () => { setTool('cobb'); setAnnotationMenuVisible(false) } },
-    { key: 'length', name: '长度', active: tool === 'length', onClick: () => { setTool('length'); setAnnotationMenuVisible(false) } },
-    { key: 'arrow', name: '箭头标注', active: tool === 'arrow', onClick: () => { setTool('arrow'); setAnnotationMenuVisible(false) } },
-    { key: 'text', name: '文字标注', active: tool === 'text', onClick: () => { setTool('text'); setAnnotationMenuVisible(false) } },
-    { key: 'ratio', name: '心胸比', active: tool === 'ratio', onClick: () => { setTool('ratio'); setAnnotationMenuVisible(false) } },
-    { key: 'curve', name: '样条曲线', active: tool === 'curve', onClick: () => { setTool('curve'); setAnnotationMenuVisible(false) } },
-    { key: 'dynamic', name: '动态轮廓', active: tool === 'dynamic', onClick: () => { setTool('dynamic'); setAnnotationMenuVisible(false) } },
+    { key: 'hu', name: 'HU', active: tool === 'hu', onClick: () => toggleAnnotationTool('hu') },
+    { key: 'ellipse', name: '椭圆', active: tool === 'ellipse', onClick: () => toggleAnnotationTool('ellipse') },
+    { key: 'rect', name: '矩形', active: tool === 'rect', onClick: () => toggleAnnotationTool('rect') },
+    { key: 'angle', name: '角度', active: tool === 'angle', onClick: () => toggleAnnotationTool('angle') },
+    { key: 'cobb', name: 'Cobb角', active: tool === 'cobb', onClick: () => toggleAnnotationTool('cobb') },
+    { key: 'length', name: '长度', active: tool === 'length', onClick: () => toggleAnnotationTool('length') },
+    { key: 'arrow', name: '箭头标注', active: tool === 'arrow', onClick: () => toggleAnnotationTool('arrow') },
+    { key: 'text', name: '文字标注', active: tool === 'text', onClick: () => toggleAnnotationTool('text') },
+    { key: 'ratio', name: '心胸比', active: tool === 'ratio', onClick: () => toggleAnnotationTool('ratio') },
+    { key: 'curve', name: '样条曲线', active: tool === 'curve', onClick: () => toggleAnnotationTool('curve') },
+    { key: 'dynamic', name: '动态轮廓', active: tool === 'dynamic', onClick: () => toggleAnnotationTool('dynamic') },
     {
       key: 'freehand',
       name: '自由曲线',
       active: tool === 'freehand',
-      onClick: () => {
-        setTool('freehand')
-        setAnnotationMenuVisible(false)
-      }
+      onClick: () => toggleAnnotationTool('freehand')
     },
-    { key: 'bidirectional', name: '双向', active: tool === 'bidirectional', onClick: () => { setTool('bidirectional'); setAnnotationMenuVisible(false) } },
+    { key: 'bidirectional', name: '双向', active: tool === 'bidirectional', onClick: () => toggleAnnotationTool('bidirectional') },
     {
       key: 'undo',
       name: '撤销',
@@ -2641,7 +2652,17 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
         <div className="brand">影像标注平台</div>
         <Space className="topbar-actions">
           <div className="annotation-tools-wrap" ref={annotationToolsRef}>
-            <Button icon={<IconTool />} onClick={() => setAnnotationMenuVisible((prev) => !prev)}>
+            <Button
+              icon={<IconTool />}
+              onClick={() => {
+                setAnnotationMenuVisible((prev) => {
+                  if (prev && tool !== 'pan') {
+                    setTool('pan')
+                  }
+                  return !prev
+                })
+              }}
+            >
               标注工具
             </Button>
             {annotationMenuVisible && <div className="annotation-tools-dropdown">{annotationToolsMenuContent}</div>}

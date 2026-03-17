@@ -74,3 +74,8 @@ export const deleteImage = async (id) =>
   withStore('readwrite', (store) => {
     store.delete(id)
   })
+
+export const clearAllImages = async () =>
+  withStore('readwrite', (store) => {
+    store.clear()
+  })
