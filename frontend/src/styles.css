@@ -228,6 +228,7 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 
 .study-main {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -249,6 +250,8 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 }
 
 .study-list {
+  flex: 1;
+  min-height: 0;
   padding: 8px;
   display: flex;
   flex-direction: column;

@@ -955,7 +955,7 @@ export default function App() {
   ])
   const [activeLabelId, setActiveLabelId] = useState(1)
   const [newLabelName, setNewLabelName] = useState('')
-  const [tool, setTool] = useState('brush')
+  const [tool, setTool] = useState('pan')
   const [brushSize, setBrushSize] = useState(6)
   const [radiological2D, setRadiological2D] = useState(true)
   const [labelStats, setLabelStats] = useState({})
@@ -1035,6 +1035,36 @@ export default function App() {
     if (!activeImage?.remoteImageId || queueImages.length === 0) return -1
     return queueImages.findIndex((item) => String(item.imageId) === String(activeImage.remoteImageId))
   }, [queueImages, activeImage?.remoteImageId])
+  const currentBatchId = String(batchQueue?.batchId || externalCtx.batchId || '')
+  const isBatchMode = !!currentBatchId
+  const displayImages = useMemo(() => {
+    if (!isBatchMode) return images
+    if (queueImages.length > 0) {
+      return queueImages.map((item) => {
+        const remoteId = String(item?.imageId || '')
+        const local = images.find((img) => String(img.remoteImageId || '') === remoteId)
+        if (local) return local
+        const displayName = String(item?.sourceImageName || item?.fileName || `image-${remoteId}`)
+        return {
+          id: `remote-${remoteId}`,
+          remoteImageId: remoteId,
+          remoteBatchId: currentBatchId,
+          name: displayName,
+          displayName,
+          sourceFormat: 'nifti',
+          thumbnail: '',
+          hasMask: String(item?.annotationStatus || '').toUpperCase() === 'ANNOTATED',
+          maskAttached: false,
+          _placeholder: true
+        }
+      })
+    }
+    return images.filter((img) => String(img.remoteBatchId || '') === currentBatchId)
+  }, [isBatchMode, queueImages, images, currentBatchId])
+  const displayActiveIndex = useMemo(() => {
+    if (queueImages.length > 0) return activeQueueIndex
+    return displayImages.findIndex((item) => item.id === activeImage?.id)
+  }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
 
   useEffect(() => {
     if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
@@ -1125,7 +1155,11 @@ export default function App() {
     const sorted = records.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
     setImages(sorted.map(toListItem))
     if (!activeImage && sorted.length > 0) {
-      const first = sorted[0]
+      const scoped = currentBatchId
+        ? sorted.filter((item) => String(item.remoteBatchId || '') === String(currentBatchId))
+        : sorted
+      const first = scoped[0]
+      if (!first) return
       setActiveImage({
         ...first,
         maskVersion: hasAttachedMask(first) ? 1 : 0
@@ -2612,7 +2646,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             </Button>
             {annotationMenuVisible && <div className="annotation-tools-dropdown">{annotationToolsMenuContent}</div>}
           </div>
-          {externalCtx.batchId && (
+          {(isBatchMode || queueImages.length > 0) && (
             <>
               <Button onClick={() => switchQueueImage(-1)} disabled={!queueImages.length}>
                 上一张
@@ -2644,17 +2678,34 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
               <div className="study-main">
                 <div className="study-main-header">{activeImage?.displayName || activeImage?.name || '影像列表'}</div>
                 <div className="study-main-sub">
-                  {activeImageIndex >= 0 ? `${activeImageIndex + 1}` : 0} / {images.length || 0}
+                  {displayActiveIndex >= 0 ? `${displayActiveIndex + 1}` : 0} / {displayImages.length || 0}
                 </div>
-              {images.length === 0 ? (
+              {displayImages.length === 0 ? (
                   <div className="sidebar-empty">暂无影像，请从科研平台进入并传入待标注影像</div>
               ) : (
                   <div className="study-list">
-                  {images.map((img) => (
+                  {displayImages.map((img) => (
                     <div
                       key={img.id}
-                      className={`study-item${activeImage?.id === img.id ? ' active' : ''}`}
-                      onClick={() => selectImage(img.id)}
+                      className={`study-item${
+                        activeImage?.id === img.id ||
+                        (activeImage?.remoteImageId && img?.remoteImageId && String(activeImage.remoteImageId) === String(img.remoteImageId))
+                          ? ' active'
+                          : ''
+                      }`}
+                      onClick={async () => {
+                        if (img._placeholder || String(img.id).startsWith('remote-')) {
+                          const queueItem = queueImages.find(
+                            (item) => String(item.imageId || '') === String(img.remoteImageId || '').replace(/^remote-/, '')
+                          )
+                          if (queueItem) {
+                            const ok = await ensureQueueImageLoaded(queueItem)
+                            if (!ok) Message.error('影像加载失败，请检查下载接口')
+                          }
+                          return
+                        }
+                        await selectImage(img.id)
+                      }}
                       role="button"
                       tabIndex={0}
                     >
@@ -2686,8 +2737,10 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
                           type="text"
                           icon={<IconDelete />}
                           className="image-delete"
+                          disabled={!!img._placeholder}
                           onClick={(event) => {
                             event.stopPropagation()
+                            if (img._placeholder) return
                             removeImage(img.id)
                           }}
                         />
