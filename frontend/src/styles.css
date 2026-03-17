@@ -469,6 +469,26 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   color: #b91c1c;
 }
 
+.image-annotated-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: rgba(34, 197, 94, 0.18);
+  border: 1px solid rgba(34, 197, 94, 0.45);
+  color: #22c55e;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  user-select: none;
+  z-index: 2;
+}
+
+.image-annotated-badge.with-format {
+  top: 28px;
+}
+
 .quick-actions {
   position: absolute;
   right: 16px;

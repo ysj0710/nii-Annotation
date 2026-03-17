@@ -901,9 +901,9 @@ const createThumbnail = async (buffer, name, { isMask = false } = {}) => {
   if (isNiftiFile(name)) {
     if (!isNiftiBuffer(buffer)) return ''
     try {
-      return await createNiivueThumbnail(buffer, name, { isMask })
+      return await createNiftiThumbnail(buffer, name, { isMask })
     } catch {
-      return createNiftiThumbnail(buffer, name, { isMask })
+      return createNiivueThumbnail(buffer, name, { isMask })
     }
   }
   return createNiivueThumbnail(buffer, name, { isMask })
@@ -985,6 +985,13 @@ const queueItemHasMaskMeta = (item) => {
   return false
 }
 
+const queueItemIsAnnotated = (item) => {
+  const status = item?.annotationStatus ?? item?.annotation_status
+  if (typeof status === 'number') return status === 1
+  const s = String(status || '').trim().toUpperCase()
+  return s === '1' || s === 'ANNOTATED' || s === 'TRUE'
+}
+
 export default function App() {
   const [labels, setLabels] = useState([
     { id: 1, name: 'Label 1', color: DEFAULT_LABEL_COLOR, value: 1 }
@@ -1015,6 +1022,7 @@ export default function App() {
   const autoImportedRef = useRef(false)
   const initializedRef = useRef(false)
   const queueNavIndexRef = useRef(-1)
+  const hasUnsavedChangesRef = useRef(false)
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {}
@@ -1073,6 +1081,10 @@ export default function App() {
     if (!activeImage?.remoteImageId || queueImages.length === 0) return -1
     return queueImages.findIndex((item) => String(item.imageId) === String(activeImage.remoteImageId))
   }, [queueImages, activeImage?.remoteImageId])
+  const activeQueueItem = useMemo(() => {
+    if (!activeImage?.remoteImageId || queueImages.length === 0) return null
+    return queueImages.find((item) => String(item?.imageId || '') === String(activeImage.remoteImageId)) || null
+  }, [queueImages, activeImage?.remoteImageId])
   const currentBatchId = String(batchQueue?.batchId || externalCtx.batchId || '')
   const isBatchMode = !!currentBatchId
   const displayImages = useMemo(() => {
@@ -1082,11 +1094,13 @@ export default function App() {
         const remoteId = String(item?.imageId || '')
         const local = images.find((img) => String(img.remoteImageId || '') === remoteId)
         const queueHasMask = queueItemHasMaskMeta(item)
+        const queueAnnotated = queueItemIsAnnotated(item)
         if (local) {
           return {
             ...local,
             hasMask: !!(local.hasMask || queueHasMask),
-            maskAttached: !!(local.maskAttached && local.hasMask)
+            maskAttached: !!(local.maskAttached && local.hasMask),
+            isAnnotated: !!(queueAnnotated || local.hasMask)
           }
         }
         const displayName = String(item?.sourceImageName || item?.fileName || `image-${remoteId}`)
@@ -1100,16 +1114,25 @@ export default function App() {
           thumbnail: '',
           hasMask: queueHasMask,
           maskAttached: false,
+          isAnnotated: queueAnnotated,
           _placeholder: true
         }
       })
     }
-    return images.filter((img) => !img.isMaskOnly && String(img.remoteBatchId || '') === currentBatchId)
+    return images
+      .filter((img) => !img.isMaskOnly && String(img.remoteBatchId || '') === currentBatchId)
+      .map((img) => ({ ...img, isAnnotated: !!img.hasMask }))
   }, [isBatchMode, queueImages, images, currentBatchId])
   const displayActiveIndex = useMemo(() => {
     if (queueImages.length > 0) return activeQueueIndex
     return displayImages.findIndex((item) => item.id === activeImage?.id)
   }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
+  const activeImageHasMask = useMemo(() => {
+    if (!activeImage) return false
+    if (activeImage.sourceMask || activeImage.mask || activeImage.hasMask) return true
+    if (activeQueueItem && queueItemHasMaskMeta(activeQueueItem)) return true
+    return false
+  }, [activeImage, activeQueueItem])
 
   useEffect(() => {
     if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
@@ -1118,10 +1141,23 @@ export default function App() {
   }, [activeImage?.sourceFormat, viewerMode])
 
   useEffect(() => {
+    if (activeImageHasMask && tool !== 'pan') {
+      setTool('pan')
+    }
+    if (activeImageHasMask && annotationMenuVisible) {
+      setAnnotationMenuVisible(false)
+    }
+  }, [activeImageHasMask, tool, annotationMenuVisible])
+
+  useEffect(() => {
     if (activeQueueIndex >= 0) {
       queueNavIndexRef.current = activeQueueIndex
     }
   }, [activeQueueIndex])
+
+  useEffect(() => {
+    hasUnsavedChangesRef.current = false
+  }, [activeImage?.id])
 
   const scheduleLabelStatsRefresh = () => {
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current)
@@ -1233,7 +1269,8 @@ export default function App() {
     remoteBatchId = externalCtx.batchId,
     topicId = externalCtx.topicId,
     useAutoGuard = true,
-    silent = false
+    silent = false,
+    skipUiRefresh = false
   } = {}) => {
     if (useAutoGuard && autoImportedRef.current) return null
     const hasDirectImageUrl = !!imageUrl
@@ -1313,7 +1350,9 @@ export default function App() {
         await importImageFile(file, hashSet, importBatchId)
       }
 
-      await refreshImageList()
+      if (!skipUiRefresh) {
+        await refreshImageList()
+      }
       const afterRecords = await getAllImages()
       const afterCount = afterRecords.length
       const imported = afterRecords.filter((record) => record.importBatchId === importBatchId && !record.isMaskOnly)
@@ -1382,7 +1421,9 @@ export default function App() {
           }
         }
       }
-      await refreshImageList()
+      if (!skipUiRefresh) {
+        await refreshImageList()
+      }
       if (afterCount <= beforeCount) {
         if (!silent) Message.info('影像已存在，已直接加载本地记录')
         return mappedRecord
@@ -1424,20 +1465,26 @@ export default function App() {
   }
 
   const prefetchQueueImages = async (items = [], { skipImageId = '' } = {}) => {
+    let changed = false
     for (const item of items) {
       const remoteImageId = String(item?.imageId || '')
       if (!remoteImageId || (skipImageId && String(skipImageId) === remoteImageId)) continue
       const existing = await findLocalByRemoteImageId(remoteImageId)
       if (existing) continue
-      await fetchAndImportByImageId({
+      const imported = await fetchAndImportByImageId({
         imageId: remoteImageId,
         imageUrl: item?.imageUrl || item?.downloadUrl || '',
         originalName: item?.sourceImageName || item?.fileName || `image-${remoteImageId}.nii.gz`,
         remoteBatchId: batchQueue?.batchId || externalCtx.batchId,
         topicId: externalCtx.topicId,
         useAutoGuard: false,
-        silent: true
+        silent: true,
+        skipUiRefresh: true
       })
+      if (imported?.id) changed = true
+    }
+    if (changed) {
+      await refreshImageList()
     }
   }
 
@@ -1493,19 +1540,6 @@ export default function App() {
       }
     })()
   }, [])
-
-  useEffect(() => {
-    const onClickOutside = (event) => {
-      if (!annotationMenuVisible) return
-      const host = annotationToolsRef.current
-      if (!host) return
-      if (!host.contains(event.target)) {
-        setAnnotationMenuVisible(false)
-      }
-    }
-    document.addEventListener('mousedown', onClickOutside)
-    return () => document.removeEventListener('mousedown', onClickOutside)
-  }, [annotationMenuVisible])
 
   useEffect(() => {
     scheduleLabelStatsRefresh()
@@ -1630,7 +1664,9 @@ export default function App() {
         sourceImageName: sourceName,
         annotations: JSON.stringify({ labels }),
         maskBase64: bufferToBase64(maskBuffer),
-        maskFileName: `${fileStem(sourceName) || `mask-${remoteImageId}`}.nii.gz`
+        maskFileName: `${fileStem(sourceName) || `mask-${remoteImageId}`}.nii.gz`,
+        annotationStatus: 1,
+        annotation_status: 1
       })
     }
     if (!items.length) return false
@@ -1668,14 +1704,36 @@ export default function App() {
       clearTimeout(saveTimerRef.current)
       saveTimerRef.current = null
     }
+    if (!hasUnsavedChangesRef.current) {
+      Message.info('当前无新增修改，未执行保存')
+      return
+    }
     const saved = await persistActiveDrawing()
-    if (!saved) return
+    if (!saved) {
+      Message.warning('保存失败，请重试')
+      return
+    }
     try {
       const synced = externalCtx.batchId ? await syncBatchAnnotationsToPlatform() : await syncActiveAnnotationToPlatform()
       if (synced) {
+        if (externalCtx.batchId && activeImage?.remoteImageId) {
+          setBatchQueue((prev) => {
+            if (!prev || !Array.isArray(prev.images)) return prev
+            return {
+              ...prev,
+              images: prev.images.map((item) =>
+                String(item?.imageId || '') === String(activeImage.remoteImageId)
+                  ? { ...item, annotationStatus: 1, annotation_status: 1 }
+                  : item
+              )
+            }
+          })
+        }
+        hasUnsavedChangesRef.current = false
         Message.success(externalCtx.batchId ? '批次标注已保存并同步科研平台' : '当前标注已保存并同步科研平台')
       } else {
-        Message.success('当前标注状态已保存')
+        hasUnsavedChangesRef.current = false
+        Message.success('当前标注已保存')
       }
     } catch (error) {
       console.error(error)
@@ -1685,10 +1743,14 @@ export default function App() {
 
   const onViewerEvent = (reason = 'draw') => {
     if (reason === 'draw' || reason === 'undo' || reason === 'redo') {
+      hasUnsavedChangesRef.current = true
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
       saveTimerRef.current = setTimeout(() => {
         persistActiveDrawing()
       }, 800)
+    }
+    if (reason === 'clear') {
+      hasUnsavedChangesRef.current = true
     }
     scheduleLabelStatsRefresh()
   }
@@ -2619,8 +2681,15 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   }
 
   const toggleAnnotationTool = (nextTool) => {
+    if (activeImageHasMask) {
+      Message.info('该影像已存在 mask，为避免混淆，已禁用标注')
+      setTool('pan')
+      return
+    }
     setTool((prev) => (prev === nextTool ? 'pan' : nextTool))
-    setAnnotationMenuVisible(false)
+    requestAnimationFrame(() => {
+      viewerRef.current?.refreshOverlay?.()
+    })
   }
 
   const annotationMenuItems = [
@@ -2648,19 +2717,14 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       onClick: () => {
         const handled = viewerRef.current?.undoToolAction?.()
         if (!handled) viewerRef.current?.undo?.()
-        setAnnotationMenuVisible(false)
       }
     },
     {
       key: 'clear',
       name: '清除标注',
       onClick: async () => {
-        if (annotationToolKeys.has(tool)) {
-          viewerRef.current?.clearAnnotations?.()
-        } else {
-          await handleClear()
-        }
-        setAnnotationMenuVisible(false)
+        viewerRef.current?.clearAnnotations?.()
+        await handleClear()
       }
     }
   ]
@@ -2821,12 +2885,23 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
           <div className="annotation-tools-wrap" ref={annotationToolsRef}>
             <Button
               icon={<IconTool />}
+              disabled={activeImageHasMask}
               onClick={() => {
+                if (activeImageHasMask) {
+                  Message.info('该影像已存在 mask，为避免混淆，已禁用标注')
+                  return
+                }
                 setAnnotationMenuVisible((prev) => {
-                  if (prev && tool !== 'pan') {
+                  const next = !prev
+                  if (!next && tool !== 'pan') {
                     setTool('pan')
                   }
-                  return !prev
+                  if (next) {
+                    requestAnimationFrame(() => {
+                      viewerRef.current?.refreshOverlay?.()
+                    })
+                  }
+                  return next
                 })
               }}
             >
@@ -2899,6 +2974,11 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
                     >
                       <div className="study-thumb">
                         {img.sourceFormat === 'dicom' && <span className="image-format-badge">DICOM</span>}
+                        {img.isAnnotated && (
+                          <span className={`image-annotated-badge${img.sourceFormat === 'dicom' ? ' with-format' : ''}`}>
+                            已标注
+                          </span>
+                        )}
                         {img.thumbnail ? (
                           <img src={img.thumbnail} alt={img.displayName || img.name} />
                         ) : (
@@ -2977,7 +3057,6 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
         <Sider className="label-sidebar" width={360}>
           <div className="label-side-head">
             <div className="label-side-title">标注项</div>
-            <div className="label-side-stat">标注统计：{Object.values(labelStats).reduce((sum, v) => sum + Number(v || 0), 0)}</div>
           </div>
           <div className="label-side-create">
             <Input

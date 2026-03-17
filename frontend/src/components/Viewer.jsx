@@ -48,6 +48,16 @@ const formatNumber = (value, digits = 1) => {
   return num.toFixed(digits)
 }
 
+const hexToRgba = (hex, alpha = 0.45) => {
+  const cleaned = String(hex || '').replace('#', '')
+  if (cleaned.length !== 6) return `rgba(147, 197, 253, ${alpha})`
+  const r = parseInt(cleaned.slice(0, 2), 16)
+  const g = parseInt(cleaned.slice(2, 4), 16)
+  const b = parseInt(cleaned.slice(4, 6), 16)
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return `rgba(147, 197, 253, ${alpha})`
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
 const Viewer = forwardRef(function Viewer(
   { image, tool, brushSize, activeLabelValue, labels = [], radiological2D = true, onDrawingChange },
   ref
@@ -354,6 +364,13 @@ const Viewer = forwardRef(function Viewer(
       for (let i = 1; i < points.length; i += 1) {
         ctx.lineTo(points[i].x, points[i].y)
       }
+      if (annotation.type === 'curve' && points.length >= 3) {
+        ctx.closePath()
+        ctx.save()
+        ctx.fillStyle = hexToRgba(annotation.color || '#93c5fd', 0.45)
+        ctx.fill()
+        ctx.restore()
+      }
       ctx.stroke()
       drawLabel(annotation.label, points[points.length - 1].x, points[points.length - 1].y)
     }
@@ -594,10 +611,13 @@ const Viewer = forwardRef(function Viewer(
   }
 
   useImperativeHandle(ref, () => ({
+    refreshOverlay: () => {
+      drawStrokeMarkers()
+      return true
+    },
     undoToolAction: () => {
-      if (isAnnotationTool(toolRef.current)) {
-        const current = getCurrentAnnotations()
-        if (!current.length) return false
+      const current = getCurrentAnnotations()
+      if (current.length > 0) {
         setCurrentAnnotations(current.slice(0, -1))
         drawStrokeMarkers()
         return true
@@ -612,10 +632,12 @@ const Viewer = forwardRef(function Viewer(
     clearAnnotations: () => {
       const key = getImageKey()
       annotationsByImageRef.current.delete(key)
+      annotationsByImageRef.current.delete('__no_image__')
       annotationDraftRef.current = null
       annotationStepsRef.current = []
       resetFillTracking()
       drawStrokeMarkers()
+      if (typeof onDrawingChange === 'function') onDrawingChange('clear')
     },
     undo: () => {
       const history = historyRef.current
@@ -1006,7 +1028,7 @@ const Viewer = forwardRef(function Viewer(
             addAnnotation({
               type: 'curve',
               points: [...annotationStepsRef.current],
-              label: `${annotationStepsRef.current.length}点`,
+              label: '',
               color: getCurrentAnnotationColor()
             })
             annotationStepsRef.current = []
@@ -1150,9 +1172,9 @@ const Viewer = forwardRef(function Viewer(
             draft.label = '箭头标注'
           } else if (toolRef.current === 'dynamic') {
             draft.points = smoothPath(draft.points)
-            draft.label = `${draft.points.length}点`
+            draft.label = ''
           } else if (toolRef.current === 'freehand') {
-            draft.label = `${draft.points.length}点`
+            draft.label = ''
           }
           addAnnotation({ ...draft })
         }
