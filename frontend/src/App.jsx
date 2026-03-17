@@ -80,6 +80,15 @@ const isZipBuffer = (buffer) => {
   return bytes[0] === 0x50 && bytes[1] === 0x4b && (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07)
 }
 
+const isHtmlLikeBuffer = (buffer) => {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 8) return false
+  const prefix = new TextDecoder('utf-8')
+    .decode(new Uint8Array(buffer).slice(0, 64))
+    .toLowerCase()
+    .trim()
+  return prefix.startsWith('<!doctype html') || prefix.startsWith('<html')
+}
+
 const normalizeIncomingFileName = (name, buffer, fallbackBase = 'image') => {
   const leaf = getLeafName(name) || fallbackBase
   if (isZipFile(leaf) || isSupportedImageFile(leaf) || isDicomFile(leaf) || isImageFile(leaf)) {
@@ -945,6 +954,16 @@ const buildAuthHeaders = (token) => {
   return { Authorization: authValue }
 }
 
+const resolveRemoteUrl = (url, platformOrigin) => {
+  const rawUrl = String(url || '').trim()
+  if (!rawUrl) return ''
+  if (/^https?:\/\//i.test(rawUrl)) return rawUrl
+  const origin = String(platformOrigin || '').trim().replace(/\/+$/, '')
+  if (!origin) return rawUrl
+  const normalizedPath = rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`
+  return `${origin}${normalizedPath}`
+}
+
 const parseApiPayload = (json) => {
   if (!json || typeof json !== 'object') return null
   if (json.data && typeof json.data === 'object') return json.data
@@ -980,6 +999,7 @@ export default function App() {
   const dicomWheelSwitchAtRef = useRef(0)
   const autoImportedRef = useRef(false)
   const initializedRef = useRef(false)
+  const queueNavIndexRef = useRef(-1)
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {}
@@ -1074,6 +1094,12 @@ export default function App() {
       setViewerMode('default')
     }
   }, [activeImage?.sourceFormat, viewerMode])
+
+  useEffect(() => {
+    if (activeQueueIndex >= 0) {
+      queueNavIndexRef.current = activeQueueIndex
+    }
+  }, [activeQueueIndex])
 
   const scheduleLabelStatsRefresh = () => {
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current)
@@ -1195,7 +1221,7 @@ export default function App() {
     try {
       const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
       const url = hasDirectImageUrl
-        ? imageUrl
+        ? resolveRemoteUrl(imageUrl, normalizedOrigin)
         : (() => {
             const params = new URLSearchParams()
             params.set('imageId', String(imageId))
@@ -1212,6 +1238,12 @@ export default function App() {
       const rawBuffer = await blob.arrayBuffer()
       const downloadedHash = await hashBuffer(rawBuffer)
       const contentType = String(resp.headers.get('content-type') || '').toLowerCase()
+      if (contentType.includes('text/html') || isHtmlLikeBuffer(rawBuffer)) {
+        const htmlHead = new TextDecoder('utf-8').decode(new Uint8Array(rawBuffer).slice(0, 220)).replace(/\s+/g, ' ').trim()
+        throw new Error(
+          `downloadByImageId 返回 HTML（疑似登录页/网关页），imageId=${imageId}, status=${resp.status}, content-type=${contentType || 'unknown'}, url=${url}, head=${htmlHead}`
+        )
+      }
       const headerName = parseFileNameFromDisposition(resp.headers.get('content-disposition'))
       const fallbackName = originalName || headerName || `image-${imageId || Date.now()}`
       let normalizedName = normalizeIncomingFileName(fallbackName, rawBuffer, `image-${imageId || 'remote'}`)
@@ -1336,7 +1368,12 @@ export default function App() {
       return mappedRecord
     } catch (error) {
       console.error(error)
-      Message.error('自动加载影像失败，请检查科研平台传参与下载接口')
+      const msg = String(error?.message || '')
+      if (msg.includes('返回 HTML')) {
+        Message.error('下载接口返回了 HTML 页面（非 NIfTI 文件），请检查登录态/鉴权与 downloadByImageId 接口实现')
+      } else {
+        Message.error('自动加载影像失败，请检查科研平台传参与下载接口')
+      }
       return null
     }
   }
@@ -1396,6 +1433,10 @@ export default function App() {
           const targetImageId = String(externalCtx.imageId || queue?.nextImageId || queue?.images?.[0]?.imageId || '')
           const targetItem =
             queue?.images?.find((item) => String(item.imageId) === targetImageId) || queue?.images?.[0] || null
+          if (targetItem && Array.isArray(queue?.images)) {
+            const idx = queue.images.findIndex((item) => String(item.imageId) === String(targetItem.imageId))
+            queueNavIndexRef.current = idx >= 0 ? idx : 0
+          }
           if (targetItem) {
             await ensureQueueImageLoaded(targetItem)
           }
@@ -1635,6 +1676,8 @@ export default function App() {
     const baseIndex =
       activeQueueIndex >= 0
         ? activeQueueIndex
+        : queueNavIndexRef.current >= 0
+          ? queueNavIndexRef.current
         : Math.max(
             0,
             queueImages.findIndex((item) => String(item.imageId) === String(batchQueue?.nextImageId || ''))
@@ -1642,6 +1685,7 @@ export default function App() {
     const targetIndex = (baseIndex + direction + queueImages.length) % queueImages.length
     const target = queueImages[targetIndex]
     if (!target) return
+    queueNavIndexRef.current = targetIndex
     const ok = await ensureQueueImageLoaded(target)
     if (!ok) Message.error('切换影像失败，请检查批次数据与下载接口')
   }
