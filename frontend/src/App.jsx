@@ -887,6 +887,7 @@ const createNiivueThumbnail = async (buffer, name, { isMask = false } = {}) => {
 
 const createThumbnail = async (buffer, name, { isMask = false } = {}) => {
   if (isNiftiFile(name)) {
+    if (!isNiftiBuffer(buffer)) return ''
     try {
       return await createNiftiThumbnail(buffer, name, { isMask })
     } catch {
@@ -1209,10 +1210,25 @@ export default function App() {
 
       const blob = await resp.blob()
       const rawBuffer = await blob.arrayBuffer()
+      const downloadedHash = await hashBuffer(rawBuffer)
       const contentType = String(resp.headers.get('content-type') || '').toLowerCase()
       const headerName = parseFileNameFromDisposition(resp.headers.get('content-disposition'))
       const fallbackName = originalName || headerName || `image-${imageId || Date.now()}`
-      const normalizedName = normalizeIncomingFileName(fallbackName, rawBuffer, `image-${imageId || 'remote'}`)
+      let normalizedName = normalizeIncomingFileName(fallbackName, rawBuffer, `image-${imageId || 'remote'}`)
+      const niftiByContent = isNiftiBuffer(rawBuffer)
+      const zipByContent = isZipBuffer(rawBuffer)
+      const dicomByContent = isDicomContentBuffer(rawBuffer)
+
+      if (isNiftiFile(normalizedName) && !niftiByContent) {
+        if (zipByContent) normalizedName = `${fileStem(normalizedName) || `image-${imageId || 'remote'}`}.zip`
+        else if (dicomByContent) normalizedName = `${fileStem(normalizedName) || `image-${imageId || 'remote'}`}.dcm`
+        else {
+          const head = Array.from(new Uint8Array(rawBuffer).slice(0, 16))
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join(' ')
+          throw new Error(`payload is not valid NIfTI for imageId=${imageId}; first16=${head}`)
+        }
+      }
 
       if (
         !isZipFile(normalizedName) &&
@@ -1255,12 +1271,63 @@ export default function App() {
           })
         }
       }
-      await refreshImageList()
-      const mappedRecord =
+      let mappedRecord =
         (await findLocalByRemoteImageId(imageId)) ||
         imported[0] ||
         afterRecords.find((record) => !record.isMaskOnly && record.importBatchId === importBatchId) ||
         null
+
+      if (!mappedRecord && imageId) {
+        const expectedBase = normalizeBaseName(normalizedName)
+        const byName = afterRecords.find(
+          (record) => !record.isMaskOnly && normalizeBaseName(record.sourceName || record.displayName || record.name) === expectedBase
+        )
+        const byHash = afterRecords.find((record) => !record.isMaskOnly && String(record.hash || '') === String(downloadedHash || ''))
+        const candidate = byName || byHash || null
+
+        if (candidate) {
+          if (candidate.remoteImageId && String(candidate.remoteImageId) !== String(imageId)) {
+            // 后端返回了重复影像内容时，为当前 imageId 建立别名记录，避免批次切换失败。
+            const alias = createImageRecord(candidate.name || normalizedName, candidate.data, candidate.hash || downloadedHash, candidate.thumbnail || '', {
+              displayName: candidate.displayName || normalizedName,
+              maskBuffer: candidate.mask || null,
+              maskName: candidate.maskName || null,
+              sourceMask: candidate.sourceMask || null,
+              sourceMaskName: candidate.sourceMaskName || null,
+              maskAttached: candidate.maskAttached !== false,
+              isMaskOnly: !!candidate.isMaskOnly,
+              rasterHFlipNormalized: !!candidate.rasterHFlipNormalized,
+              spatialMeta: candidate.spatialMeta || null,
+              rasterConversionVersion: Number(candidate.rasterConversionVersion || 0),
+              importBatchId,
+              sourceName: candidate.sourceName || normalizedName,
+              sourceData: candidate.sourceData || candidate.data,
+              modifiedByUser: false,
+              sourceFormat: candidate.sourceFormat || 'nifti',
+              dicomSourceCount: Number(candidate.dicomSourceCount || 0),
+              dicomStudyUID: candidate.dicomStudyUID || '',
+              dicomStudyID: candidate.dicomStudyID || '',
+              dicomSeriesUID: candidate.dicomSeriesUID || '',
+              dicomSeriesDescription: candidate.dicomSeriesDescription || '',
+              dicomSeriesNumber: Number(candidate.dicomSeriesNumber || 0),
+              dicomSeriesOrder: Number(candidate.dicomSeriesOrder || 0),
+              dicomAccessionNumber: candidate.dicomAccessionNumber || '',
+              remoteImageId: String(imageId),
+              remoteBatchId: String(remoteBatchId || '')
+            })
+            await saveImages([alias])
+            mappedRecord = alias
+          } else {
+            const patched = await updateImage(candidate.id, {
+              remoteImageId: String(imageId),
+              remoteBatchId: String(remoteBatchId || ''),
+              updatedAt: Date.now()
+            })
+            mappedRecord = patched || candidate
+          }
+        }
+      }
+      await refreshImageList()
       if (afterCount <= beforeCount) {
         Message.info('影像已存在，已直接加载本地记录')
         return mappedRecord
@@ -1877,6 +1944,10 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
     }
     if (!isSupportedImageFile(file.name)) return
     const effectiveName = file.name
+    if (isNiftiFile(effectiveName) && !isNiftiBuffer(originalBuffer)) {
+      Message.error(`下载内容不是有效 NIfTI：${effectiveName}`)
+      return
+    }
 
     let buffer = originalBuffer
     let internalName = effectiveName

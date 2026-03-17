@@ -901,7 +901,10 @@ const Viewer = forwardRef(function Viewer(
       }
     }
 
-    load()
+    load().catch((error) => {
+      if (cancelled) return
+      console.error('Viewer 加载影像失败', error)
+    })
     return () => {
       cancelled = true
     }
