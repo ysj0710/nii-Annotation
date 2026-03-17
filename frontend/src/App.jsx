@@ -1539,7 +1539,7 @@ export default function App() {
       if (externalCtx.batchId) {
         try {
           const queue = await loadBatchQueue()
-          const targetImageId = String(externalCtx.imageId || queue?.nextImageId || queue?.images?.[0]?.imageId || '')
+          const targetImageId = String(externalCtx.imageId || queue?.images?.[0]?.imageId || '')
           const targetItem =
             queue?.images?.find((item) => String(item.imageId) === targetImageId) || queue?.images?.[0] || null
           if (targetItem && Array.isArray(queue?.images)) {
