@@ -81,8 +81,7 @@ const Viewer = forwardRef(function Viewer(
   const ensureBaseSnapshot = (bitmap) => {
     const history = historyRef.current
     if (history.stack.length > 0 || !bitmap) return
-    const empty = new Uint8Array(bitmap.length)
-    history.stack = [empty]
+    history.stack = [new Uint8Array(bitmap)]
     history.index = 0
   }
 
@@ -91,6 +90,20 @@ const Viewer = forwardRef(function Viewer(
     const history = historyRef.current
     if (history.index < history.stack.length - 1) {
       history.stack = history.stack.slice(0, history.index + 1)
+    }
+    const last = history.stack[history.stack.length - 1]
+    if (last && last.length === bitmap.length) {
+      let same = true
+      for (let i = 0; i < bitmap.length; i += 1) {
+        if (last[i] !== bitmap[i]) {
+          same = false
+          break
+        }
+      }
+      if (same) {
+        history.index = history.stack.length - 1
+        return
+      }
     }
     history.stack.push(new Uint8Array(bitmap))
     history.index = history.stack.length - 1
@@ -575,9 +588,11 @@ const Viewer = forwardRef(function Viewer(
       return true
     },
     clearAnnotations: () => {
-      setCurrentAnnotations([])
+      const key = getImageKey()
+      annotationsByImageRef.current.delete(key)
       annotationDraftRef.current = null
       annotationStepsRef.current = []
+      resetFillTracking()
       drawStrokeMarkers()
     },
     undo: () => {
@@ -714,7 +729,6 @@ const Viewer = forwardRef(function Viewer(
         nvRef.current.setCrosshairVisible(false)
       }
       nvRef.current.onDrawingChanged = (action) => {
-        if (action !== 'draw') return
         const nv = nvRef.current
         if (!nv?.drawBitmap) return
         ensureBaseSnapshot(nv.drawBitmap)

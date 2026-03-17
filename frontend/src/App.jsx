@@ -592,6 +592,17 @@ const hashBuffer = async (buffer) => {
   return `${h1.toString(16).padStart(8, '0')}${h2.toString(16).padStart(8, '0')}${sizeHex}`
 }
 
+const bufferToBase64 = (buffer) => {
+  const bytes = new Uint8Array(buffer)
+  const chunkSize = 0x8000
+  let binary = ''
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize)
+    binary += String.fromCharCode(...chunk)
+  }
+  return btoa(binary)
+}
+
 const hasNonZeroMaskNifti = (maskData) => {
   const buffer = arrayBufferFrom(maskData)
   if (!buffer) return false
@@ -899,6 +910,8 @@ const toListItem = (record) => ({
   dicomSeriesNumber: Number(record.dicomSeriesNumber || 0),
   dicomSeriesOrder: Number(record.dicomSeriesOrder || 0),
   dicomAccessionNumber: record.dicomAccessionNumber || '',
+  remoteImageId: record.remoteImageId ? String(record.remoteImageId) : '',
+  remoteBatchId: record.remoteBatchId ? String(record.remoteBatchId) : '',
   hasMask: !!(record.sourceMask || record.mask),
   maskAttached: record.maskAttached !== false,
   thumbnail: record.thumbnail || ''
@@ -930,6 +943,12 @@ const buildAuthHeaders = (token) => {
   return { Authorization: authValue }
 }
 
+const parseApiPayload = (json) => {
+  if (!json || typeof json !== 'object') return null
+  if (json.data && typeof json.data === 'object') return json.data
+  return json
+}
+
 export default function App() {
   const [labels, setLabels] = useState([
     { id: 1, name: 'Label 1', color: DEFAULT_LABEL_COLOR, value: 1 }
@@ -948,6 +967,7 @@ export default function App() {
   const [images, setImages] = useState([])
   const [activeImage, setActiveImage] = useState(null)
   const [exportDirHandle, setExportDirHandle] = useState(null)
+  const [batchQueue, setBatchQueue] = useState(null)
 
   const viewerRef = useRef(null)
   const viewerHostRef = useRef(null)
@@ -966,7 +986,9 @@ export default function App() {
       imageUrl: p.get('imageUrl') || globalCtx.imageUrl || '',
       token: p.get('token') || globalCtx.token || '',
       platformOrigin: p.get('platformOrigin') || globalCtx.platformOrigin || '',
-      originalName: p.get('originalName') || p.get('imageName') || globalCtx.originalName || globalCtx.imageName || ''
+      originalName: p.get('originalName') || p.get('imageName') || globalCtx.originalName || globalCtx.imageName || '',
+      batchId: p.get('batchId') || globalCtx.batchId || '',
+      topicId: p.get('topicId') || globalCtx.topicId || ''
     }
   }, [])
 
@@ -1007,6 +1029,12 @@ export default function App() {
     () => images.findIndex((item) => item.id === activeImage?.id),
     [images, activeImage?.id]
   )
+
+  const queueImages = useMemo(() => (Array.isArray(batchQueue?.images) ? batchQueue.images : []), [batchQueue?.images])
+  const activeQueueIndex = useMemo(() => {
+    if (!activeImage?.remoteImageId || queueImages.length === 0) return -1
+    return queueImages.findIndex((item) => String(item.imageId) === String(activeImage.remoteImageId))
+  }, [queueImages, activeImage?.remoteImageId])
 
   useEffect(() => {
     if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
@@ -1105,18 +1133,32 @@ export default function App() {
     }
   }
 
-  const fetchAndImportByImageId = async () => {
-    if (autoImportedRef.current) return
-    const hasDirectImageUrl = !!externalCtx.imageUrl
-    const hasImageIdDownload = !!externalCtx.imageId && !!externalCtx.platformOrigin
-    if (!hasDirectImageUrl && !hasImageIdDownload) return
+  const findLocalByRemoteImageId = async (remoteImageId) => {
+    if (!remoteImageId) return null
+    const records = await getAllImages()
+    return (
+      records.find((record) => String(record.remoteImageId || '') === String(remoteImageId) && !record.isMaskOnly) || null
+    )
+  }
 
-    autoImportedRef.current = true
+  const fetchAndImportByImageId = async ({
+    imageId = externalCtx.imageId,
+    imageUrl = externalCtx.imageUrl,
+    originalName = externalCtx.originalName,
+    remoteBatchId = externalCtx.batchId,
+    useAutoGuard = true
+  } = {}) => {
+    if (useAutoGuard && autoImportedRef.current) return null
+    const hasDirectImageUrl = !!imageUrl
+    const hasImageIdDownload = !!imageId && !!externalCtx.platformOrigin
+    if (!hasDirectImageUrl && !hasImageIdDownload) return null
+
+    if (useAutoGuard) autoImportedRef.current = true
     try {
       const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
       const url = hasDirectImageUrl
-        ? externalCtx.imageUrl
-        : `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?imageId=${encodeURIComponent(externalCtx.imageId)}`
+        ? imageUrl
+        : `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?imageId=${encodeURIComponent(imageId)}`
       const resp = await fetch(url, {
         headers: buildAuthHeaders(externalCtx.token)
       })
@@ -1126,8 +1168,8 @@ export default function App() {
       const rawBuffer = await blob.arrayBuffer()
       const contentType = String(resp.headers.get('content-type') || '').toLowerCase()
       const headerName = parseFileNameFromDisposition(resp.headers.get('content-disposition'))
-      const fallbackName = externalCtx.originalName || headerName || `image-${externalCtx.imageId || Date.now()}`
-      const normalizedName = normalizeIncomingFileName(fallbackName, rawBuffer, `image-${externalCtx.imageId || 'remote'}`)
+      const fallbackName = originalName || headerName || `image-${imageId || Date.now()}`
+      const normalizedName = normalizeIncomingFileName(fallbackName, rawBuffer, `image-${imageId || 'remote'}`)
 
       if (
         !isZipFile(normalizedName) &&
@@ -1148,31 +1190,104 @@ export default function App() {
 
       const existing = await getAllImages()
       const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean))
-      const batchId = makeImportBatchId()
+      const importBatchId = makeImportBatchId()
       const beforeCount = existing.length
 
       if (isZipFile(file.name)) {
-        await importZipFile(file, hashSet, batchId)
+        await importZipFile(file, hashSet, importBatchId)
       } else {
-        await importImageFile(file, hashSet, batchId)
+        await importImageFile(file, hashSet, importBatchId)
       }
 
       await refreshImageList()
-      const afterCount = (await getAllImages()).length
+      const afterRecords = await getAllImages()
+      const afterCount = afterRecords.length
+      const imported = afterRecords.filter((record) => record.importBatchId === importBatchId && !record.isMaskOnly)
+      if (imported.length > 0 && imageId) {
+        for (const record of imported) {
+          await updateImage(record.id, {
+            remoteImageId: String(imageId),
+            remoteBatchId: String(remoteBatchId || ''),
+            updatedAt: Date.now()
+          })
+        }
+      }
+      await refreshImageList()
+      const mappedRecord =
+        (await findLocalByRemoteImageId(imageId)) ||
+        imported[0] ||
+        afterRecords.find((record) => !record.isMaskOnly && record.importBatchId === importBatchId) ||
+        null
       if (afterCount <= beforeCount) {
-        throw new Error('auto import finished but no image record was added')
+        Message.info('影像已存在，已直接加载本地记录')
+        return mappedRecord
       }
       Message.success('已自动接收科研平台影像')
+      return mappedRecord
     } catch (error) {
       console.error(error)
       Message.error('自动加载影像失败，请检查科研平台传参与下载接口')
+      return null
     }
+  }
+
+  const ensureQueueImageLoaded = async (queueItem) => {
+    const remoteImageId = String(queueItem?.imageId || '')
+    if (!remoteImageId) return false
+    const existing = await findLocalByRemoteImageId(remoteImageId)
+    if (existing) {
+      await selectImage(existing.id)
+      return true
+    }
+    const imported = await fetchAndImportByImageId({
+      imageId: remoteImageId,
+      originalName: queueItem?.sourceImageName || queueItem?.fileName || `image-${remoteImageId}.nii.gz`,
+      remoteBatchId: batchQueue?.batchId || externalCtx.batchId,
+      useAutoGuard: false
+    })
+    if (!imported?.id) return false
+    await selectImage(imported.id)
+    return true
+  }
+
+  const loadBatchQueue = async () => {
+    if (!externalCtx.platformOrigin || !externalCtx.batchId) return null
+    const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
+    const params = new URLSearchParams()
+    if (externalCtx.topicId) params.set('topicId', String(externalCtx.topicId))
+    params.set('batchId', String(externalCtx.batchId))
+    const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/getBatchImageQueue?${params.toString()}`
+    const resp = await fetch(endpoint, {
+      headers: buildAuthHeaders(externalCtx.token)
+    })
+    if (!resp.ok) throw new Error(`get batch queue failed: ${resp.status}`)
+    const json = await resp.json().catch(() => null)
+    const payload = parseApiPayload(json)
+    if (!payload || !Array.isArray(payload.images)) throw new Error('invalid batch queue payload')
+    setBatchQueue(payload)
+    return payload
   }
 
   useEffect(() => {
     ;(async () => {
       await refreshImageList()
-      await fetchAndImportByImageId()
+      if (externalCtx.batchId) {
+        try {
+          const queue = await loadBatchQueue()
+          const targetImageId = String(externalCtx.imageId || queue?.nextImageId || queue?.images?.[0]?.imageId || '')
+          const targetItem =
+            queue?.images?.find((item) => String(item.imageId) === targetImageId) || queue?.images?.[0] || null
+          if (targetItem) {
+            await ensureQueueImageLoaded(targetItem)
+          }
+        } catch (error) {
+          console.error(error)
+          Message.error('批次队列加载失败，已回退单图模式')
+          await fetchAndImportByImageId()
+        }
+      } else {
+        await fetchAndImportByImageId()
+      }
     })()
   }, [])
 
@@ -1259,7 +1374,8 @@ export default function App() {
   }
 
   const syncActiveAnnotationToPlatform = async () => {
-    if (!externalCtx?.imageId || !externalCtx?.platformOrigin || !activeImage?.id) return false
+    const remoteImageId = String(activeImage?.remoteImageId || externalCtx?.imageId || '')
+    if (!remoteImageId || !externalCtx?.platformOrigin || !activeImage?.id) return false
     const record = await getImageById(activeImage.id)
     const maskBuffer = record?.mask || record?.sourceMask
     if (!maskBuffer) return false
@@ -1267,7 +1383,7 @@ export default function App() {
     const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationByImageId`
     const payload = new FormData()
-    payload.append('imageId', String(externalCtx.imageId))
+    payload.append('imageId', remoteImageId)
     payload.append(
       'maskFile',
       new File([maskBuffer], `${fileStem(record?.sourceName || record?.name || 'mask')}.nii.gz`, {
@@ -1289,6 +1405,57 @@ export default function App() {
     return true
   }
 
+  const syncBatchAnnotationsToPlatform = async () => {
+    if (!externalCtx?.batchId || !externalCtx?.platformOrigin) return false
+    const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
+    const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationBatch`
+    const records = await getAllImages()
+    const queueItems = Array.isArray(batchQueue?.images) ? batchQueue.images : []
+    if (!queueItems.length) return false
+
+    const items = []
+    for (const item of queueItems) {
+      const remoteImageId = String(item?.imageId || '')
+      if (!remoteImageId) continue
+      const record =
+        records.find((r) => String(r.remoteImageId || '') === remoteImageId && !r.isMaskOnly) || null
+      const maskBuffer = record?.mask || record?.sourceMask
+      if (!maskBuffer) continue
+      const sourceName = String(record?.sourceName || item?.sourceImageName || item?.fileName || `image-${remoteImageId}`)
+      items.push({
+        imageId: Number.isFinite(Number(remoteImageId)) ? Number(remoteImageId) : remoteImageId,
+        sourceImageName: sourceName,
+        annotations: JSON.stringify({ labels }),
+        maskBase64: bufferToBase64(maskBuffer),
+        maskFileName: `${fileStem(sourceName) || `mask-${remoteImageId}`}.nii.gz`
+      })
+    }
+    if (!items.length) return false
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        ...buildAuthHeaders(externalCtx.token),
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        batchId: String(externalCtx.batchId),
+        topicId: externalCtx.topicId ? String(externalCtx.topicId) : null,
+        items
+      })
+    })
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      throw new Error(errText || `batch sync failed: ${resp.status}`)
+    }
+    const json = await resp.json().catch(() => null)
+    const payload = parseApiPayload(json) || {}
+    if (payload?.queue && Array.isArray(payload.queue.images)) {
+      setBatchQueue(payload.queue)
+    }
+    return true
+  }
+
   const saveCurrentAnnotation = async () => {
     if (!activeImage?.id) {
       Message.warning('当前没有可保存的影像')
@@ -1301,9 +1468,9 @@ export default function App() {
     const saved = await persistActiveDrawing()
     if (!saved) return
     try {
-      const synced = await syncActiveAnnotationToPlatform()
+      const synced = externalCtx.batchId ? await syncBatchAnnotationsToPlatform() : await syncActiveAnnotationToPlatform()
       if (synced) {
-        Message.success('当前标注已保存并同步科研平台')
+        Message.success(externalCtx.batchId ? '批次标注已保存并同步科研平台' : '当前标注已保存并同步科研平台')
       } else {
         Message.success('当前标注状态已保存')
       }
@@ -1342,6 +1509,22 @@ export default function App() {
       ...record,
       maskVersion: hasAttachedMask(record) ? 1 : 0
     })
+  }
+
+  const switchQueueImage = async (direction = 1) => {
+    if (!queueImages.length) return
+    const baseIndex =
+      activeQueueIndex >= 0
+        ? activeQueueIndex
+        : Math.max(
+            0,
+            queueImages.findIndex((item) => String(item.imageId) === String(batchQueue?.nextImageId || ''))
+          )
+    const targetIndex = (baseIndex + direction + queueImages.length) % queueImages.length
+    const target = queueImages[targetIndex]
+    if (!target) return
+    const ok = await ensureQueueImageLoaded(target)
+    if (!ok) Message.error('切换影像失败，请检查批次数据与下载接口')
   }
 
   useEffect(() => {
@@ -1454,7 +1637,9 @@ export default function App() {
       dicomSeriesDescription = '',
       dicomSeriesNumber = 0,
       dicomSeriesOrder = 0,
-      dicomAccessionNumber = ''
+      dicomAccessionNumber = '',
+      remoteImageId = '',
+      remoteBatchId = ''
     } = {}
   ) => {
     const baseName = normalizeBaseName(name)
@@ -1485,6 +1670,8 @@ export default function App() {
       dicomSeriesNumber,
       dicomSeriesOrder,
       dicomAccessionNumber,
+      remoteImageId: remoteImageId ? String(remoteImageId) : '',
+      remoteBatchId: remoteBatchId ? String(remoteBatchId) : '',
       sourceMask: finalSourceMask,
       sourceMaskName: finalSourceMaskName,
       mask: maskBuffer,
@@ -2425,6 +2612,19 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             </Button>
             {annotationMenuVisible && <div className="annotation-tools-dropdown">{annotationToolsMenuContent}</div>}
           </div>
+          {externalCtx.batchId && (
+            <>
+              <Button onClick={() => switchQueueImage(-1)} disabled={!queueImages.length}>
+                上一张
+              </Button>
+              <Button onClick={() => switchQueueImage(1)} disabled={!queueImages.length}>
+                下一张
+              </Button>
+              <span style={{ color: '#cbd5e1', fontSize: 12, minWidth: 84, textAlign: 'center' }}>
+                {queueImages.length ? `${Math.max(1, activeQueueIndex + 1)}/${queueImages.length}` : '批次 0/0'}
+              </span>
+            </>
+          )}
           <Button onClick={saveCurrentAnnotation}>保存</Button>
           <Popover trigger="click" position="bl" content={exportMenuContent}>
             <Button type="primary">导出</Button>
