@@ -844,6 +844,11 @@ const Viewer = forwardRef(function Viewer(
       await nv.loadFromArrayBuffer(imageBuffer, image.name)
       if (cancelled) return
 
+      if (typeof nv.setInterpolation === 'function') {
+        // 使用最近邻插值，让视口细节与缩略图观感更一致。
+        nv.setInterpolation(true)
+      }
+
       const baseVolume = nv.volumes?.[0]
       if (baseVolume && !image.isMaskOnly && shouldResetWindow(baseVolume)) {
         baseVolume.cal_min = Number(baseVolume.robust_min)

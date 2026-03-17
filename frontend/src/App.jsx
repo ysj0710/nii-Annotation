@@ -872,6 +872,9 @@ const createNiivueThumbnail = async (buffer, name, { isMask = false } = {}) => {
   try {
     nv.attachToCanvas(canvas)
     await nv.loadFromArrayBuffer(buffer, name)
+    if (typeof nv.setInterpolation === 'function') {
+      nv.setInterpolation(true)
+    }
     const dims = nv.back?.dims
     const is2D = dims && (dims[0] <= 2 || dims[3] <= 1)
     nv.setSliceType(nv.sliceTypeAxial)
@@ -898,9 +901,9 @@ const createThumbnail = async (buffer, name, { isMask = false } = {}) => {
   if (isNiftiFile(name)) {
     if (!isNiftiBuffer(buffer)) return ''
     try {
-      return await createNiftiThumbnail(buffer, name, { isMask })
+      return await createNiivueThumbnail(buffer, name, { isMask })
     } catch {
-      return createNiivueThumbnail(buffer, name, { isMask })
+      return createNiftiThumbnail(buffer, name, { isMask })
     }
   }
   return createNiivueThumbnail(buffer, name, { isMask })
@@ -968,6 +971,18 @@ const parseApiPayload = (json) => {
   if (!json || typeof json !== 'object') return null
   if (json.data && typeof json.data === 'object') return json.data
   return json
+}
+
+const queueItemHasMaskMeta = (item) => {
+  const maskName = String(item?.maskName || '').trim()
+  const status = item?.annotationStatus
+  if (maskName) return true
+  if (typeof status === 'string') {
+    const s = status.trim().toUpperCase()
+    if (s === 'ANNOTATED' || s === '1' || s === 'TRUE') return true
+  }
+  if (typeof status === 'number' && status > 0) return true
+  return false
 }
 
 export default function App() {
@@ -1066,7 +1081,14 @@ export default function App() {
       return queueImages.map((item) => {
         const remoteId = String(item?.imageId || '')
         const local = images.find((img) => String(img.remoteImageId || '') === remoteId)
-        if (local) return local
+        const queueHasMask = queueItemHasMaskMeta(item)
+        if (local) {
+          return {
+            ...local,
+            hasMask: !!(local.hasMask || queueHasMask),
+            maskAttached: !!(local.maskAttached && local.hasMask)
+          }
+        }
         const displayName = String(item?.sourceImageName || item?.fileName || `image-${remoteId}`)
         return {
           id: `remote-${remoteId}`,
@@ -1076,7 +1098,7 @@ export default function App() {
           displayName,
           sourceFormat: 'nifti',
           thumbnail: '',
-          hasMask: String(item?.annotationStatus || '').toUpperCase() === 'ANNOTATED',
+          hasMask: queueHasMask,
           maskAttached: false,
           _placeholder: true
         }
@@ -1210,7 +1232,8 @@ export default function App() {
     originalName = externalCtx.originalName,
     remoteBatchId = externalCtx.batchId,
     topicId = externalCtx.topicId,
-    useAutoGuard = true
+    useAutoGuard = true,
+    silent = false
   } = {}) => {
     if (useAutoGuard && autoImportedRef.current) return null
     const hasDirectImageUrl = !!imageUrl
@@ -1361,13 +1384,14 @@ export default function App() {
       }
       await refreshImageList()
       if (afterCount <= beforeCount) {
-        Message.info('影像已存在，已直接加载本地记录')
+        if (!silent) Message.info('影像已存在，已直接加载本地记录')
         return mappedRecord
       }
-      Message.success('已自动接收科研平台影像')
+      if (!silent) Message.success('已自动接收科研平台影像')
       return mappedRecord
     } catch (error) {
       console.error(error)
+      if (silent) return null
       const msg = String(error?.message || '')
       if (msg.includes('返回 HTML')) {
         Message.error('下载接口返回了 HTML 页面（非 NIfTI 文件），请检查登录态/鉴权与 downloadByImageId 接口实现')
@@ -1397,6 +1421,24 @@ export default function App() {
     if (!imported?.id) return false
     await selectImage(imported.id)
     return true
+  }
+
+  const prefetchQueueImages = async (items = [], { skipImageId = '' } = {}) => {
+    for (const item of items) {
+      const remoteImageId = String(item?.imageId || '')
+      if (!remoteImageId || (skipImageId && String(skipImageId) === remoteImageId)) continue
+      const existing = await findLocalByRemoteImageId(remoteImageId)
+      if (existing) continue
+      await fetchAndImportByImageId({
+        imageId: remoteImageId,
+        imageUrl: item?.imageUrl || item?.downloadUrl || '',
+        originalName: item?.sourceImageName || item?.fileName || `image-${remoteImageId}.nii.gz`,
+        remoteBatchId: batchQueue?.batchId || externalCtx.batchId,
+        topicId: externalCtx.topicId,
+        useAutoGuard: false,
+        silent: true
+      })
+    }
   }
 
   const loadBatchQueue = async () => {
@@ -1439,6 +1481,7 @@ export default function App() {
           }
           if (targetItem) {
             await ensureQueueImageLoaded(targetItem)
+            void prefetchQueueImages(queue?.images || [], { skipImageId: targetItem?.imageId })
           }
         } catch (error) {
           console.error(error)
