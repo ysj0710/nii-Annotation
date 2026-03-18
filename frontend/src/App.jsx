@@ -1148,10 +1148,9 @@ export default function App() {
     return displayImages.findIndex((item) => item.id === activeImage?.id)
   }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
   const annotationToolDisabled = useMemo(() => {
-    if (!activeImage) return false
-    // 仅禁用“首次加载就自带 mask”的影像；用户后续自己标注产生的 mask 不禁用。
-    return !!(activeImage.isMaskOnly || activeImage.sourceMask)
-  }, [activeImage])
+    // 标注工具始终可用，不管是否有 mask 文件
+    return false
+  }, [])
 
   useEffect(() => {
     if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
@@ -1159,14 +1158,7 @@ export default function App() {
     }
   }, [activeImage?.sourceFormat, viewerMode])
 
-  useEffect(() => {
-    if (annotationToolDisabled && tool !== 'pan') {
-      setTool('pan')
-    }
-    if (annotationToolDisabled && annotationMenuVisible) {
-      setAnnotationMenuVisible(false)
-    }
-  }, [annotationToolDisabled, tool, annotationMenuVisible])
+  // 不再因为存在 mask 文件而自动重置工具或关闭菜单
 
   useEffect(() => {
     if (activeQueueIndex >= 0) {
@@ -2820,11 +2812,6 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   }
 
   const toggleAnnotationTool = (nextTool) => {
-    if (annotationToolDisabled) {
-      Message.info('该影像首次加载已带有 mask，已禁用直接标注')
-      setTool('pan')
-      return
-    }
     setTool((prev) => (prev === nextTool ? 'pan' : nextTool))
     requestAnimationFrame(() => {
       viewerRef.current?.refreshOverlay?.()
@@ -3012,12 +2999,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
           <div className="annotation-tools-wrap" ref={annotationToolsRef}>
             <Button
               icon={<IconTool />}
-              disabled={annotationToolDisabled}
               onClick={() => {
-                if (annotationToolDisabled) {
-                  Message.info('该影像首次加载已带有 mask，已禁用直接标注')
-                  return
-                }
                 setAnnotationMenuVisible((prev) => {
                   const next = !prev
                   if (!next && tool !== 'pan') {
