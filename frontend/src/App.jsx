@@ -1260,6 +1260,8 @@ export default function App() {
         })
         return
       }
+      // 仍有活动影像上下文时，避免后台预取刷新把当前视口重置到其它影像。
+      return
     }
     if (sorted.length > 0) {
       const scoped = currentBatchId
@@ -1790,6 +1792,7 @@ export default function App() {
     await persistActiveDrawing()
     const record = await getImageById(id)
     if (!record) return
+    activeImageIdRef.current = String(record.id)
     setActiveImage({
       ...record,
       maskVersion: hasAttachedMask(record) ? 1 : 0
