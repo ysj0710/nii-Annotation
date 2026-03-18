@@ -1276,6 +1276,16 @@ export default function App() {
     }
   }
 
+  const activateImportedRecordIfAllowed = (record, { dicom = false } = {}) => {
+    if (!record) return false
+    if (externalCtx.batchId) return false
+    if (activeImageIdRef.current) return false
+    activeImageIdRef.current = String(record.id)
+    setActiveImage({ ...record, maskVersion: hasAttachedMask(record) ? 1 : 0 })
+    if (dicom) setViewerMode('dicom')
+    return true
+  }
+
   const findLocalByRemoteImageId = async (remoteImageId) => {
     if (!remoteImageId) return null
     const records = await getAllImages()
@@ -2101,11 +2111,8 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       if (newRecords.length > 0) {
         await saveImages(newRecords)
         setImages((prev) => [...prev, ...newRecords.map(toListItem)])
-        if (!activeImage) {
-          const first = newRecords[0]
-          setActiveImage({ ...first, maskVersion: hasAttachedMask(first) ? 1 : 0 })
-          setViewerMode('dicom')
-        }
+        const first = newRecords[0]
+        activateImportedRecordIfAllowed(first, { dicom: true })
       }
     } catch (error) {
       console.error('DICOM 导入失败', error)
@@ -2160,9 +2167,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
     hashSet.add(hash)
 
     setImages((prev) => [...prev, toListItem(record)])
-    if (!activeImage) {
-      setActiveImage({ ...record, maskVersion: hasAttachedMask(record) ? 1 : 0 })
-    }
+    activateImportedRecordIfAllowed(record)
   }
 
   const importZipFile = async (file, hashSet, importBatchId = null) => {
@@ -2316,10 +2321,8 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
     if (newRecords.length > 0) {
       await saveImages(newRecords)
       setImages((prev) => [...prev, ...newRecords.map(toListItem)])
-      if (!activeImage) {
-        const first = newRecords[0]
-        setActiveImage({ ...first, maskVersion: hasAttachedMask(first) ? 1 : 0 })
-      }
+      const first = newRecords[0]
+      activateImportedRecordIfAllowed(first)
     }
 
   }
@@ -2488,10 +2491,8 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
     if (newRecords.length > 0) {
       await saveImages(newRecords)
       setImages((prev) => [...prev, ...newRecords.map(toListItem)])
-      if (!activeImage) {
-        const first = newRecords[0]
-        setActiveImage({ ...first, maskVersion: hasAttachedMask(first) ? 1 : 0 })
-      }
+      const first = newRecords[0]
+      activateImportedRecordIfAllowed(first)
     }
   }
 
