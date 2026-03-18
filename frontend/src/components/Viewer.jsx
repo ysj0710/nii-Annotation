@@ -74,6 +74,7 @@ const Viewer = forwardRef(function Viewer(
   const fillActiveRef = useRef(false)
   const markerPtsRef = useRef([])
   const activePointerIdRef = useRef(null)
+  const imageKeyRef = useRef('')
   const annotationsByImageRef = useRef(new Map())
   const annotationDraftRef = useRef(null)
   const annotationStepsRef = useRef([])
@@ -82,8 +83,7 @@ const Viewer = forwardRef(function Viewer(
   const MAX_FILL_POINTS = 32000
 
   const getImageKey = () => {
-    if (!image?.id) return ''
-    return String(image.id)
+    return imageKeyRef.current
   }
   const getCurrentAnnotations = () => {
     const key = getImageKey()
@@ -1007,6 +1007,7 @@ const Viewer = forwardRef(function Viewer(
 
   useEffect(() => {
     // 切换影像时清空临时态，避免上一张的草稿/轨迹残留到下一张。
+    imageKeyRef.current = image?.id ? String(image.id) : ''
     annotationDraftRef.current = null
     annotationStepsRef.current = []
     markerPtsRef.current = []

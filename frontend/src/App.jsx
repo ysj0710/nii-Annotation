@@ -1818,6 +1818,9 @@ export default function App() {
   }
 
   const onViewerEvent = (reason = 'draw') => {
+    if (reason === 'annotate') {
+      Message.success('标注创建成功')
+    }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate' || reason === 'clear') {
       hasUnsavedChangesRef.current = true
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
