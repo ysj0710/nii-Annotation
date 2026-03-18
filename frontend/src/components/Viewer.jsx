@@ -306,6 +306,42 @@ const Viewer = forwardRef(function Viewer(
     return out
   }
 
+  const isFreehandClosed = (normPoints, pxPoints, canvas) => {
+    if (!Array.isArray(normPoints) || normPoints.length < 6) return false
+    if (!Array.isArray(pxPoints) || pxPoints.length !== normPoints.length) return false
+    if (!canvas) return false
+
+    const first = normPoints[0]
+    const last = normPoints[normPoints.length - 1]
+    const normDist = Math.hypot(Number(first?.x || 0) - Number(last?.x || 0), Number(first?.y || 0) - Number(last?.y || 0))
+    const firstPx = pxPoints[0]
+    const lastPx = pxPoints[pxPoints.length - 1]
+    const pxDist = Math.hypot(firstPx.x - lastPx.x, firstPx.y - lastPx.y)
+
+    let minX = Number.POSITIVE_INFINITY
+    let maxX = Number.NEGATIVE_INFINITY
+    let minY = Number.POSITIVE_INFINITY
+    let maxY = Number.NEGATIVE_INFINITY
+    let pathLen = 0
+    for (let i = 0; i < pxPoints.length; i += 1) {
+      const p = pxPoints[i]
+      minX = Math.min(minX, p.x)
+      maxX = Math.max(maxX, p.x)
+      minY = Math.min(minY, p.y)
+      maxY = Math.max(maxY, p.y)
+      if (i > 0) {
+        const q = pxPoints[i - 1]
+        pathLen += Math.hypot(p.x - q.x, p.y - q.y)
+      }
+    }
+    const bboxDiag = Math.hypot(maxX - minX, maxY - minY)
+    const minPathLen = Math.max(40, bboxDiag * 0.9)
+    if (pathLen < minPathLen) return false
+
+    const pxThreshold = Math.max(8, Math.min(18, Math.min(canvas.width, canvas.height) * 0.018))
+    return normDist <= 0.02 || pxDist <= pxThreshold
+  }
+
   const drawAnnotation = (ctx, canvas, annotation) => {
     const points = (annotation?.points || []).map((p) => toPxPoint(p, canvas))
     if (!points.length) return
@@ -402,7 +438,7 @@ const Viewer = forwardRef(function Viewer(
       }
       const shouldCloseAndFill =
         (annotation.type === 'curve' && points.length >= 3) ||
-        (annotation.type === 'freehand' && annotation.closed && points.length >= 3)
+        (annotation.type === 'freehand' && !!annotation.closed && points.length >= 3)
       if (shouldCloseAndFill) {
         ctx.closePath()
         ctx.save()
@@ -1288,16 +1324,7 @@ const Viewer = forwardRef(function Viewer(
             draft.points = smoothPath(draft.points)
             draft.label = ''
           } else if (toolRef.current === 'freehand') {
-            if (draft.points.length >= 3) {
-              const first = draft.points[0]
-              const last = draft.points[draft.points.length - 1]
-              const dx = Number(first?.x || 0) - Number(last?.x || 0)
-              const dy = Number(first?.y || 0) - Number(last?.y || 0)
-              if (Math.hypot(dx, dy) <= 0.03) {
-                draft.closed = true
-                draft.points = [...draft.points, first]
-              }
-            }
+            draft.closed = isFreehandClosed(draft.points, pxPoints, markerCanvas)
             draft.label = ''
           }
           addAnnotation({ ...draft })
