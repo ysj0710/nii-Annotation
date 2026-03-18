@@ -1579,18 +1579,19 @@ export default function App() {
 
   const persistActiveDrawing = async () => {
     if (!activeImage?.id) return false
+    const overlayAnnotations = viewerRef.current?.exportAnnotations?.() || []
     const exported = await viewerRef.current?.exportDrawing()
-    if (!exported) return false
     const raw = arrayBufferFrom(exported)
-    if (!raw) return false
-    const buffer = sanitizeMaskBuffer(raw, { templateBuffer: activeImage?.data })
-    if (!buffer) return false
-    const hasMask = hasNonZeroMaskNifti(buffer)
+    const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer: activeImage?.data }) : null
+    const hasMask = buffer ? hasNonZeroMaskNifti(buffer) : false
+    const hasOverlayAnnotations = overlayAnnotations.length > 0
+    if (!buffer && !hasOverlayAnnotations) return false
     if (!hasMask) {
       await updateImage(activeImage.id, {
         mask: null,
         maskName: null,
         maskAttached: false,
+        overlayAnnotations,
         modifiedByUser: true,
         updatedAt: Date.now()
       })
@@ -1609,6 +1610,7 @@ export default function App() {
               mask: null,
               maskName: null,
               maskAttached: false,
+              overlayAnnotations,
               modifiedByUser: true,
               maskVersion: (prev.maskVersion || 0) + 1
             }
@@ -1621,6 +1623,7 @@ export default function App() {
       mask: buffer,
       maskName: `${fileStem(activeImage.name)}.nii.gz`,
       maskAttached: true,
+      overlayAnnotations,
       modifiedByUser: true,
       updatedAt: Date.now()
     })
@@ -1634,6 +1637,7 @@ export default function App() {
             ...prev,
             mask: buffer,
             maskAttached: true,
+            overlayAnnotations,
             modifiedByUser: true,
             maskVersion: (prev.maskVersion || 0) + 1
           }
@@ -1737,8 +1741,12 @@ export default function App() {
       saveTimerRef.current = null
     }
     if (!hasUnsavedChangesRef.current) {
-      Message.info('当前无新增修改，未执行保存')
-      return
+      const annotationCount = Number(viewerRef.current?.getAnnotationCount?.() || 0)
+      if (annotationCount <= 0) {
+        Message.info('当前无新增修改，未执行保存')
+        return
+      }
+      hasUnsavedChangesRef.current = true
     }
     const saved = await persistActiveDrawing()
     if (!saved) {
@@ -1780,6 +1788,9 @@ export default function App() {
       saveTimerRef.current = setTimeout(() => {
         persistActiveDrawing()
       }, 800)
+    }
+    if (reason === 'annotate') {
+      hasUnsavedChangesRef.current = true
     }
     if (reason === 'clear') {
       hasUnsavedChangesRef.current = true

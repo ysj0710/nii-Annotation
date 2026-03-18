@@ -66,6 +66,7 @@ const Viewer = forwardRef(function Viewer(
   const markerCanvasRef = useRef(null)
   const nvRef = useRef(null)
   const historyRef = useRef({ stack: [], index: -1 })
+  const actionHistoryRef = useRef([])
   const toolRef = useRef(tool)
   const crosshairWidthRef = useRef(null)
   const fillPtsRef = useRef([])
@@ -80,13 +81,34 @@ const Viewer = forwardRef(function Viewer(
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
 
-  const getImageKey = () => image?.id || '__no_image__'
-  const getCurrentAnnotations = () => annotationsByImageRef.current.get(getImageKey()) || []
+  const getImageKey = () => {
+    if (!image?.id) return ''
+    return String(image.id)
+  }
+  const getCurrentAnnotations = () => {
+    const key = getImageKey()
+    if (!key) return []
+    return annotationsByImageRef.current.get(key) || []
+  }
   const setCurrentAnnotations = (next) => {
-    annotationsByImageRef.current.set(getImageKey(), next)
+    const key = getImageKey()
+    if (!key) return
+    annotationsByImageRef.current.set(key, next)
   }
   const addAnnotation = (annotation) => {
+    const key = getImageKey()
+    if (!key) return
     setCurrentAnnotations([...getCurrentAnnotations(), annotation])
+    actionHistoryRef.current.push({ type: 'annotation', imageKey: key })
+    if (typeof onDrawingChange === 'function') onDrawingChange('annotate')
+  }
+  const cloneAnnotations = (items) => {
+    if (!Array.isArray(items)) return []
+    try {
+      return JSON.parse(JSON.stringify(items))
+    } catch {
+      return []
+    }
   }
   const getCurrentAnnotationColor = () =>
     labels.find((item) => Number(item.value || 0) === Number(activeLabelValue || 0))?.color || '#60a5fa'
@@ -118,7 +140,7 @@ const Viewer = forwardRef(function Viewer(
   }
 
   const pushSnapshot = (bitmap) => {
-    if (!bitmap) return
+    if (!bitmap) return false
     const history = historyRef.current
     if (history.index < history.stack.length - 1) {
       history.stack = history.stack.slice(0, history.index + 1)
@@ -134,11 +156,12 @@ const Viewer = forwardRef(function Viewer(
       }
       if (same) {
         history.index = history.stack.length - 1
-        return
+        return false
       }
     }
     history.stack.push(new Uint8Array(bitmap))
     history.index = history.stack.length - 1
+    return true
   }
 
   const applySnapshot = (snapshot) => {
@@ -150,6 +173,17 @@ const Viewer = forwardRef(function Viewer(
     nv.drawBitmap.set(snapshot)
     if (typeof nv.refreshDrawing === 'function') {
       nv.refreshDrawing(true)
+    }
+  }
+
+  const redrawDrawingOverlay = () => {
+    const nv = nvRef.current
+    if (!nv) return
+    if (typeof nv.refreshDrawing === 'function') {
+      nv.refreshDrawing(true)
+    }
+    if (typeof nv.drawScene === 'function') {
+      nv.drawScene()
     }
   }
 
@@ -170,6 +204,7 @@ const Viewer = forwardRef(function Viewer(
 
     if (currentTool === 'pan' || isAnnotationTool(currentTool)) {
       safeCall('setDrawingEnabled', false)
+      redrawDrawingOverlay()
       return
     }
 
@@ -182,6 +217,7 @@ const Viewer = forwardRef(function Viewer(
     if (typeof currentBrushSize === 'number') {
       safeCall('setPenSize', currentBrushSize)
     }
+    redrawDrawingOverlay()
   }
 
   const resetFillTracking = () => {
@@ -364,10 +400,14 @@ const Viewer = forwardRef(function Viewer(
       for (let i = 1; i < points.length; i += 1) {
         ctx.lineTo(points[i].x, points[i].y)
       }
-      if (annotation.type === 'curve' && points.length >= 3) {
+      const shouldCloseAndFill =
+        (annotation.type === 'curve' && points.length >= 3) ||
+        (annotation.type === 'freehand' && annotation.closed && points.length >= 3)
+      if (shouldCloseAndFill) {
         ctx.closePath()
         ctx.save()
-        ctx.fillStyle = hexToRgba(annotation.color || '#93c5fd', 0.45)
+        const fillAlpha = annotation.type === 'freehand' ? 0.3 : 0.45
+        ctx.fillStyle = hexToRgba(annotation.color || '#93c5fd', fillAlpha)
         ctx.fill()
         ctx.restore()
       }
@@ -594,7 +634,11 @@ const Viewer = forwardRef(function Viewer(
           if (typeof nv.refreshDrawing === 'function') {
             nv.refreshDrawing(true)
           }
-          pushSnapshot(nv.drawBitmap)
+          const pushed = pushSnapshot(nv.drawBitmap)
+          if (pushed) {
+            const imageKey = getImageKey()
+            if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
+          }
           if (typeof onDrawingChange === 'function') {
             onDrawingChange('draw')
           }
@@ -616,13 +660,38 @@ const Viewer = forwardRef(function Viewer(
       return true
     },
     undoToolAction: () => {
+      const currentImageKey = getImageKey()
+      if (!currentImageKey) return false
+      const history = historyRef.current
+      const actionHistory = actionHistoryRef.current
+      while (actionHistory.length > 0) {
+        const action = actionHistory.pop()
+        const actionType = typeof action === 'string' ? action : action?.type
+        const actionImageKey = typeof action === 'string' ? currentImageKey : action?.imageKey
+        if (actionImageKey !== currentImageKey) continue
+        if (actionType === 'annotation') {
+          const current = getCurrentAnnotations()
+          if (!current.length) continue
+          setCurrentAnnotations(current.slice(0, -1))
+          drawStrokeMarkers()
+          if (typeof onDrawingChange === 'function') onDrawingChange('undo')
+          return true
+        }
+        if (actionType === 'mask') {
+          if (history.index <= 0) continue
+          history.index -= 1
+          applySnapshot(history.stack[history.index])
+          if (typeof onDrawingChange === 'function') onDrawingChange('undo')
+          return true
+        }
+      }
       const current = getCurrentAnnotations()
       if (current.length > 0) {
         setCurrentAnnotations(current.slice(0, -1))
         drawStrokeMarkers()
+        if (typeof onDrawingChange === 'function') onDrawingChange('undo')
         return true
       }
-      const history = historyRef.current
       if (history.index <= 0) return false
       history.index -= 1
       applySnapshot(history.stack[history.index])
@@ -631,10 +700,15 @@ const Viewer = forwardRef(function Viewer(
     },
     clearAnnotations: () => {
       const key = getImageKey()
-      annotationsByImageRef.current.delete(key)
-      annotationsByImageRef.current.delete('__no_image__')
+      if (key) annotationsByImageRef.current.delete(key)
       annotationDraftRef.current = null
       annotationStepsRef.current = []
+      const currentImageKey = getImageKey()
+      actionHistoryRef.current = actionHistoryRef.current.filter((item) => {
+        const actionType = typeof item === 'string' ? item : item?.type
+        const actionImageKey = typeof item === 'string' ? currentImageKey : item?.imageKey
+        return !(actionType === 'annotation' && actionImageKey === currentImageKey)
+      })
       resetFillTracking()
       drawStrokeMarkers()
       if (typeof onDrawingChange === 'function') onDrawingChange('clear')
@@ -662,7 +736,11 @@ const Viewer = forwardRef(function Viewer(
       if (!nv?.drawBitmap) return
       ensureBaseSnapshot(nv.drawBitmap)
       const empty = new Uint8Array(nv.drawBitmap.length)
-      pushSnapshot(empty)
+      const pushed = pushSnapshot(empty)
+      if (pushed) {
+        const imageKey = getImageKey()
+        if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
+      }
       applySnapshot(empty)
       if (typeof onDrawingChange === 'function') {
         onDrawingChange('clear')
@@ -677,6 +755,8 @@ const Viewer = forwardRef(function Viewer(
       }
       return null
     },
+    exportAnnotations: () => cloneAnnotations(getCurrentAnnotations()),
+    getAnnotationCount: () => getCurrentAnnotations().length,
     getLabelStats: () => {
       const nv = nvRef.current
       const bitmap = nv?.drawBitmap
@@ -776,7 +856,11 @@ const Viewer = forwardRef(function Viewer(
         const nv = nvRef.current
         if (!nv?.drawBitmap) return
         ensureBaseSnapshot(nv.drawBitmap)
-        pushSnapshot(nv.drawBitmap)
+        const pushed = pushSnapshot(nv.drawBitmap)
+        if (pushed && action !== 'undo' && action !== 'redo') {
+          const imageKey = getImageKey()
+          if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
+        }
         if (typeof onDrawingChange === 'function') {
           onDrawingChange(action)
         }
@@ -791,6 +875,17 @@ const Viewer = forwardRef(function Viewer(
     annotationStepsRef.current = []
     drawStrokeMarkers()
   }, [tool])
+
+  useEffect(() => {
+    // 切换影像时清空临时态，避免上一张的草稿/轨迹残留到下一张。
+    annotationDraftRef.current = null
+    annotationStepsRef.current = []
+    markerPtsRef.current = []
+    fillPtsRef.current = []
+    fillActiveRef.current = false
+    activePointerIdRef.current = null
+    drawStrokeMarkers()
+  }, [image?.id])
 
   useEffect(() => {
     const nv = nvRef.current
@@ -863,6 +958,7 @@ const Viewer = forwardRef(function Viewer(
       if (cancelled) return
 
       historyRef.current = { stack: [], index: -1 }
+      actionHistoryRef.current = []
       if (nv.volumes?.length) {
         const existing = [...nv.volumes]
         existing.forEach((vol) => nv.removeVolume(vol))
@@ -923,13 +1019,24 @@ const Viewer = forwardRef(function Viewer(
           })
           if (cancelled) return
           nv.loadDrawing(maskVolume)
+          redrawDrawingOverlay()
         }
       } else if (typeof nv.closeDrawing === 'function') {
         nv.closeDrawing()
+        redrawDrawingOverlay()
+      }
+
+      const imageKey = getImageKey()
+      if (imageKey) {
+        annotationsByImageRef.current.set(imageKey, cloneAnnotations(image.overlayAnnotations))
       }
 
       applyToolSettings(toolRef.current, brushSize, activeLabelValue)
       drawStrokeMarkers()
+      requestAnimationFrame(() => {
+        redrawDrawingOverlay()
+        drawStrokeMarkers()
+      })
       if (typeof onDrawingChange === 'function') {
         onDrawingChange('load')
       }
@@ -1181,6 +1288,16 @@ const Viewer = forwardRef(function Viewer(
             draft.points = smoothPath(draft.points)
             draft.label = ''
           } else if (toolRef.current === 'freehand') {
+            if (draft.points.length >= 3) {
+              const first = draft.points[0]
+              const last = draft.points[draft.points.length - 1]
+              const dx = Number(first?.x || 0) - Number(last?.x || 0)
+              const dy = Number(first?.y || 0) - Number(last?.y || 0)
+              if (Math.hypot(dx, dy) <= 0.03) {
+                draft.closed = true
+                draft.points = [...draft.points, first]
+              }
+            }
             draft.label = ''
           }
           addAnnotation({ ...draft })
