@@ -1019,6 +1019,12 @@ export default function App() {
       imageUrl: p.get('imageUrl') || globalCtx.imageUrl || '',
       token: p.get('token') || globalCtx.token || '',
       platformOrigin: p.get('platformOrigin') || globalCtx.platformOrigin || '',
+      annotationBackendOrigin:
+        p.get('annotationBackendOrigin') ||
+        p.get('backendOrigin') ||
+        globalCtx.annotationBackendOrigin ||
+        globalCtx.backendOrigin ||
+        '',
       originalName: p.get('originalName') || p.get('imageName') || globalCtx.originalName || globalCtx.imageName || '',
       batchId: p.get('batchId') || globalCtx.batchId || '',
       topicId: p.get('topicId') || globalCtx.topicId || ''
@@ -1026,8 +1032,9 @@ export default function App() {
   }, [])
   const localBackendOrigin = useMemo(() => {
     const envOrigin = String(import.meta.env?.VITE_ANNOTATION_BACKEND_ORIGIN || '').trim().replace(/\/+$/, '')
-    return envOrigin || 'http://127.0.0.1:8010'
-  }, [])
+    const ctxOrigin = String(externalCtx.annotationBackendOrigin || '').trim().replace(/\/+$/, '')
+    return ctxOrigin || envOrigin || 'http://192.168.110.88:8010'
+  }, [externalCtx.annotationBackendOrigin])
 
   const activeLabel = useMemo(
     () => labels.find((label) => label.id === activeLabelId) || labels[0],
