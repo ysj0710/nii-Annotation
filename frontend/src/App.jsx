@@ -44,6 +44,15 @@ const fileStem = (name) =>
     .pop()
     .replace(/\.(nii\.gz|nii|nrrd|dicom|dcm|png|jpe?g|bmp|webp|tif|tiff)$/i, '')
 
+const inferMaskFileName = (name) => {
+  const source = String(name || '')
+  const stem = fileStem(source) || 'mask'
+  if (/\.nii$/i.test(source) && !/\.nii\.gz$/i.test(source)) {
+    return `${stem}.nii`
+  }
+  return `${stem}.nii.gz`
+}
+
 const stripMaskTokens = (base) =>
   base
     .replace(/(mask|seg|label)/gi, '')
@@ -1704,17 +1713,19 @@ export default function App() {
     const maskBuffer = record?.mask || record?.sourceMask
     if (!maskBuffer) return false
 
+    const sourceName = String(record?.sourceName || record?.name || '')
+    const sourceNameStem = fileStem(sourceName) || sourceName || `image-${remoteImageId}`
     const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationByImageId`
     const payload = new FormData()
     payload.append('imageId', remoteImageId)
     payload.append(
       'maskFile',
-      new File([maskBuffer], `${fileStem(record?.sourceName || record?.name || 'mask')}.nii.gz`, {
+      new File([maskBuffer], inferMaskFileName(sourceName || 'mask.nii.gz'), {
         type: 'application/octet-stream'
       })
     )
-    payload.append('sourceImageName', String(record?.sourceName || record?.name || ''))
+    payload.append('sourceImageName', sourceNameStem)
     payload.append('annotationStatus', '1')
     payload.append('annotation_status', '1')
     payload.append(
@@ -1756,15 +1767,16 @@ export default function App() {
       const maskBuffer = record?.mask || record?.sourceMask
       if (!maskBuffer) continue
       const sourceName = String(record?.sourceName || item?.sourceImageName || item?.fileName || `image-${remoteImageId}`)
+      const sourceNameStem = fileStem(sourceName) || sourceName || `image-${remoteImageId}`
       items.push({
         imageId: Number.isFinite(Number(remoteImageId)) ? Number(remoteImageId) : remoteImageId,
-        sourceImageName: sourceName,
+        sourceImageName: sourceNameStem,
         annotations: JSON.stringify({
           labels,
           annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
         }),
         maskBase64: bufferToBase64(maskBuffer),
-        maskFileName: `${fileStem(sourceName) || `mask-${remoteImageId}`}.nii.gz`,
+        maskFileName: inferMaskFileName(sourceName || `mask-${remoteImageId}.nii.gz`),
         annotationStatus: 1,
         annotation_status: 1
       })
@@ -1818,13 +1830,6 @@ export default function App() {
       Message.warning('保存失败，请重试')
       return
     }
-    let localSyncError = null
-    try {
-      await syncActiveAnnotationToLocalBackend()
-    } catch (error) {
-      console.error(error)
-      localSyncError = error
-    }
     try {
       const synced = externalCtx.batchId ? await syncBatchAnnotationsToPlatform() : await syncActiveAnnotationToPlatform()
       if (synced) {
@@ -1842,26 +1847,14 @@ export default function App() {
           })
         }
         hasUnsavedChangesRef.current = false
-        if (localSyncError) {
-          Message.warning('科研平台同步成功，但导出服务不可达（已跳过本地export）')
-        } else {
-          Message.success(externalCtx.batchId ? '批次标注已保存，已同步本地后端和科研平台' : '当前标注已保存，已同步本地后端和科研平台')
-        }
+        Message.success(externalCtx.batchId ? '批次标注已保存并同步科研平台' : '当前标注已保存并同步科研平台')
       } else {
         hasUnsavedChangesRef.current = false
-        if (localSyncError) {
-          Message.warning('标注已本地保存，但导出服务不可达，且科研平台未返回同步结果')
-        } else {
-          Message.success('当前标注已保存，已同步本地后端')
-        }
+        Message.success('当前标注已保存')
       }
     } catch (error) {
       console.error(error)
-      if (localSyncError) {
-        Message.error('标注已本地保存，但导出服务与科研平台同步均失败')
-      } else {
-        Message.error('标注已本地保存，但科研平台同步失败')
-      }
+      Message.error('标注已本地保存，但科研平台同步失败')
     }
   }
 
