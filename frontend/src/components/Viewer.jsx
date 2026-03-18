@@ -176,6 +176,17 @@ const Viewer = forwardRef(function Viewer(
     }
   }
 
+  const redrawDrawingOverlay = () => {
+    const nv = nvRef.current
+    if (!nv) return
+    if (typeof nv.refreshDrawing === 'function') {
+      nv.refreshDrawing(true)
+    }
+    if (typeof nv.drawScene === 'function') {
+      nv.drawScene()
+    }
+  }
+
   const applyToolSettings = (currentTool, currentBrushSize, currentLabelValue) => {
     const nv = nvRef.current
     if (!nv) return
@@ -193,6 +204,7 @@ const Viewer = forwardRef(function Viewer(
 
     if (currentTool === 'pan' || isAnnotationTool(currentTool)) {
       safeCall('setDrawingEnabled', false)
+      redrawDrawingOverlay()
       return
     }
 
@@ -205,6 +217,7 @@ const Viewer = forwardRef(function Viewer(
     if (typeof currentBrushSize === 'number') {
       safeCall('setPenSize', currentBrushSize)
     }
+    redrawDrawingOverlay()
   }
 
   const resetFillTracking = () => {
@@ -291,42 +304,6 @@ const Viewer = forwardRef(function Viewer(
     }
     out.push(pts[pts.length - 1])
     return out
-  }
-
-  const isFreehandClosed = (normPoints, pxPoints, canvas) => {
-    if (!Array.isArray(normPoints) || normPoints.length < 6) return false
-    if (!Array.isArray(pxPoints) || pxPoints.length !== normPoints.length) return false
-    if (!canvas) return false
-
-    const first = normPoints[0]
-    const last = normPoints[normPoints.length - 1]
-    const normDist = Math.hypot(Number(first?.x || 0) - Number(last?.x || 0), Number(first?.y || 0) - Number(last?.y || 0))
-    const firstPx = pxPoints[0]
-    const lastPx = pxPoints[pxPoints.length - 1]
-    const pxDist = Math.hypot(firstPx.x - lastPx.x, firstPx.y - lastPx.y)
-
-    let minX = Number.POSITIVE_INFINITY
-    let maxX = Number.NEGATIVE_INFINITY
-    let minY = Number.POSITIVE_INFINITY
-    let maxY = Number.NEGATIVE_INFINITY
-    let pathLen = 0
-    for (let i = 0; i < pxPoints.length; i += 1) {
-      const p = pxPoints[i]
-      minX = Math.min(minX, p.x)
-      maxX = Math.max(maxX, p.x)
-      minY = Math.min(minY, p.y)
-      maxY = Math.max(maxY, p.y)
-      if (i > 0) {
-        const q = pxPoints[i - 1]
-        pathLen += Math.hypot(p.x - q.x, p.y - q.y)
-      }
-    }
-    const bboxDiag = Math.hypot(maxX - minX, maxY - minY)
-    const minPathLen = Math.max(40, bboxDiag * 0.9)
-    if (pathLen < minPathLen) return false
-
-    const pxThreshold = Math.max(8, Math.min(18, Math.min(canvas.width, canvas.height) * 0.018))
-    return normDist <= 0.02 || pxDist <= pxThreshold
   }
 
   const drawAnnotation = (ctx, canvas, annotation) => {
@@ -425,7 +402,7 @@ const Viewer = forwardRef(function Viewer(
       }
       const shouldCloseAndFill =
         (annotation.type === 'curve' && points.length >= 3) ||
-        (annotation.type === 'freehand' && !!annotation.closed && points.length >= 3)
+        (annotation.type === 'freehand' && annotation.closed && points.length >= 3)
       if (shouldCloseAndFill) {
         ctx.closePath()
         ctx.save()
@@ -1042,9 +1019,11 @@ const Viewer = forwardRef(function Viewer(
           })
           if (cancelled) return
           nv.loadDrawing(maskVolume)
+          redrawDrawingOverlay()
         }
       } else if (typeof nv.closeDrawing === 'function') {
         nv.closeDrawing()
+        redrawDrawingOverlay()
       }
 
       const imageKey = getImageKey()
@@ -1054,6 +1033,10 @@ const Viewer = forwardRef(function Viewer(
 
       applyToolSettings(toolRef.current, brushSize, activeLabelValue)
       drawStrokeMarkers()
+      requestAnimationFrame(() => {
+        redrawDrawingOverlay()
+        drawStrokeMarkers()
+      })
       if (typeof onDrawingChange === 'function') {
         onDrawingChange('load')
       }
@@ -1305,13 +1288,19 @@ const Viewer = forwardRef(function Viewer(
             draft.points = smoothPath(draft.points)
             draft.label = ''
           } else if (toolRef.current === 'freehand') {
-            draft.closed = isFreehandClosed(draft.points, pxPoints, markerCanvas)
+            if (draft.points.length >= 3) {
+              const first = draft.points[0]
+              const last = draft.points[draft.points.length - 1]
+              const dx = Number(first?.x || 0) - Number(last?.x || 0)
+              const dy = Number(first?.y || 0) - Number(last?.y || 0)
+              if (Math.hypot(dx, dy) <= 0.03) {
+                draft.closed = true
+                draft.points = [...draft.points, first]
+              }
+            }
             draft.label = ''
           }
-          addAnnotation({
-            ...draft,
-            points: Array.isArray(draft.points) ? draft.points.map((p) => ({ x: Number(p?.x || 0), y: Number(p?.y || 0) })) : []
-          })
+          addAnnotation({ ...draft })
         }
         annotationDraftRef.current = null
         activePointerIdRef.current = null
