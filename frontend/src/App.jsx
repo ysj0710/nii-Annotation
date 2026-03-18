@@ -1603,6 +1603,9 @@ export default function App() {
             : img
         )
       )
+      // 仅在 mask 状态实际发生改变时才递增 maskVersion，
+      // 避免纯标注保存触发 Viewer 不必要的影像重加载
+      const maskActuallyChanged = activeImage.maskAttached === true
       setActiveImage((prev) =>
         prev
           ? {
@@ -1612,7 +1615,7 @@ export default function App() {
               maskAttached: false,
               overlayAnnotations,
               modifiedByUser: true,
-              maskVersion: (prev.maskVersion || 0) + 1
+              ...(maskActuallyChanged ? { maskVersion: (prev.maskVersion || 0) + 1 } : {})
             }
           : prev
       )
@@ -1782,18 +1785,12 @@ export default function App() {
   }
 
   const onViewerEvent = (reason = 'draw') => {
-    if (reason === 'draw' || reason === 'undo' || reason === 'redo') {
+    if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate' || reason === 'clear') {
       hasUnsavedChangesRef.current = true
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
       saveTimerRef.current = setTimeout(() => {
         persistActiveDrawing()
       }, 800)
-    }
-    if (reason === 'annotate') {
-      hasUnsavedChangesRef.current = true
-    }
-    if (reason === 'clear') {
-      hasUnsavedChangesRef.current = true
     }
     scheduleLabelStatsRefresh()
   }
@@ -1810,6 +1807,11 @@ export default function App() {
 
   const selectImage = async (id) => {
     if (activeImage?.id === id) return
+    // 取消待执行的自动保存，防止切换后的旧计时器用错误的影像数据写入 DB
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
     await persistActiveDrawing()
     const record = await getImageById(id)
     if (!record) return

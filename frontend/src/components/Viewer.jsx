@@ -406,7 +406,7 @@ const Viewer = forwardRef(function Viewer(
       if (shouldCloseAndFill) {
         ctx.closePath()
         ctx.save()
-        const fillAlpha = annotation.type === 'freehand' ? 0.3 : 0.45
+        const fillAlpha = 0.45
         ctx.fillStyle = hexToRgba(annotation.color || '#93c5fd', fillAlpha)
         ctx.fill()
         ctx.restore()
@@ -950,6 +950,13 @@ const Viewer = forwardRef(function Viewer(
         return
       }
 
+      // 在第一个 await 之前同步恢复标注数据，防止异步加载期间新增的标注被覆盖
+      const imageKeyEarly = getImageKey()
+      if (imageKeyEarly) {
+        annotationsByImageRef.current.set(imageKeyEarly, cloneAnnotations(image.overlayAnnotations))
+        drawStrokeMarkers()
+      }
+
       const nextVolume = await NVImage.loadFromUrl({
         url: image.name,
         name: image.name,
@@ -1024,11 +1031,6 @@ const Viewer = forwardRef(function Viewer(
       } else if (typeof nv.closeDrawing === 'function') {
         nv.closeDrawing()
         redrawDrawingOverlay()
-      }
-
-      const imageKey = getImageKey()
-      if (imageKey) {
-        annotationsByImageRef.current.set(imageKey, cloneAnnotations(image.overlayAnnotations))
       }
 
       applyToolSettings(toolRef.current, brushSize, activeLabelValue)
@@ -1290,13 +1292,9 @@ const Viewer = forwardRef(function Viewer(
           } else if (toolRef.current === 'freehand') {
             if (draft.points.length >= 3) {
               const first = draft.points[0]
-              const last = draft.points[draft.points.length - 1]
-              const dx = Number(first?.x || 0) - Number(last?.x || 0)
-              const dy = Number(first?.y || 0) - Number(last?.y || 0)
-              if (Math.hypot(dx, dy) <= 0.03) {
-                draft.closed = true
-                draft.points = [...draft.points, first]
-              }
+              // 始终闭合自由曲线，并根据 label 颜色填充区域
+              draft.closed = true
+              draft.points = [...draft.points, first]
             }
             draft.label = ''
           }
