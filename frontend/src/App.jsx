@@ -1690,6 +1690,8 @@ export default function App() {
       })
     )
     payload.append('sourceImageName', String(record?.sourceName || record?.name || ''))
+    payload.append('annotationStatus', '1')
+    payload.append('annotation_status', '1')
     payload.append(
       'annotations',
       JSON.stringify({
@@ -2632,6 +2634,20 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
     if (!record) return
 
     if (record.sourceMask) {
+      await updateImage(id, {
+        overlayAnnotations: [],
+        modifiedByUser: true,
+        updatedAt: Date.now()
+      })
+      setActiveImage((prev) =>
+        prev
+          ? {
+              ...prev,
+              overlayAnnotations: [],
+              modifiedByUser: true
+            }
+          : prev
+      )
       await detachMaskFromImage(id, record)
       return
     }
@@ -2640,6 +2656,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       mask: null,
       maskName: null,
       maskAttached: false,
+      overlayAnnotations: [],
       modifiedByUser: true,
       updatedAt: Date.now()
     })
@@ -2655,6 +2672,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             mask: null,
             maskName: null,
             maskAttached: false,
+            overlayAnnotations: [],
             modifiedByUser: true,
             maskVersion: (prev.maskVersion || 0) + 1
           }

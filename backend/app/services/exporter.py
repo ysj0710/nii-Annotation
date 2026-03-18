@@ -4,6 +4,7 @@ import io
 import json
 import zipfile
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import nibabel as nib
@@ -67,7 +68,10 @@ def build_export_zip(
     image_filename: str,
     mask_filename: str,
     image_id: str,
+    storage_root: str | None = None,
 ) -> tuple[str, bytes]:
+    image_filename = Path(image_filename or "image.nii.gz").name
+    mask_filename = Path(mask_filename or "mask.nii.gz").name
     image_nifti = _load_nifti(image_bytes, "image")
     mask_nifti = _load_nifti(mask_bytes, "mask")
     normalized_mask = _normalize_mask(mask_nifti, image_nifti.shape)
@@ -83,12 +87,26 @@ def build_export_zip(
     annotations["exportedAt"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
     mask_payload = merged_mask.to_bytes()
+    annotations_payload = json.dumps(annotations, ensure_ascii=False, indent=2).encode("utf-8")
+
+    if storage_root:
+        root = Path(storage_root).expanduser().resolve()
+        safe_image_id = str(image_id or "image")
+        case_root = root / safe_image_id
+        img_dir = case_root / "img"
+        mask_dir = case_root / "mask"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        mask_dir.mkdir(parents=True, exist_ok=True)
+        (img_dir / image_filename).write_bytes(image_bytes)
+        (mask_dir / "mask.nii.gz").write_bytes(mask_payload)
+        (mask_dir / "annotations.json").write_bytes(annotations_payload)
+        (mask_dir / "source_mask_filename.txt").write_text(mask_filename or "mask.nii.gz", encoding="utf-8")
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"img/{image_filename}", image_bytes)
         zf.writestr("mask/mask.nii.gz", mask_payload)
-        zf.writestr("mask/annotations.json", json.dumps(annotations, ensure_ascii=False, indent=2).encode("utf-8"))
+        zf.writestr("mask/annotations.json", annotations_payload)
         zf.writestr("mask/source_mask_filename.txt", mask_filename or "mask.nii.gz")
     zip_buffer.seek(0)
 

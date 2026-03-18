@@ -81,6 +81,7 @@ const Viewer = forwardRef(function Viewer(
   const curveLastTapRef = useRef(0)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
+  imageKeyRef.current = image?.id ? String(image.id) : ''
 
   const getImageKey = () => {
     return imageKeyRef.current
@@ -185,6 +186,20 @@ const Viewer = forwardRef(function Viewer(
     if (typeof nv.drawScene === 'function') {
       nv.drawScene()
     }
+  }
+
+  const ensureDrawingBitmap = () => {
+    const nv = nvRef.current
+    if (!nv) return false
+    if (nv.drawBitmap?.length) return true
+    const dims = nv.back?.dims
+    const nx = Number(dims?.[1] || 0)
+    const ny = Number(dims?.[2] || 0)
+    const nz = Math.max(1, Number(dims?.[3] || 1))
+    if (nx < 1 || ny < 1 || nz < 1) return false
+    nv.drawBitmap = new Uint8Array(nx * ny * nz)
+    redrawDrawingOverlay()
+    return true
   }
 
   const applyToolSettings = (currentTool, currentBrushSize, currentLabelValue) => {
@@ -657,7 +672,8 @@ const Viewer = forwardRef(function Viewer(
   const rasterizeClosedAnnotationToMask = (normPoints) => {
     const nv = nvRef.current
     const markerCanvas = markerCanvasRef.current
-    if (!nv || !markerCanvas || !Array.isArray(normPoints) || normPoints.length < 3 || !nv.drawBitmap) return false
+    if (!nv || !markerCanvas || !Array.isArray(normPoints) || normPoints.length < 3) return false
+    if (!ensureDrawingBitmap()) return false
 
     const voxPoints = normPoints
       .map((pt) => toPxPoint(pt, markerCanvas))
@@ -773,7 +789,7 @@ const Viewer = forwardRef(function Viewer(
     }
 
     if (!changed) return false
-    if (typeof nv.refreshDrawing === 'function') nv.refreshDrawing(true)
+    redrawDrawingOverlay()
     const pushed = pushSnapshot(nv.drawBitmap)
     if (pushed) {
       const imageKey = getImageKey()

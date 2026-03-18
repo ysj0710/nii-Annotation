@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -35,6 +37,7 @@ async def export_package(
     if not image_bytes or not mask_bytes:
         raise HTTPException(status_code=400, detail="image/mask payload is empty")
     try:
+        storage_root = os.getenv("ANNOTATION_STORAGE_ROOT", "./storage")
         zip_name, zip_bytes = build_export_zip(
             image_bytes=image_bytes,
             mask_bytes=mask_bytes,
@@ -42,6 +45,7 @@ async def export_package(
             image_filename=image.filename or "image.nii.gz",
             mask_filename=mask.filename or "mask.nii.gz",
             image_id=image_id,
+            storage_root=storage_root,
         )
     except ExportValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
