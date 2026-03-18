@@ -176,17 +176,6 @@ const Viewer = forwardRef(function Viewer(
     }
   }
 
-  const redrawDrawingOverlay = () => {
-    const nv = nvRef.current
-    if (!nv) return
-    if (typeof nv.refreshDrawing === 'function') {
-      nv.refreshDrawing(true)
-    }
-    if (typeof nv.drawScene === 'function') {
-      nv.drawScene()
-    }
-  }
-
   const applyToolSettings = (currentTool, currentBrushSize, currentLabelValue) => {
     const nv = nvRef.current
     if (!nv) return
@@ -204,7 +193,6 @@ const Viewer = forwardRef(function Viewer(
 
     if (currentTool === 'pan' || isAnnotationTool(currentTool)) {
       safeCall('setDrawingEnabled', false)
-      redrawDrawingOverlay()
       return
     }
 
@@ -217,7 +205,6 @@ const Viewer = forwardRef(function Viewer(
     if (typeof currentBrushSize === 'number') {
       safeCall('setPenSize', currentBrushSize)
     }
-    redrawDrawingOverlay()
   }
 
   const resetFillTracking = () => {
@@ -1055,11 +1042,9 @@ const Viewer = forwardRef(function Viewer(
           })
           if (cancelled) return
           nv.loadDrawing(maskVolume)
-          redrawDrawingOverlay()
         }
       } else if (typeof nv.closeDrawing === 'function') {
         nv.closeDrawing()
-        redrawDrawingOverlay()
       }
 
       const imageKey = getImageKey()
@@ -1069,10 +1054,6 @@ const Viewer = forwardRef(function Viewer(
 
       applyToolSettings(toolRef.current, brushSize, activeLabelValue)
       drawStrokeMarkers()
-      requestAnimationFrame(() => {
-        redrawDrawingOverlay()
-        drawStrokeMarkers()
-      })
       if (typeof onDrawingChange === 'function') {
         onDrawingChange('load')
       }
@@ -1327,7 +1308,10 @@ const Viewer = forwardRef(function Viewer(
             draft.closed = isFreehandClosed(draft.points, pxPoints, markerCanvas)
             draft.label = ''
           }
-          addAnnotation({ ...draft })
+          addAnnotation({
+            ...draft,
+            points: Array.isArray(draft.points) ? draft.points.map((p) => ({ x: Number(p?.x || 0), y: Number(p?.y || 0) })) : []
+          })
         }
         annotationDraftRef.current = null
         activePointerIdRef.current = null
