@@ -654,6 +654,135 @@ const Viewer = forwardRef(function Viewer(
     resetFillTracking()
   }
 
+  const rasterizeClosedAnnotationToMask = (normPoints) => {
+    const nv = nvRef.current
+    const markerCanvas = markerCanvasRef.current
+    if (!nv || !markerCanvas || !Array.isArray(normPoints) || normPoints.length < 3 || !nv.drawBitmap) return false
+
+    const voxPoints = normPoints
+      .map((pt) => toPxPoint(pt, markerCanvas))
+      .map((pt) => canvasPosToVox(pt))
+      .filter((pt) => Array.isArray(pt) && pt.length === 3)
+    if (voxPoints.length < 3) return false
+
+    const dims = nv.back?.dims
+    const nx = Number(dims?.[1] || 0)
+    const ny = Number(dims?.[2] || 0)
+    const nz = Math.max(1, Number(dims?.[3] || 1))
+    if (nx < 1 || ny < 1 || nz < 1) return false
+
+    const ranges = [0, 1, 2].map((axis) => {
+      let min = Number.POSITIVE_INFINITY
+      let max = Number.NEGATIVE_INFINITY
+      for (const p of voxPoints) {
+        const v = Number(p[axis] || 0)
+        min = Math.min(min, v)
+        max = Math.max(max, v)
+      }
+      return max - min
+    })
+    let fixedAxis = 0
+    if (ranges[1] < ranges[fixedAxis]) fixedAxis = 1
+    if (ranges[2] < ranges[fixedAxis]) fixedAxis = 2
+    const axes = [0, 1, 2].filter((axis) => axis !== fixedAxis)
+    const hAxis = axes[0]
+    const vAxis = axes[1]
+
+    let fixed = 0
+    for (const p of voxPoints) fixed += Number(p[fixedAxis] || 0)
+    fixed = Math.round(fixed / voxPoints.length)
+
+    const toHV = (p) => [Number(p[hAxis] || 0), Number(p[vAxis] || 0)]
+    const poly = voxPoints.map(toHV)
+    const first = poly[0]
+    const last = poly[poly.length - 1]
+    if (first[0] !== last[0] || first[1] !== last[1]) poly.push([first[0], first[1]])
+
+    const polyNoDup = []
+    for (const [hh, vv] of poly) {
+      const prev = polyNoDup[polyNoDup.length - 1]
+      if (!prev || prev[0] !== hh || prev[1] !== vv) polyNoDup.push([hh, vv])
+    }
+    if (polyNoDup.length < 4) return false
+
+    let minH = Number.POSITIVE_INFINITY
+    let maxH = Number.NEGATIVE_INFINITY
+    let minV = Number.POSITIVE_INFINITY
+    let maxV = Number.NEGATIVE_INFINITY
+    for (const [hh, vv] of polyNoDup) {
+      minH = Math.min(minH, hh)
+      maxH = Math.max(maxH, hh)
+      minV = Math.min(minV, vv)
+      maxV = Math.max(maxV, vv)
+    }
+    const hStart = Math.floor(minH)
+    const hEnd = Math.ceil(maxH)
+    const vStart = Math.floor(minV)
+    const vEnd = Math.ceil(maxV)
+    const fillLabel = Math.max(1, Math.min(255, Number(activeLabelValue || 1)))
+    const xy = nx * ny
+    let changed = false
+
+    const pointInPolygon = (x, y, vertices) => {
+      let inside = false
+      for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i, i += 1) {
+        const xi = vertices[i][0]
+        const yi = vertices[i][1]
+        const xj = vertices[j][0]
+        const yj = vertices[j][1]
+        const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi + Number.EPSILON) + xi
+        if (intersect) inside = !inside
+      }
+      return inside
+    }
+
+    const setVoxelByHV = (hh, vv) => {
+      const coords = [0, 0, 0]
+      coords[fixedAxis] = fixed
+      coords[hAxis] = hh
+      coords[vAxis] = vv
+      const x = coords[0]
+      const y = coords[1]
+      const z = coords[2]
+      if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return
+      const idx = z * xy + y * nx + x
+      if (nv.drawBitmap[idx] === fillLabel) return
+      nv.drawBitmap[idx] = fillLabel
+      changed = true
+    }
+
+    const drawSegmentHV = (h0, v0, h1, v1) => {
+      const steps = Math.max(1, Math.ceil(Math.max(Math.abs(h1 - h0), Math.abs(v1 - v0)) * 2))
+      for (let s = 0; s <= steps; s += 1) {
+        const t = s / steps
+        const hh = Math.round(h0 + (h1 - h0) * t)
+        const vv = Math.round(v0 + (v1 - v0) * t)
+        setVoxelByHV(hh, vv)
+      }
+    }
+
+    ensureBaseSnapshot(nv.drawBitmap)
+    for (let i = 1; i < polyNoDup.length; i += 1) {
+      drawSegmentHV(polyNoDup[i - 1][0], polyNoDup[i - 1][1], polyNoDup[i][0], polyNoDup[i][1])
+    }
+    for (let vv = vStart; vv <= vEnd; vv += 1) {
+      for (let hh = hStart; hh <= hEnd; hh += 1) {
+        if (!pointInPolygon(hh + 0.5, vv + 0.5, polyNoDup)) continue
+        setVoxelByHV(hh, vv)
+      }
+    }
+
+    if (!changed) return false
+    if (typeof nv.refreshDrawing === 'function') nv.refreshDrawing(true)
+    const pushed = pushSnapshot(nv.drawBitmap)
+    if (pushed) {
+      const imageKey = getImageKey()
+      if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
+    }
+    if (typeof onDrawingChange === 'function') onDrawingChange('draw')
+    return true
+  }
+
   useImperativeHandle(ref, () => ({
     refreshOverlay: () => {
       drawStrokeMarkers()
@@ -1141,12 +1270,14 @@ const Viewer = forwardRef(function Viewer(
           curveLastTapRef.current = now
           annotationStepsRef.current = [...annotationStepsRef.current, norm]
           if (gap < 280 && annotationStepsRef.current.length > 2) {
-            addAnnotation({
+            const curveAnnotation = {
               type: 'curve',
               points: [...annotationStepsRef.current],
               label: '',
               color: getCurrentAnnotationColor()
-            })
+            }
+            addAnnotation(curveAnnotation)
+            rasterizeClosedAnnotationToMask(curveAnnotation.points)
             annotationStepsRef.current = []
             annotationDraftRef.current = null
           } else {
@@ -1298,7 +1429,11 @@ const Viewer = forwardRef(function Viewer(
             }
             draft.label = ''
           }
-          addAnnotation({ ...draft })
+          const finalAnnotation = { ...draft }
+          addAnnotation(finalAnnotation)
+          if (toolRef.current === 'freehand' && finalAnnotation.points?.length >= 3) {
+            rasterizeClosedAnnotationToMask(finalAnnotation.points)
+          }
         }
         annotationDraftRef.current = null
         activePointerIdRef.current = null

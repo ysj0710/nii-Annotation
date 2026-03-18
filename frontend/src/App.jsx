@@ -27,21 +27,6 @@ const { Header, Sider, Content } = Layout
 
 const labelPalette = ['#FF6B6B', '#4D96FF', '#6BCB77', '#FFD93D', '#845EC2', '#FF9671']
 const DEFAULT_LABEL_COLOR = '#FF4D4F'
-const annotationToolKeys = new Set([
-  'hu',
-  'ellipse',
-  'rect',
-  'angle',
-  'cobb',
-  'length',
-  'arrow',
-  'text',
-  'ratio',
-  'curve',
-  'dynamic',
-  'freehand',
-  'bidirectional'
-])
 const THUMBNAIL_SIZE = 240
 const RASTER_CONVERSION_VERSION = 8
 
@@ -1039,6 +1024,10 @@ export default function App() {
       topicId: p.get('topicId') || globalCtx.topicId || ''
     }
   }, [])
+  const localBackendOrigin = useMemo(() => {
+    const envOrigin = String(import.meta.env?.VITE_ANNOTATION_BACKEND_ORIGIN || '').trim().replace(/\/+$/, '')
+    return envOrigin || 'http://127.0.0.1:8010'
+  }, [])
 
   const activeLabel = useMemo(
     () => labels.find((label) => label.id === activeLabelId) || labels[0],
@@ -1129,12 +1118,11 @@ export default function App() {
     if (queueImages.length > 0) return activeQueueIndex
     return displayImages.findIndex((item) => item.id === activeImage?.id)
   }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
-  const activeImageHasMask = useMemo(() => {
+  const annotationToolDisabled = useMemo(() => {
     if (!activeImage) return false
-    if (activeImage.sourceMask || activeImage.mask || activeImage.hasMask) return true
-    if (activeQueueItem && queueItemHasMaskMeta(activeQueueItem)) return true
-    return false
-  }, [activeImage, activeQueueItem])
+    // 仅禁用“首次加载就自带 mask”的影像；用户后续自己标注产生的 mask 不禁用。
+    return !!(activeImage.isMaskOnly || activeImage.sourceMask)
+  }, [activeImage])
 
   useEffect(() => {
     if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
@@ -1143,13 +1131,13 @@ export default function App() {
   }, [activeImage?.sourceFormat, viewerMode])
 
   useEffect(() => {
-    if (activeImageHasMask && tool !== 'pan') {
+    if (annotationToolDisabled && tool !== 'pan') {
       setTool('pan')
     }
-    if (activeImageHasMask && annotationMenuVisible) {
+    if (annotationToolDisabled && annotationMenuVisible) {
       setAnnotationMenuVisible(false)
     }
-  }, [activeImageHasMask, tool, annotationMenuVisible])
+  }, [annotationToolDisabled, tool, annotationMenuVisible])
 
   useEffect(() => {
     if (activeQueueIndex >= 0) {
@@ -1649,6 +1637,41 @@ export default function App() {
     return true
   }
 
+  const syncActiveAnnotationToLocalBackend = async () => {
+    if (!activeImage?.id) return false
+    const record = await getImageById(activeImage.id)
+    if (!record) return false
+    const imageBuffer = record?.sourceData || record?.data
+    const maskBuffer = record?.mask || record?.sourceMask
+    if (!imageBuffer || !maskBuffer) return false
+
+    const endpoint = `${localBackendOrigin}/export`
+    const payload = new FormData()
+    const imageName = String(record?.sourceName || record?.name || 'image.nii.gz')
+    const maskName = `${fileStem(imageName) || 'mask'}.nii.gz`
+    const overlayAnnotations = Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
+    const annotationsJson = JSON.stringify({
+      labels,
+      annotations: overlayAnnotations,
+      imageId: String(record?.remoteImageId || record?.id || activeImage.id || '')
+    })
+
+    payload.append('image', new File([imageBuffer], imageName, { type: 'application/octet-stream' }))
+    payload.append('mask', new File([maskBuffer], maskName, { type: 'application/octet-stream' }))
+    payload.append('annotations', new File([annotationsJson], 'annotations.json', { type: 'application/json' }))
+    payload.append('image_id', String(record?.remoteImageId || record?.id || activeImage.id || ''))
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      body: payload
+    })
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '')
+      throw new Error(errText || `local export failed: ${resp.status}`)
+    }
+    return true
+  }
+
   const syncActiveAnnotationToPlatform = async () => {
     const remoteImageId = String(activeImage?.remoteImageId || externalCtx?.imageId || '')
     if (!remoteImageId || !externalCtx?.platformOrigin || !activeImage?.id) return false
@@ -1667,7 +1690,13 @@ export default function App() {
       })
     )
     payload.append('sourceImageName', String(record?.sourceName || record?.name || ''))
-    payload.append('annotations', JSON.stringify({ labels }))
+    payload.append(
+      'annotations',
+      JSON.stringify({
+        labels,
+        annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
+      })
+    )
 
     const resp = await fetch(endpoint, {
       method: 'POST',
@@ -1701,7 +1730,10 @@ export default function App() {
       items.push({
         imageId: Number.isFinite(Number(remoteImageId)) ? Number(remoteImageId) : remoteImageId,
         sourceImageName: sourceName,
-        annotations: JSON.stringify({ labels }),
+        annotations: JSON.stringify({
+          labels,
+          annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
+        }),
         maskBase64: bufferToBase64(maskBuffer),
         maskFileName: `${fileStem(sourceName) || `mask-${remoteImageId}`}.nii.gz`,
         annotationStatus: 1,
@@ -1757,6 +1789,7 @@ export default function App() {
       return
     }
     try {
+      await syncActiveAnnotationToLocalBackend()
       const synced = externalCtx.batchId ? await syncBatchAnnotationsToPlatform() : await syncActiveAnnotationToPlatform()
       if (synced) {
         if (externalCtx.batchId && activeImage?.remoteImageId) {
@@ -1773,14 +1806,14 @@ export default function App() {
           })
         }
         hasUnsavedChangesRef.current = false
-        Message.success(externalCtx.batchId ? '批次标注已保存并同步科研平台' : '当前标注已保存并同步科研平台')
+        Message.success(externalCtx.batchId ? '批次标注已保存，已同步本地后端和科研平台' : '当前标注已保存，已同步本地后端和科研平台')
       } else {
         hasUnsavedChangesRef.current = false
-        Message.success('当前标注已保存')
+        Message.success('当前标注已保存，已同步本地后端')
       }
     } catch (error) {
       console.error(error)
-      Message.error('标注已本地保存，但同步科研平台失败')
+      Message.error('标注已本地保存，但后端同步失败')
     }
   }
 
@@ -2727,8 +2760,8 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   }
 
   const toggleAnnotationTool = (nextTool) => {
-    if (activeImageHasMask) {
-      Message.info('该影像已存在 mask，为避免混淆，已禁用标注')
+    if (annotationToolDisabled) {
+      Message.info('该影像首次加载已带有 mask，已禁用直接标注')
       setTool('pan')
       return
     }
@@ -2739,24 +2772,12 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   }
 
   const annotationMenuItems = [
-    { key: 'hu', name: 'HU', active: tool === 'hu', onClick: () => toggleAnnotationTool('hu') },
-    { key: 'ellipse', name: '椭圆', active: tool === 'ellipse', onClick: () => toggleAnnotationTool('ellipse') },
-    { key: 'rect', name: '矩形', active: tool === 'rect', onClick: () => toggleAnnotationTool('rect') },
-    { key: 'angle', name: '角度', active: tool === 'angle', onClick: () => toggleAnnotationTool('angle') },
-    { key: 'cobb', name: 'Cobb角', active: tool === 'cobb', onClick: () => toggleAnnotationTool('cobb') },
-    { key: 'length', name: '长度', active: tool === 'length', onClick: () => toggleAnnotationTool('length') },
-    { key: 'arrow', name: '箭头标注', active: tool === 'arrow', onClick: () => toggleAnnotationTool('arrow') },
-    { key: 'text', name: '文字标注', active: tool === 'text', onClick: () => toggleAnnotationTool('text') },
-    { key: 'ratio', name: '心胸比', active: tool === 'ratio', onClick: () => toggleAnnotationTool('ratio') },
-    { key: 'curve', name: '样条曲线', active: tool === 'curve', onClick: () => toggleAnnotationTool('curve') },
-    { key: 'dynamic', name: '动态轮廓', active: tool === 'dynamic', onClick: () => toggleAnnotationTool('dynamic') },
     {
       key: 'freehand',
       name: '自由曲线',
       active: tool === 'freehand',
       onClick: () => toggleAnnotationTool('freehand')
     },
-    { key: 'bidirectional', name: '双向', active: tool === 'bidirectional', onClick: () => toggleAnnotationTool('bidirectional') },
     {
       key: 'undo',
       name: '撤销',
@@ -2931,10 +2952,10 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
           <div className="annotation-tools-wrap" ref={annotationToolsRef}>
             <Button
               icon={<IconTool />}
-              disabled={activeImageHasMask}
+              disabled={annotationToolDisabled}
               onClick={() => {
-                if (activeImageHasMask) {
-                  Message.info('该影像已存在 mask，为避免混淆，已禁用标注')
+                if (annotationToolDisabled) {
+                  Message.info('该影像首次加载已带有 mask，已禁用直接标注')
                   return
                 }
                 setAnnotationMenuVisible((prev) => {
