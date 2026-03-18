@@ -7,12 +7,14 @@ from fastapi.responses import StreamingResponse
 from .services.exporter import ExportValidationError, build_export_zip
 
 app = FastAPI(title="Nii Annotation Backend", version="0.1.0")
+cors_origins_env = os.getenv(
+    "ANNOTATION_CORS_ORIGINS",
+    "http://127.0.0.1:5173,http://localhost:5173,http://192.168.110.88:5173",
+)
+allow_origins = [item.strip() for item in cors_origins_env.split(",") if item.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-    ],
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

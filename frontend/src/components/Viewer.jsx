@@ -247,10 +247,43 @@ const Viewer = forwardRef(function Viewer(
     y: Math.max(0, Math.min(1, pt.y / Math.max(1, canvas.height)))
   })
 
-  const toPxPoint = (pt, canvas) => ({
-    x: Number(pt?.x || 0) * canvas.width,
-    y: Number(pt?.y || 0) * canvas.height
-  })
+  const toStoredPoint = (pt, canvas) => {
+    const nv = nvRef.current
+    if (nv && canvas) {
+      const dpr = nv.uiData?.dpr || 1
+      const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr])
+      if (frac && frac[0] >= 0) {
+        return {
+          frac: [Number(frac[0]), Number(frac[1]), Number(frac[2])]
+        }
+      }
+    }
+    return toNormPoint(pt, canvas)
+  }
+
+  const toPxPoint = (pt, canvas) => {
+    const nv = nvRef.current
+    const frac = pt?.frac
+    if (
+      nv &&
+      Array.isArray(frac) &&
+      frac.length >= 3 &&
+      typeof nv.frac2canvasPos === 'function'
+    ) {
+      const pos = nv.frac2canvasPos([Number(frac[0]), Number(frac[1]), Number(frac[2])])
+      if (Array.isArray(pos) && pos.length >= 2) {
+        const dpr = nv.uiData?.dpr || 1
+        return {
+          x: Number(pos[0] || 0) / dpr,
+          y: Number(pos[1] || 0) / dpr
+        }
+      }
+    }
+    return {
+      x: Number(pt?.x || 0) * canvas.width,
+      y: Number(pt?.y || 0) * canvas.height
+    }
+  }
 
   const canvasPosToVox = (pt) => {
     const nv = nvRef.current
@@ -1237,7 +1270,7 @@ const Viewer = forwardRef(function Viewer(
         const now = Date.now()
         const markerCanvas = markerCanvasRef.current
         if (!markerCanvas) return
-        const norm = toNormPoint(pos, markerCanvas)
+        const norm = toStoredPoint(pos, markerCanvas)
 
         if (currentTool === 'text') {
           const text = window.prompt('请输入标注文字', '文字标注')
@@ -1353,7 +1386,7 @@ const Viewer = forwardRef(function Viewer(
         const markerCanvas = markerCanvasRef.current
         if (!markerCanvas) return
         const pos = getCanvasPos(event)
-        const norm = toNormPoint(pos, markerCanvas)
+        const norm = toStoredPoint(pos, markerCanvas)
         const draft = annotationDraftRef.current
         if (toolRef.current === 'freehand' || toolRef.current === 'dynamic') {
           draft.points = [...draft.points, norm]
@@ -1420,7 +1453,7 @@ const Viewer = forwardRef(function Viewer(
         const markerCanvas = markerCanvasRef.current
         const pos = getCanvasPos(event)
         if (markerCanvas) {
-          const norm = toNormPoint(pos, markerCanvas)
+          const norm = toStoredPoint(pos, markerCanvas)
           const draft = annotationDraftRef.current
           if (draft.points.length > 1) draft.points[draft.points.length - 1] = norm
           const pxPoints = draft.points.map((p) => toPxPoint(p, markerCanvas))

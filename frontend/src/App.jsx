@@ -958,6 +958,19 @@ const parseApiPayload = (json) => {
   return json
 }
 
+const assertPlatformResponseSuccess = (json, fallbackMessage = '平台返回失败') => {
+  if (!json || typeof json !== 'object') return
+  const success = json.success
+  const code = Number(json.code)
+  const message = String(json.msg || fallbackMessage)
+  if (success === false) {
+    throw new Error(message)
+  }
+  if (Number.isFinite(code) && code !== 200) {
+    throw new Error(message)
+  }
+}
+
 const queueItemHasMaskMeta = (item) => {
   const maskName = String(item?.maskName || '').trim()
   const status = item?.annotationStatus
@@ -1668,10 +1681,15 @@ export default function App() {
     payload.append('annotations', new File([annotationsJson], 'annotations.json', { type: 'application/json' }))
     payload.append('image_id', String(record?.remoteImageId || record?.id || activeImage.id || ''))
 
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      body: payload
-    })
+    let resp
+    try {
+      resp = await fetch(endpoint, {
+        method: 'POST',
+        body: payload
+      })
+    } catch (error) {
+      throw new Error(`本地导出服务不可达: ${endpoint}`)
+    }
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '')
       throw new Error(errText || `local export failed: ${resp.status}`)
@@ -1716,6 +1734,8 @@ export default function App() {
       const errText = await resp.text().catch(() => '')
       throw new Error(errText || `sync failed: ${resp.status}`)
     }
+    const json = await resp.json().catch(() => null)
+    assertPlatformResponseSuccess(json, '科研平台保存失败')
     return true
   }
 
@@ -1768,6 +1788,7 @@ export default function App() {
       throw new Error(errText || `batch sync failed: ${resp.status}`)
     }
     const json = await resp.json().catch(() => null)
+    assertPlatformResponseSuccess(json, '科研平台批量保存失败')
     const payload = parseApiPayload(json) || {}
     if (payload?.queue && Array.isArray(payload.queue.images)) {
       setBatchQueue(payload.queue)
@@ -1797,8 +1818,14 @@ export default function App() {
       Message.warning('保存失败，请重试')
       return
     }
+    let localSyncError = null
     try {
       await syncActiveAnnotationToLocalBackend()
+    } catch (error) {
+      console.error(error)
+      localSyncError = error
+    }
+    try {
       const synced = externalCtx.batchId ? await syncBatchAnnotationsToPlatform() : await syncActiveAnnotationToPlatform()
       if (synced) {
         if (externalCtx.batchId && activeImage?.remoteImageId) {
@@ -1815,14 +1842,26 @@ export default function App() {
           })
         }
         hasUnsavedChangesRef.current = false
-        Message.success(externalCtx.batchId ? '批次标注已保存，已同步本地后端和科研平台' : '当前标注已保存，已同步本地后端和科研平台')
+        if (localSyncError) {
+          Message.warning('科研平台同步成功，但导出服务不可达（已跳过本地export）')
+        } else {
+          Message.success(externalCtx.batchId ? '批次标注已保存，已同步本地后端和科研平台' : '当前标注已保存，已同步本地后端和科研平台')
+        }
       } else {
         hasUnsavedChangesRef.current = false
-        Message.success('当前标注已保存，已同步本地后端')
+        if (localSyncError) {
+          Message.warning('标注已本地保存，但导出服务不可达，且科研平台未返回同步结果')
+        } else {
+          Message.success('当前标注已保存，已同步本地后端')
+        }
       }
     } catch (error) {
       console.error(error)
-      Message.error('标注已本地保存，但后端同步失败')
+      if (localSyncError) {
+        Message.error('标注已本地保存，但导出服务与科研平台同步均失败')
+      } else {
+        Message.error('标注已本地保存，但科研平台同步失败')
+      }
     }
   }
 
