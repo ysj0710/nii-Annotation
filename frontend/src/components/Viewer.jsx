@@ -82,6 +82,7 @@ const Viewer = forwardRef(function Viewer(
   const focusedPlaneRef = useRef(null)
   const [focusedPlane, setFocusedPlane] = useState(null)
   const [canFocusPlanes, setCanFocusPlanes] = useState(false)
+  const canFocusPlanesRef = useRef(false)
   const lastBrushVoxRef = useRef(null)
   const brushSizeRef = useRef(brushSize)
   const brushShapeRef = useRef(brushShape)
@@ -100,6 +101,7 @@ const Viewer = forwardRef(function Viewer(
   const drawRefreshPendingRef = useRef(false)
   const markerRedrawRafRef = useRef(null)
   const markerDrawRafRef = useRef(null)
+  const quadRecenterRafRef = useRef(null)
   const lastLocationRefreshAtRef = useRef(0)
   const refreshPerfRef = useRef({
     emaMs: 0,
@@ -234,6 +236,10 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => {
     runtimeEnvRef.current = runtimeEnv || null
   }, [runtimeEnv])
+
+  useEffect(() => {
+    canFocusPlanesRef.current = !!canFocusPlanes
+  }, [canFocusPlanes])
 
   const scheduleMarkerRedraw = (delayFrames = 1) => {
     if (markerRedrawRafRef.current !== null) {
@@ -1287,9 +1293,9 @@ const Viewer = forwardRef(function Viewer(
       nv.opts.multiplanarLayout = 2
     }
     if (typeof nv.setMultiplanarPadPixels === 'function') {
-      nv.setMultiplanarPadPixels(10)
+      nv.setMultiplanarPadPixels(2)
     } else if (nv?.opts) {
-      nv.opts.multiplanarPadPixels = 10
+      nv.opts.multiplanarPadPixels = 2
     }
     if (nv?.opts) {
       nv.opts.multiplanarShowRender = 1
@@ -1303,12 +1309,28 @@ const Viewer = forwardRef(function Viewer(
         // ignore
       }
     }
+    if (typeof nv.setIsOrientationTextVisible === 'function') {
+      nv.setIsOrientationTextVisible(true)
+    } else if (nv?.opts) {
+      nv.opts.isOrientationTextVisible = true
+    }
+    if (typeof nv.setShowAllOrientationMarkers === 'function') {
+      nv.setShowAllOrientationMarkers(true)
+    } else if (nv?.opts) {
+      nv.opts.showAllOrientationMarkers = true
+    }
+    if (typeof nv.setCornerOrientationText === 'function') {
+      nv.setCornerOrientationText(false)
+    } else if (nv?.opts) {
+      nv.opts.isCornerOrientationText = false
+    }
   }
 
   const normalizePanForQuad = () => {
     const nv = nvRef.current
     if (!nv?.scene) return
-    const next = [0, 0, 0, 0.88]
+    // 四窗模式使用轻微缩放回退，避免边缘被切掉，同时保持视口本身不缩小。
+    const next = [0, 0, 0, 0.93]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
@@ -1317,6 +1339,18 @@ const Viewer = forwardRef(function Viewer(
         nv.drawScene()
       }
     }
+  }
+
+  const scheduleQuadRecenter = () => {
+    if (quadRecenterRafRef.current !== null) {
+      cancelAnimationFrame(quadRecenterRafRef.current)
+      quadRecenterRafRef.current = null
+    }
+    quadRecenterRafRef.current = requestAnimationFrame(() => {
+      quadRecenterRafRef.current = null
+      if (!canFocusPlanesRef.current || focusedPlaneRef.current) return
+      normalizePanForQuad()
+    })
   }
 
   const setSliceTypeForPlane = (planeKey, options = {}) => {
@@ -1771,6 +1805,10 @@ const Viewer = forwardRef(function Viewer(
         cancelAnimationFrame(markerDrawRafRef.current)
         markerDrawRafRef.current = null
       }
+      if (quadRecenterRafRef.current !== null) {
+        cancelAnimationFrame(quadRecenterRafRef.current)
+        quadRecenterRafRef.current = null
+      }
     },
     []
   )
@@ -1992,6 +2030,7 @@ const Viewer = forwardRef(function Viewer(
       markerCanvas.width = Math.max(1, Math.round(rect.width))
       markerCanvas.height = Math.max(1, Math.round(rect.height))
       drawStrokeMarkers()
+      scheduleQuadRecenter()
     }
 
     syncMarkerSize()
