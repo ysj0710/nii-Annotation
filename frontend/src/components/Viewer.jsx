@@ -75,8 +75,13 @@ const Viewer = forwardRef(function Viewer(
   const labelsRef = useRef(labels)
   const onDrawingChangeRef = useRef(onDrawingChange)
   const brushStrokeDirtyRef = useRef(false)
+  const drawRefreshPendingRef = useRef(false)
+  const freehandDrawingRef = useRef(false)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
+  const FREEHAND_CONNECT_PX = 18
+  const FREEHAND_CLOSE_PX = 20
+  const FREEHAND_SAMPLE_STEP_PX = 2.5
   imageKeyRef.current = image?.id ? String(image.id) : ''
 
   const getImageKey = () => {
@@ -92,13 +97,18 @@ const Viewer = forwardRef(function Viewer(
     if (!key) return
     annotationsByImageRef.current.set(key, next)
   }
-  const addAnnotation = (annotation) => {
+  const addAnnotation = (annotation, options = {}) => {
+    const { recordHistory = true, emitChange = true } = options
     const key = getImageKey()
     if (!key) return
     setCurrentAnnotations([...getCurrentAnnotations(), annotation])
-    actionHistoryRef.current.push({ type: 'annotation', imageKey: key })
-    const notify = onDrawingChangeRef.current
-    if (typeof notify === 'function') notify('annotate')
+    if (recordHistory) {
+      actionHistoryRef.current.push({ type: 'annotation', imageKey: key })
+    }
+    if (emitChange) {
+      const notify = onDrawingChangeRef.current
+      if (typeof notify === 'function') notify('annotate')
+    }
   }
   const cloneAnnotations = (items) => {
     if (!Array.isArray(items)) return []
@@ -114,6 +124,18 @@ const Viewer = forwardRef(function Viewer(
   const emitDrawingChange = (reason) => {
     const notify = onDrawingChangeRef.current
     if (typeof notify === 'function') notify(reason)
+  }
+
+  const requestDrawingRefresh = () => {
+    if (drawRefreshPendingRef.current) return
+    drawRefreshPendingRef.current = true
+    requestAnimationFrame(() => {
+      drawRefreshPendingRef.current = false
+      const nv = nvRef.current
+      if (typeof nv?.refreshDrawing === 'function') {
+        nv.refreshDrawing(true)
+      }
+    })
   }
 
   const compactPoints = (points, maxPoints) => {
@@ -237,8 +259,8 @@ const Viewer = forwardRef(function Viewer(
     redrawDrawingOverlay()
   }
 
-  // 笔刷绘制函数 - 在指定位置绘制圆形或方形
-  const drawBrushAt = (vox, shape, size, labelValue) => {
+  // 笔刷绘制函数 - 在当前平面绘制圆形或方形（非 3D 球体）
+  const drawBrushAt = (vox, axCorSag, shape, size, labelValue) => {
     const nv = nvRef.current
     if (!nv || !nv.drawBitmap) return
     
@@ -248,61 +270,39 @@ const Viewer = forwardRef(function Viewer(
     const nz = Math.max(1, Number(dims?.[3] || 1))
     if (nx < 1 || ny < 1 || nz < 1) return
     
-    const cx = Math.round(vox[0])
-    const cy = Math.round(vox[1])
-    const cz = Math.round(vox[2])
+    const center = [Math.round(vox[0]), Math.round(vox[1]), Math.round(vox[2])]
     const radius = Math.max(1, Math.round(size / 2))
     const fillLabel = Math.max(1, Math.min(255, Number(labelValue || 1)))
-    
+    const fixedAxis = axCorSag === 0 ? 2 : axCorSag === 1 ? 1 : 0
+    const axes = [0, 1, 2].filter((axis) => axis !== fixedAxis)
+    const hAxis = axes[0]
+    const vAxis = axes[1]
     const xy = nx * ny
     let changed = false
-    
-    if (shape === 'square') {
-      // 方形笔刷
-      for (let dz = -radius; dz <= radius; dz++) {
-        for (let dy = -radius; dy <= radius; dy++) {
-          for (let dx = -radius; dx <= radius; dx++) {
-            const x = cx + dx
-            const y = cy + dy
-            const z = cz + dz
-            if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz) {
-              const idx = z * xy + y * nx + x
-              if (nv.drawBitmap[idx] !== fillLabel) {
-                nv.drawBitmap[idx] = fillLabel
-                changed = true
-              }
-            }
-          }
-        }
-      }
-    } else {
-      // 圆形笔刷
-      for (let dz = -radius; dz <= radius; dz++) {
-        for (let dy = -radius; dy <= radius; dy++) {
-          for (let dx = -radius; dx <= radius; dx++) {
-            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-            if (dist <= radius) {
-              const x = cx + dx
-              const y = cy + dy
-              const z = cz + dz
-              if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz) {
-                const idx = z * xy + y * nx + x
-                if (nv.drawBitmap[idx] !== fillLabel) {
-                  nv.drawBitmap[idx] = fillLabel
-                  changed = true
-                }
-              }
-            }
-          }
+
+    for (let dv = -radius; dv <= radius; dv++) {
+      for (let dh = -radius; dh <= radius; dh++) {
+        if (shape !== 'square' && Math.hypot(dh, dv) > radius) continue
+        const coords = [...center]
+        coords[hAxis] = center[hAxis] + dh
+        coords[vAxis] = center[vAxis] + dv
+        const x = coords[0]
+        const y = coords[1]
+        const z = coords[2]
+        if (x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz) continue
+        const idx = z * xy + y * nx + x
+        if (nv.drawBitmap[idx] !== fillLabel) {
+          nv.drawBitmap[idx] = fillLabel
+          changed = true
         }
       }
     }
-    
+
     return changed
   }
 
   // 在两点之间插值绘制笔刷线条
-  const drawBrushLine = (vox1, vox2, shape, size, labelValue) => {
+  const drawBrushLine = (vox1, vox2, axCorSag, shape, size, labelValue) => {
     const nv = nvRef.current
     if (!nv || !nv.drawBitmap) return
     
@@ -327,7 +327,7 @@ const Viewer = forwardRef(function Viewer(
         y1 + (y2 - y1) * t,
         z1 + (z2 - z1) * t
       ]
-      if (drawBrushAt(vox, shape, size, labelValue)) {
+      if (drawBrushAt(vox, axCorSag, shape, size, labelValue)) {
         changed = true
       }
     }
@@ -385,6 +385,14 @@ const Viewer = forwardRef(function Viewer(
       x: Number(pt?.x || 0) * canvas.width,
       y: Number(pt?.y || 0) * canvas.height
     }
+  }
+
+  const pointDistancePx = (a, b, canvas) => {
+    if (!a || !b || !canvas) return Number.POSITIVE_INFINITY
+    const pa = toPxPoint(a, canvas)
+    const pb = toPxPoint(b, canvas)
+    if (!pa || !pb) return Number.POSITIVE_INFINITY
+    return Math.hypot(pa.x - pb.x, pa.y - pb.y)
   }
 
   const canvasPosToVox = (pt) => {
@@ -533,43 +541,43 @@ const Viewer = forwardRef(function Viewer(
       ctx.strokeStyle = 'rgba(255, 180, 0, 0.95)'
       ctx.stroke()
     }
-    // freehand 工具：绘制所有节点（统一粉紫色）
+    // freehand 工具：仅绘制起终端点和闭合提示，避免高频采样点导致卡顿
     const draft = annotationDraftRef.current
     if (draft?.type === 'freehand' && draft.points?.length > 0) {
-      // 绘制所有节点 - 统一粉紫色
-      draft.points.forEach((pt, idx) => {
-        const pxPt = toPxPoint(pt, markerCanvas)
-        if (!pxPt) return
-        
-        const isLast = idx === draft.points.length - 1
-        const radius = isLast ? 5 : 4
-        
+      const firstPt = toPxPoint(draft.points[0], markerCanvas)
+      const lastPt = toPxPoint(draft.points[draft.points.length - 1], markerCanvas)
+
+      if (firstPt) {
         ctx.beginPath()
-        ctx.arc(pxPt.x, pxPt.y, radius, 0, Math.PI * 2)
-        // 粉紫色节点 (DB70DB)
+        ctx.arc(firstPt.x, firstPt.y, 4.5, 0, Math.PI * 2)
         ctx.fillStyle = 'rgba(219, 112, 219, 0.6)'
         ctx.fill()
-        ctx.lineWidth = isLast ? 2 : 1.5
+        ctx.lineWidth = 1.5
         ctx.strokeStyle = 'rgba(219, 112, 219, 1)'
         ctx.stroke()
-      })
-      
-      // 如果接近闭合（距离起点很近），绘制虚线提示
-      if (draft.points.length > 2) {
-        const firstPt = toPxPoint(draft.points[0], markerCanvas)
-        const lastPt = toPxPoint(draft.points[draft.points.length - 1], markerCanvas)
-        if (firstPt && lastPt) {
-          const dist = Math.hypot(firstPt.x - lastPt.x, firstPt.y - lastPt.y)
-          if (dist < 20) {
-            ctx.beginPath()
-            ctx.moveTo(lastPt.x, lastPt.y)
-            ctx.lineTo(firstPt.x, firstPt.y)
-            ctx.setLineDash([4, 4])
-            ctx.lineWidth = 2
-            ctx.strokeStyle = 'rgba(219, 112, 219, 0.6)'
-            ctx.stroke()
-            ctx.setLineDash([])
-          }
+      }
+
+      if (lastPt) {
+        ctx.beginPath()
+        ctx.arc(lastPt.x, lastPt.y, 5.5, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(219, 112, 219, 0.65)'
+        ctx.fill()
+        ctx.lineWidth = 2
+        ctx.strokeStyle = 'rgba(219, 112, 219, 1)'
+        ctx.stroke()
+      }
+
+      if (draft.points.length > 2 && firstPt && lastPt) {
+        const dist = Math.hypot(firstPt.x - lastPt.x, firstPt.y - lastPt.y)
+        if (dist < FREEHAND_CLOSE_PX) {
+          ctx.beginPath()
+          ctx.moveTo(lastPt.x, lastPt.y)
+          ctx.lineTo(firstPt.x, firstPt.y)
+          ctx.setLineDash([4, 4])
+          ctx.lineWidth = 2
+          ctx.strokeStyle = 'rgba(219, 112, 219, 0.6)'
+          ctx.stroke()
+          ctx.setLineDash([])
         }
       }
     }
@@ -773,7 +781,8 @@ const Viewer = forwardRef(function Viewer(
     resetFillTracking()
   }
 
-  const rasterizeClosedAnnotationToMask = (normPoints) => {
+  const rasterizeClosedAnnotationToMask = (normPoints, options = {}) => {
+    const { recordHistory = true, emitChange = true } = options
     const nv = nvRef.current
     const markerCanvas = markerCanvasRef.current
     if (!nv || !markerCanvas || !Array.isArray(normPoints) || normPoints.length < 3) return false
@@ -896,11 +905,11 @@ const Viewer = forwardRef(function Viewer(
     if (!changed) return false
     redrawDrawingOverlay()
     const pushed = pushSnapshot(nv.drawBitmap)
-    if (pushed) {
+    if (pushed && recordHistory) {
       const imageKey = getImageKey()
       if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
     }
-    emitDrawingChange('draw')
+    if (emitChange) emitDrawingChange('draw')
     return true
   }
 
@@ -924,14 +933,28 @@ const Viewer = forwardRef(function Viewer(
           if (!current.length) continue
           setCurrentAnnotations(current.slice(0, -1))
           drawStrokeMarkers()
-          if (typeof onDrawingChange === 'function') onDrawingChange('undo')
+          emitDrawingChange('undo')
+          return true
+        }
+        if (actionType === 'freehand-complete') {
+          const hasMask = !!action?.hasMask
+          if (hasMask && history.index > 0) {
+            history.index -= 1
+            applySnapshot(history.stack[history.index])
+          }
+          const current = getCurrentAnnotations()
+          if (current.length > 0) {
+            setCurrentAnnotations(current.slice(0, -1))
+          }
+          drawStrokeMarkers()
+          emitDrawingChange('undo')
           return true
         }
         if (actionType === 'mask') {
           if (history.index <= 0) continue
           history.index -= 1
           applySnapshot(history.stack[history.index])
-          if (typeof onDrawingChange === 'function') onDrawingChange('undo')
+          emitDrawingChange('undo')
           return true
         }
       }
@@ -939,13 +962,13 @@ const Viewer = forwardRef(function Viewer(
       if (current.length > 0) {
         setCurrentAnnotations(current.slice(0, -1))
         drawStrokeMarkers()
-        if (typeof onDrawingChange === 'function') onDrawingChange('undo')
+        emitDrawingChange('undo')
         return true
       }
       if (history.index <= 0) return false
       history.index -= 1
       applySnapshot(history.stack[history.index])
-      if (typeof onDrawingChange === 'function') onDrawingChange('undo')
+      emitDrawingChange('undo')
       return true
     },
     clearAnnotations: () => {
@@ -958,29 +981,29 @@ const Viewer = forwardRef(function Viewer(
       actionHistoryRef.current = actionHistoryRef.current.filter((item) => {
         const actionType = typeof item === 'string' ? item : item?.type
         const actionImageKey = typeof item === 'string' ? currentImageKey : item?.imageKey
-        return !(actionType === 'annotation' && actionImageKey === currentImageKey)
+        const isCurrent = actionImageKey === currentImageKey
+        return !(
+          isCurrent &&
+          (actionType === 'annotation' || actionType === 'freehand-complete')
+        )
       })
       resetFillTracking()
       drawStrokeMarkers()
-      if (typeof onDrawingChange === 'function') onDrawingChange('clear')
+      emitDrawingChange('clear')
     },
     undo: () => {
       const history = historyRef.current
       if (history.index <= 0) return
       history.index -= 1
       applySnapshot(history.stack[history.index])
-      if (typeof onDrawingChange === 'function') {
-        onDrawingChange('undo')
-      }
+      emitDrawingChange('undo')
     },
     redo: () => {
       const history = historyRef.current
       if (history.index >= history.stack.length - 1) return
       history.index += 1
       applySnapshot(history.stack[history.index])
-      if (typeof onDrawingChange === 'function') {
-        onDrawingChange('redo')
-      }
+      emitDrawingChange('redo')
     },
     clear: () => {
       const nv = nvRef.current
@@ -993,9 +1016,7 @@ const Viewer = forwardRef(function Viewer(
         if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
       }
       applySnapshot(empty)
-      if (typeof onDrawingChange === 'function') {
-        onDrawingChange('clear')
-      }
+      emitDrawingChange('clear')
     },
     exportDrawing: async () => {
       const nv = nvRef.current
@@ -1147,6 +1168,7 @@ const Viewer = forwardRef(function Viewer(
     resetFillTracking()
     lastBrushVoxRef.current = null
     brushStrokeDirtyRef.current = false
+    freehandDrawingRef.current = false
     drawStrokeMarkers()
   }, [tool])
 
@@ -1161,6 +1183,7 @@ const Viewer = forwardRef(function Viewer(
     activePointerIdRef.current = null
     lastBrushVoxRef.current = null
     brushStrokeDirtyRef.current = false
+    freehandDrawingRef.current = false
     drawStrokeMarkers()
   }, [image?.id])
 
@@ -1371,18 +1394,32 @@ const Viewer = forwardRef(function Viewer(
           const dpr = nv.uiData?.dpr || 1
           const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
           const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
-          
-          // 如果平面变化，清空之前的点重新开始
-          if (annotationStepsRef.current.length > 0 && curvePlaneRef.current !== null && curvePlaneRef.current !== currentPlane) {
-            annotationStepsRef.current = [norm]
-            curvePlaneRef.current = currentPlane
+          if (currentPlane === null) return
+
+          let nextSteps = [...annotationStepsRef.current]
+          // 平面变化时，丢弃旧草稿并在当前平面重新开始
+          if (nextSteps.length > 0 && curvePlaneRef.current !== null && curvePlaneRef.current !== currentPlane) {
+            nextSteps = []
+          }
+          curvePlaneRef.current = currentPlane
+
+          if (nextSteps.length === 0) {
+            nextSteps = [norm]
           } else {
-            annotationStepsRef.current = [...annotationStepsRef.current, norm]
-            if (annotationStepsRef.current.length === 1) {
-              curvePlaneRef.current = currentPlane
+            const first = nextSteps[0]
+            const last = nextSteps[nextSteps.length - 1]
+            const distToLast = pointDistancePx(last, norm, markerCanvas)
+            const distToFirst = pointDistancePx(first, norm, markerCanvas)
+            if (distToFirst <= FREEHAND_CONNECT_PX && nextSteps.length > 2) {
+              // 在起点附近续画时，直接从起点接入，便于快速闭合
+              nextSteps = [...nextSteps, first]
+            } else if (distToLast > FREEHAND_CONNECT_PX) {
+              // 在终点附近之外下笔时，自动连线到新的落笔点
+              nextSteps = [...nextSteps, norm]
             }
           }
-          
+
+          annotationStepsRef.current = compactPoints(nextSteps, MAX_MARKER_POINTS)
           annotationDraftRef.current = {
             type: 'freehand',
             points: [...annotationStepsRef.current],
@@ -1390,6 +1427,9 @@ const Viewer = forwardRef(function Viewer(
             color: getCurrentAnnotationColor(),
             closed: false
           }
+          freehandDrawingRef.current = true
+          activePointerIdRef.current = event.pointerId
+          canvas.setPointerCapture?.(event.pointerId)
           drawStrokeMarkers()
           return
         }
@@ -1417,11 +1457,17 @@ const Viewer = forwardRef(function Viewer(
               Math.round(vox[fillAxCorSagRef.current === 0 ? 2 : fillAxCorSagRef.current === 1 ? 1 : 0])
             
             // 绘制笔刷
-            if (drawBrushAt(vox, brushShapeRef.current, brushSizeRef.current, activeLabelValueRef.current)) {
+            if (
+              drawBrushAt(
+                vox,
+                fillAxCorSagRef.current,
+                brushShapeRef.current,
+                brushSizeRef.current,
+                activeLabelValueRef.current
+              )
+            ) {
               brushStrokeDirtyRef.current = true
-              if (typeof nv.refreshDrawing === 'function') {
-                nv.refreshDrawing(true)
-              }
+              requestDrawingRefresh()
             }
             // 记录起始位置
             lastBrushVoxRef.current = [...vox]
@@ -1456,7 +1502,51 @@ const Viewer = forwardRef(function Viewer(
 
     const onPointerMove = (event) => {
       if (toolRef.current === 'freehand') {
-        // freehand 仅通过点击加点，移动时不做重绘，避免高频刷新造成卡顿。
+        if (!freehandDrawingRef.current) return
+        if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
+        const markerCanvas = markerCanvasRef.current
+        if (!markerCanvas) return
+        const pos = getCanvasPos(event)
+        const dpr = nv.uiData?.dpr || 1
+        const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
+        const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
+        if (currentPlane === null || curvePlaneRef.current === null || currentPlane !== curvePlaneRef.current) return
+
+        const norm = toStoredPoint(pos, markerCanvas)
+        const current = annotationStepsRef.current
+        if (!current.length) {
+          annotationStepsRef.current = [norm]
+          annotationDraftRef.current = {
+            type: 'freehand',
+            points: [norm],
+            label: '按回车完成',
+            color: getCurrentAnnotationColor(),
+            closed: false
+          }
+          drawStrokeMarkers()
+          return
+        }
+        const last = current[current.length - 1]
+        const dist = pointDistancePx(last, norm, markerCanvas)
+        if (dist < FREEHAND_SAMPLE_STEP_PX) return
+
+        let next = [...current, norm]
+        if (next.length > 2) {
+          const first = next[0]
+          const tail = next[next.length - 1]
+          if (pointDistancePx(first, tail, markerCanvas) <= FREEHAND_CLOSE_PX) {
+            next[next.length - 1] = first
+          }
+        }
+        annotationStepsRef.current = compactPoints(next, MAX_MARKER_POINTS)
+        annotationDraftRef.current = {
+          type: 'freehand',
+          points: [...annotationStepsRef.current],
+          label: '按回车完成',
+          color: getCurrentAnnotationColor(),
+          closed: false
+        }
+        drawStrokeMarkers()
         return
       }
 
@@ -1476,11 +1566,18 @@ const Viewer = forwardRef(function Viewer(
         
         // 如果有上一个位置，插值绘制线条
         if (lastBrushVoxRef.current) {
-          if (drawBrushLine(lastBrushVoxRef.current, vox, brushShapeRef.current, brushSizeRef.current, activeLabelValueRef.current)) {
+          if (
+            drawBrushLine(
+              lastBrushVoxRef.current,
+              vox,
+              fillAxCorSagRef.current,
+              brushShapeRef.current,
+              brushSizeRef.current,
+              activeLabelValueRef.current
+            )
+          ) {
             brushStrokeDirtyRef.current = true
-            if (typeof nv.refreshDrawing === 'function') {
-              nv.refreshDrawing(true)
-            }
+            requestDrawingRefresh()
           }
         }
         lastBrushVoxRef.current = [...vox]
@@ -1535,13 +1632,24 @@ const Viewer = forwardRef(function Viewer(
 
     const onPointerUp = (event) => {
       if (toolRef.current === 'freehand') {
-        if (!annotationDraftRef.current) return
+        if (!freehandDrawingRef.current) return
         if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
         // freehand 在 pointerUp 不清空，等待继续加点或按 Enter 完成
         const capturedId = activePointerIdRef.current
         activePointerIdRef.current = null
+        freehandDrawingRef.current = false
         if (capturedId !== null && canvas.hasPointerCapture?.(capturedId)) {
           canvas.releasePointerCapture?.(capturedId)
+        }
+        if (annotationStepsRef.current.length > 0) {
+          annotationDraftRef.current = {
+            type: 'freehand',
+            points: [...annotationStepsRef.current],
+            label: '按回车完成',
+            color: getCurrentAnnotationColor(),
+            closed: false
+          }
+          drawStrokeMarkers()
         }
         return
       }
@@ -1591,6 +1699,7 @@ const Viewer = forwardRef(function Viewer(
       annotationDraftRef.current = null
       lastBrushVoxRef.current = null
       brushStrokeDirtyRef.current = false
+      freehandDrawingRef.current = false
       resetFillTracking()
       drawStrokeMarkers()
     }
@@ -1601,15 +1710,47 @@ const Viewer = forwardRef(function Viewer(
         // curve 工具使用 annotationStepsRef
         if (toolRef.current === 'freehand' && annotationStepsRef.current.length > 2) {
           event.preventDefault()
+          const markerCanvas = markerCanvasRef.current
+          const rawPoints = [...annotationStepsRef.current]
+          if (!markerCanvas || rawPoints.length < 3) return
+          const first = rawPoints[0]
+          const last = rawPoints[rawPoints.length - 1]
+          const isNearClosed = pointDistancePx(first, last, markerCanvas) <= FREEHAND_CLOSE_PX
+          const closedPoints = [...rawPoints]
+          if (!isNearClosed || pointDistancePx(first, last, markerCanvas) > 1e-3) {
+            closedPoints.push(first)
+          } else {
+            closedPoints[closedPoints.length - 1] = first
+          }
+
+          const maskChanged = rasterizeClosedAnnotationToMask(closedPoints, {
+            recordHistory: false,
+            emitChange: false
+          })
           const freehandAnnotation = {
             type: 'freehand',
-            points: [...annotationStepsRef.current],
+            points: closedPoints,
             label: '',
             color: getCurrentAnnotationColor(),
             closed: true
           }
-          addAnnotation(freehandAnnotation)
-          rasterizeClosedAnnotationToMask(freehandAnnotation.points)
+          addAnnotation(freehandAnnotation, { recordHistory: false, emitChange: false })
+          const imageKey = getImageKey()
+          if (imageKey) {
+            actionHistoryRef.current.push({
+              type: 'freehand-complete',
+              imageKey,
+              hasMask: maskChanged
+            })
+          }
+          if (activePointerIdRef.current !== null) {
+            const capturedId = activePointerIdRef.current
+            activePointerIdRef.current = null
+            if (canvas.hasPointerCapture?.(capturedId)) {
+              canvas.releasePointerCapture?.(capturedId)
+            }
+          }
+          freehandDrawingRef.current = false
           annotationStepsRef.current = []
           curvePlaneRef.current = null
           annotationDraftRef.current = null
