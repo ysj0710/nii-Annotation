@@ -68,6 +68,7 @@ const Viewer = forwardRef(function Viewer(
   const annotationDraftRef = useRef(null)
   const annotationStepsRef = useRef([])
   const curvePlaneRef = useRef(null)
+  const curveSliceIndexRef = useRef(null)
   const lastBrushVoxRef = useRef(null)
   const brushSizeRef = useRef(brushSize)
   const brushShapeRef = useRef(brushShape)
@@ -76,12 +77,14 @@ const Viewer = forwardRef(function Viewer(
   const onDrawingChangeRef = useRef(onDrawingChange)
   const brushStrokeDirtyRef = useRef(false)
   const drawRefreshPendingRef = useRef(false)
+  const markerRedrawRafRef = useRef(null)
   const freehandDrawingRef = useRef(false)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
   const FREEHAND_CONNECT_PX = 18
   const FREEHAND_CLOSE_PX = 20
   const FREEHAND_SAMPLE_STEP_PX = 2.5
+  const FREEHAND_OPEN_COLOR = '#db70db'
   imageKeyRef.current = image?.id ? String(image.id) : ''
 
   const getImageKey = () => {
@@ -121,6 +124,16 @@ const Viewer = forwardRef(function Viewer(
   const getCurrentAnnotationColor = () =>
     labelsRef.current.find((item) => Number(item.value || 0) === Number(activeLabelValueRef.current || 0))?.color || '#60a5fa'
 
+  const makeFreehandDraft = (points, { nearClosed = false } = {}) => ({
+    type: 'freehand',
+    points: [...points],
+    label: '',
+    color: nearClosed ? getCurrentAnnotationColor() : FREEHAND_OPEN_COLOR,
+    closed: false,
+    axCorSag: curvePlaneRef.current,
+    sliceIndex: curveSliceIndexRef.current
+  })
+
   const emitDrawingChange = (reason) => {
     const notify = onDrawingChangeRef.current
     if (typeof notify === 'function') notify(reason)
@@ -136,6 +149,25 @@ const Viewer = forwardRef(function Viewer(
         nv.refreshDrawing(true)
       }
     })
+  }
+
+  const scheduleMarkerRedraw = (delayFrames = 1) => {
+    if (markerRedrawRafRef.current !== null) {
+      cancelAnimationFrame(markerRedrawRafRef.current)
+      markerRedrawRafRef.current = null
+    }
+    const waitFrames = Math.max(0, Math.floor(Number(delayFrames) || 0))
+    const run = (remaining) => {
+      markerRedrawRafRef.current = requestAnimationFrame(() => {
+        if (remaining > 0) {
+          run(remaining - 1)
+          return
+        }
+        markerRedrawRafRef.current = null
+        drawStrokeMarkers()
+      })
+    }
+    run(waitFrames)
   }
 
   const compactPoints = (points, maxPoints) => {
@@ -395,6 +427,35 @@ const Viewer = forwardRef(function Viewer(
     return Math.hypot(pa.x - pb.x, pa.y - pb.y)
   }
 
+  const getFixedAxisByPlane = (axCorSag) => (axCorSag === 0 ? 2 : axCorSag === 1 ? 1 : 0)
+
+  const getSliceIndexFromFrac = (axCorSag, fracVec) => {
+    const nv = nvRef.current
+    const dims = nv?.back?.dims
+    if (!dims || !Array.isArray(fracVec) || fracVec.length < 3) return null
+    const fixedAxis = getFixedAxisByPlane(axCorSag)
+    const dimLen = Number(dims[fixedAxis + 1] || 0)
+    if (dimLen < 1) return null
+    const frac = Number(fracVec[fixedAxis])
+    if (!Number.isFinite(frac)) return null
+    return Math.max(0, Math.min(dimLen - 1, Math.round(frac * Math.max(1, dimLen - 1))))
+  }
+
+  const getCurrentSliceIndex = (axCorSag) => {
+    const nv = nvRef.current
+    const screenSlice = Array.isArray(nv?.screenSlices)
+      ? nv.screenSlices.find((item) => Number(item?.axCorSag) === Number(axCorSag))
+      : null
+    const dims = nv?.back?.dims
+    const fixedAxis = getFixedAxisByPlane(axCorSag)
+    const dimLen = Number(dims?.[fixedAxis + 1] || 0)
+    const sliceFrac = Number(screenSlice?.sliceFrac)
+    if (dimLen > 0 && Number.isFinite(sliceFrac)) {
+      return Math.max(0, Math.min(dimLen - 1, Math.round(sliceFrac * Math.max(1, dimLen - 1))))
+    }
+    return getSliceIndexFromFrac(axCorSag, nv?.scene?.crosshairPos || null)
+  }
+
   const canvasPosToVox = (pt) => {
     const nv = nvRef.current
     if (!nv || !pt) return null
@@ -513,10 +574,29 @@ const Viewer = forwardRef(function Viewer(
     if (!ctx) return
     ctx.clearRect(0, 0, markerCanvas.width, markerCanvas.height)
     const annotations = getCurrentAnnotations()
+    const isAnnotationVisibleOnCurrentSlice = (annotation) => {
+      if (annotation?.type !== 'freehand') return true
+      const plane = Number(annotation?.axCorSag)
+      const sliceIndex = Number(annotation?.sliceIndex)
+      if (!Number.isInteger(plane) || !Number.isInteger(sliceIndex)) return true
+      const currentSlice = getCurrentSliceIndex(plane)
+      if (!Number.isInteger(currentSlice)) return true
+      return currentSlice === sliceIndex
+    }
     for (const annotation of annotations) {
+      if (annotation?.renderOnMarker === false) continue
+      if (!isAnnotationVisibleOnCurrentSlice(annotation)) continue
       drawAnnotation(ctx, markerCanvas, annotation)
     }
-    if (annotationDraftRef.current) {
+    const shouldDrawFreehandDraft = (() => {
+      const draft = annotationDraftRef.current
+      if (!draft || draft.type !== 'freehand') return !!draft
+      if (!Number.isInteger(curvePlaneRef.current) || !Number.isInteger(curveSliceIndexRef.current)) return true
+      const currentSlice = getCurrentSliceIndex(curvePlaneRef.current)
+      if (!Number.isInteger(currentSlice)) return true
+      return currentSlice === curveSliceIndexRef.current
+    })()
+    if (annotationDraftRef.current && shouldDrawFreehandDraft) {
       drawAnnotation(ctx, markerCanvas, annotationDraftRef.current)
     }
     const pts = markerPtsRef.current
@@ -541,46 +621,7 @@ const Viewer = forwardRef(function Viewer(
       ctx.strokeStyle = 'rgba(255, 180, 0, 0.95)'
       ctx.stroke()
     }
-    // freehand 工具：仅绘制起终端点和闭合提示，避免高频采样点导致卡顿
-    const draft = annotationDraftRef.current
-    if (draft?.type === 'freehand' && draft.points?.length > 0) {
-      const firstPt = toPxPoint(draft.points[0], markerCanvas)
-      const lastPt = toPxPoint(draft.points[draft.points.length - 1], markerCanvas)
-
-      if (firstPt) {
-        ctx.beginPath()
-        ctx.arc(firstPt.x, firstPt.y, 4.5, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(219, 112, 219, 0.6)'
-        ctx.fill()
-        ctx.lineWidth = 1.5
-        ctx.strokeStyle = 'rgba(219, 112, 219, 1)'
-        ctx.stroke()
-      }
-
-      if (lastPt) {
-        ctx.beginPath()
-        ctx.arc(lastPt.x, lastPt.y, 5.5, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(219, 112, 219, 0.65)'
-        ctx.fill()
-        ctx.lineWidth = 2
-        ctx.strokeStyle = 'rgba(219, 112, 219, 1)'
-        ctx.stroke()
-      }
-
-      if (draft.points.length > 2 && firstPt && lastPt) {
-        const dist = Math.hypot(firstPt.x - lastPt.x, firstPt.y - lastPt.y)
-        if (dist < FREEHAND_CLOSE_PX) {
-          ctx.beginPath()
-          ctx.moveTo(lastPt.x, lastPt.y)
-          ctx.lineTo(firstPt.x, firstPt.y)
-          ctx.setLineDash([4, 4])
-          ctx.lineWidth = 2
-          ctx.strokeStyle = 'rgba(219, 112, 219, 0.6)'
-          ctx.stroke()
-          ctx.setLineDash([])
-        }
-      }
-    }
+    // freehand 草稿仅保留线条本身：未闭合粉紫、接近/闭合时按标签色（通常红色）
   }
 
   const maybeFillClosedStroke = () => {
@@ -995,6 +1036,7 @@ const Viewer = forwardRef(function Viewer(
       annotationDraftRef.current = null
       annotationStepsRef.current = []
       curvePlaneRef.current = null
+      curveSliceIndexRef.current = null
       const currentImageKey = getImageKey()
       actionHistoryRef.current = actionHistoryRef.current.filter((item) => {
         const actionType = typeof item === 'string' ? item : item?.type
@@ -1147,7 +1189,30 @@ const Viewer = forwardRef(function Viewer(
         if (typeof previousOnLocationChange === 'function') {
           previousOnLocationChange(location)
         }
-        drawStrokeMarkers()
+        if (
+          toolRef.current === 'freehand' &&
+          annotationStepsRef.current.length > 0 &&
+          Number.isInteger(curvePlaneRef.current) &&
+          Number.isInteger(curveSliceIndexRef.current)
+        ) {
+          const currentSlice = getCurrentSliceIndex(curvePlaneRef.current)
+          if (Number.isInteger(currentSlice) && currentSlice !== curveSliceIndexRef.current) {
+            annotationDraftRef.current = null
+            annotationStepsRef.current = []
+            curvePlaneRef.current = null
+            curveSliceIndexRef.current = null
+            freehandDrawingRef.current = false
+            if (activePointerIdRef.current !== null) {
+              const pid = activePointerIdRef.current
+              activePointerIdRef.current = null
+              const canvas = canvasRef.current
+              if (canvas?.hasPointerCapture?.(pid)) {
+                canvas.releasePointerCapture?.(pid)
+              }
+            }
+          }
+        }
+        scheduleMarkerRedraw(1)
       }
       nvRef.current.onDrawingChanged = (action) => {
         const nv = nvRef.current
@@ -1190,6 +1255,7 @@ const Viewer = forwardRef(function Viewer(
     annotationDraftRef.current = null
     annotationStepsRef.current = []
     curvePlaneRef.current = null
+    curveSliceIndexRef.current = null
     resetFillTracking()
     lastBrushVoxRef.current = null
     brushStrokeDirtyRef.current = false
@@ -1197,11 +1263,23 @@ const Viewer = forwardRef(function Viewer(
     drawStrokeMarkers()
   }, [tool])
 
+  useEffect(
+    () => () => {
+      if (markerRedrawRafRef.current !== null) {
+        cancelAnimationFrame(markerRedrawRafRef.current)
+        markerRedrawRafRef.current = null
+      }
+    },
+    []
+  )
+
   useEffect(() => {
     // 切换影像时清空临时态，避免上一张的草稿/轨迹残留到下一张。
     imageKeyRef.current = image?.id ? String(image.id) : ''
     annotationDraftRef.current = null
     annotationStepsRef.current = []
+    curvePlaneRef.current = null
+    curveSliceIndexRef.current = null
     markerPtsRef.current = []
     fillPtsRef.current = []
     fillActiveRef.current = false
@@ -1420,13 +1498,24 @@ const Viewer = forwardRef(function Viewer(
           const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
           const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
           if (currentPlane === null) return
+          const currentSliceIndex =
+            getSliceIndexFromFrac(currentPlane, norm?.frac || null) ??
+            getCurrentSliceIndex(currentPlane)
+          if (!Number.isInteger(currentSliceIndex)) return
 
           let nextSteps = [...annotationStepsRef.current]
           // 平面变化时，丢弃旧草稿并在当前平面重新开始
-          if (nextSteps.length > 0 && curvePlaneRef.current !== null && curvePlaneRef.current !== currentPlane) {
+          if (
+            nextSteps.length > 0 &&
+            (
+              (curvePlaneRef.current !== null && curvePlaneRef.current !== currentPlane) ||
+              (Number.isInteger(curveSliceIndexRef.current) && curveSliceIndexRef.current !== currentSliceIndex)
+            )
+          ) {
             nextSteps = []
           }
           curvePlaneRef.current = currentPlane
+          curveSliceIndexRef.current = currentSliceIndex
 
           if (nextSteps.length === 0) {
             nextSteps = [norm]
@@ -1445,13 +1534,14 @@ const Viewer = forwardRef(function Viewer(
           }
 
           annotationStepsRef.current = compactPoints(nextSteps, MAX_MARKER_POINTS)
-          annotationDraftRef.current = {
-            type: 'freehand',
-            points: [...annotationStepsRef.current],
-            label: '按回车完成',
-            color: getCurrentAnnotationColor(),
-            closed: false
-          }
+          const nearClosed =
+            annotationStepsRef.current.length > 2 &&
+            pointDistancePx(
+              annotationStepsRef.current[0],
+              annotationStepsRef.current[annotationStepsRef.current.length - 1],
+              markerCanvas
+            ) <= FREEHAND_CLOSE_PX
+          annotationDraftRef.current = makeFreehandDraft(annotationStepsRef.current, { nearClosed })
           freehandDrawingRef.current = true
           activePointerIdRef.current = event.pointerId
           canvas.setPointerCapture?.(event.pointerId)
@@ -1536,18 +1626,18 @@ const Viewer = forwardRef(function Viewer(
         const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
         const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
         if (currentPlane === null || curvePlaneRef.current === null || currentPlane !== curvePlaneRef.current) return
+        const currentSliceIndex = getCurrentSliceIndex(currentPlane)
+        if (
+          Number.isInteger(curveSliceIndexRef.current) &&
+          Number.isInteger(currentSliceIndex) &&
+          currentSliceIndex !== curveSliceIndexRef.current
+        ) return
 
         const norm = toStoredPoint(pos, markerCanvas)
         const current = annotationStepsRef.current
         if (!current.length) {
           annotationStepsRef.current = [norm]
-          annotationDraftRef.current = {
-            type: 'freehand',
-            points: [norm],
-            label: '按回车完成',
-            color: getCurrentAnnotationColor(),
-            closed: false
-          }
+          annotationDraftRef.current = makeFreehandDraft([norm], { nearClosed: false })
           drawStrokeMarkers()
           return
         }
@@ -1564,13 +1654,14 @@ const Viewer = forwardRef(function Viewer(
           }
         }
         annotationStepsRef.current = compactPoints(next, MAX_MARKER_POINTS)
-        annotationDraftRef.current = {
-          type: 'freehand',
-          points: [...annotationStepsRef.current],
-          label: '按回车完成',
-          color: getCurrentAnnotationColor(),
-          closed: false
-        }
+        const nearClosed =
+          annotationStepsRef.current.length > 2 &&
+          pointDistancePx(
+            annotationStepsRef.current[0],
+            annotationStepsRef.current[annotationStepsRef.current.length - 1],
+            markerCanvas
+          ) <= FREEHAND_CLOSE_PX
+        annotationDraftRef.current = makeFreehandDraft(annotationStepsRef.current, { nearClosed })
         drawStrokeMarkers()
         return
       }
@@ -1667,13 +1758,16 @@ const Viewer = forwardRef(function Viewer(
           canvas.releasePointerCapture?.(capturedId)
         }
         if (annotationStepsRef.current.length > 0) {
-          annotationDraftRef.current = {
-            type: 'freehand',
-            points: [...annotationStepsRef.current],
-            label: '按回车完成',
-            color: getCurrentAnnotationColor(),
-            closed: false
-          }
+          const markerCanvas = markerCanvasRef.current
+          const nearClosed =
+            !!markerCanvas &&
+            annotationStepsRef.current.length > 2 &&
+            pointDistancePx(
+              annotationStepsRef.current[0],
+              annotationStepsRef.current[annotationStepsRef.current.length - 1],
+              markerCanvas
+            ) <= FREEHAND_CLOSE_PX
+          annotationDraftRef.current = makeFreehandDraft(annotationStepsRef.current, { nearClosed })
           drawStrokeMarkers()
         }
         return
@@ -1725,6 +1819,8 @@ const Viewer = forwardRef(function Viewer(
       lastBrushVoxRef.current = null
       brushStrokeDirtyRef.current = false
       freehandDrawingRef.current = false
+      curvePlaneRef.current = null
+      curveSliceIndexRef.current = null
       resetFillTracking()
       drawStrokeMarkers()
     }
@@ -1758,7 +1854,10 @@ const Viewer = forwardRef(function Viewer(
             points: closedPoints,
             label: '',
             color: getCurrentAnnotationColor(),
-            closed: true
+            closed: true,
+            renderOnMarker: false,
+            axCorSag: curvePlaneRef.current,
+            sliceIndex: curveSliceIndexRef.current
           }
           addAnnotation(freehandAnnotation, { recordHistory: false, emitChange: false })
           const imageKey = getImageKey()
@@ -1779,6 +1878,7 @@ const Viewer = forwardRef(function Viewer(
           freehandDrawingRef.current = false
           annotationStepsRef.current = []
           curvePlaneRef.current = null
+          curveSliceIndexRef.current = null
           annotationDraftRef.current = null
           drawStrokeMarkers()
           // 通知父组件 curve 已完成
@@ -1788,10 +1888,16 @@ const Viewer = forwardRef(function Viewer(
       }
     }
 
+    const onWheel = () => {
+      // 滚轮切层时，等 NiiVue 完成场景刷新后重绘 marker，避免上一层辅助线残留。
+      scheduleMarkerRedraw(2)
+    }
+
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointercancel', onPointerCancel)
+    canvas.addEventListener('wheel', onWheel, { passive: true })
     window.addEventListener('keydown', onKeyDown)
 
     return () => {
@@ -1800,6 +1906,7 @@ const Viewer = forwardRef(function Viewer(
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
       canvas.removeEventListener('pointercancel', onPointerCancel)
+      canvas.removeEventListener('wheel', onWheel)
       window.removeEventListener('keydown', onKeyDown)
     }
   }, [])

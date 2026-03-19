@@ -1662,7 +1662,8 @@ export default function App() {
             maskAttached: true,
             overlayAnnotations,
             modifiedByUser: true,
-            maskVersion: (prev.maskVersion || 0) + 1
+            // 避免每次自动保存都触发 Viewer 重载，导致笔刷撤销栈被清空、绘制卡顿。
+            ...(prev.maskAttached === true ? {} : { maskVersion: (prev.maskVersion || 0) + 1 })
           }
         : prev
     )
@@ -1869,7 +1870,7 @@ export default function App() {
       Message.success('曲线标注已完成并保存')
       setCurveHintVisible(false)
     }
-    if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate' || reason === 'clear') {
+    if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate') {
       hasUnsavedChangesRef.current = true
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
       saveTimerRef.current = setTimeout(() => {
@@ -2720,7 +2721,8 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             maskAttached: false,
             overlayAnnotations: [],
             modifiedByUser: true,
-            maskVersion: (prev.maskVersion || 0) + 1
+            // Viewer 已在本地 clear，无需再次通过 maskVersion 触发整图重载。
+            maskVersion: prev.maskVersion || 0
           }
         : prev
     )
