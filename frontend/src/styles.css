@@ -385,6 +385,16 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   height: 100%;
   pointer-events: none;
 }
+.viewer-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #cbd5e1;
+  font-size: 14px;
+  background: #0b0f16;
+}
 .empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #ddd; font-size: 14px; }
 .placeholder { font-size: 12px; color: #6b7280; margin-top: 8px; }
 

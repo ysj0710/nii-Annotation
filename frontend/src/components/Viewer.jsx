@@ -19,16 +19,10 @@ const toArrayBuffer = (data) => {
   return null
 }
 
-const shouldResetWindow = (volume) => {
-  const calMin = Number(volume?.cal_min)
-  const calMax = Number(volume?.cal_max)
+const hasValidRobustWindow = (volume) => {
   const robustMin = Number(volume?.robust_min)
   const robustMax = Number(volume?.robust_max)
-  if (!Number.isFinite(robustMin) || !Number.isFinite(robustMax) || robustMax <= robustMin) return false
-  if (!Number.isFinite(calMin) || !Number.isFinite(calMax) || calMax <= calMin) return true
-  const calSpan = calMax - calMin
-  const robustSpan = robustMax - robustMin
-  return calSpan <= Math.max(1e-6, robustSpan * 1e-3)
+  return Number.isFinite(robustMin) && Number.isFinite(robustMax) && robustMax > robustMin
 }
 
 const formatNumber = (value, digits = 1) => {
@@ -57,7 +51,8 @@ const Viewer = forwardRef(function Viewer(
     labels = [],
     radiological2D = true,
     onDrawingChange,
-    renderMaskOnly3D = true
+    renderMaskOnly3D = true,
+    runtimeEnv = null
   },
   ref
 ) {
@@ -86,7 +81,13 @@ const Viewer = forwardRef(function Viewer(
   const labelsRef = useRef(labels)
   const onDrawingChangeRef = useRef(onDrawingChange)
   const renderMaskOnly3DRef = useRef(renderMaskOnly3D)
+  const runtimeEnvRef = useRef(runtimeEnv)
   const originalDraw3DRef = useRef(null)
+  const originalDrawImage3DRef = useRef(null)
+  const maskOnly3DActiveRef = useRef(false)
+  const refreshTelemetryRef = useRef({
+    last: null
+  })
   const brushStrokeDirtyRef = useRef(false)
   const drawRefreshPendingRef = useRef(false)
   const markerRedrawRafRef = useRef(null)
@@ -152,7 +153,18 @@ const Viewer = forwardRef(function Viewer(
     if (typeof notify === 'function') notify(reason)
   }
 
-  const requestDrawingRefresh = () => {
+  const sync2DShaderDrawSliceByVox = (vox) => {
+    const nv = nvRef.current
+    if (!nv?.opts?.is2DSliceShader || !Array.isArray(nv.scene?.crosshairPos) || !Array.isArray(vox)) return
+    const dims = nv.back?.dims
+    const nz = Number(dims?.[3] || 0)
+    if (nz < 1) return
+    const z = Math.max(0, Math.min(nz - 1, Math.round(Number(vox[2] || 0))))
+    nv.scene.crosshairPos[2] = nz > 1 ? z / (nz - 1) : 0
+  }
+
+  const requestDrawingRefresh = (targetVox = null) => {
+    sync2DShaderDrawSliceByVox(targetVox)
     if (drawRefreshPendingRef.current) return
     drawRefreshPendingRef.current = true
     requestAnimationFrame(() => {
@@ -167,6 +179,10 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => {
     renderMaskOnly3DRef.current = !!renderMaskOnly3D
   }, [renderMaskOnly3D])
+
+  useEffect(() => {
+    runtimeEnvRef.current = runtimeEnv || null
+  }, [runtimeEnv])
 
   const scheduleMarkerRedraw = (delayFrames = 1) => {
     if (markerRedrawRafRef.current !== null) {
@@ -268,6 +284,111 @@ const Viewer = forwardRef(function Viewer(
     requestAnimationFrame(() => {
       suppressDrawingChangedRef.current = false
     })
+  }
+
+  const refreshDrawingOnTargetSlice = ({ fixedAxis = null, fixedSlice = null, voxPoints = [] } = {}) => {
+    const nv = nvRef.current
+    if (!nv) return
+    const nowMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now())
+    const startedAt = nowMs()
+    const budgetMs = Math.max(40, Math.min(100, Number(runtimeEnvRef.current?.refreshBudgetMs || 100)))
+    const dims = nv.back?.dims
+    const pickAxis = nv.opts?.is2DSliceShader ? 2 : (Number.isInteger(fixedAxis) ? Number(fixedAxis) : 2)
+    const dimLen = Number(dims?.[pickAxis + 1] || 0)
+    const calcMeanIndex = (axis) => {
+      let sum = 0
+      let count = 0
+      for (const pt of voxPoints) {
+        const v = Number(pt?.[axis])
+        if (!Number.isFinite(v)) continue
+        sum += v
+        count += 1
+      }
+      if (count < 1) return null
+      return Math.round(sum / count)
+    }
+    let targetIndex = null
+    if (Number.isInteger(fixedAxis) && Number.isInteger(fixedSlice) && Number(fixedAxis) === pickAxis) {
+      targetIndex = Number(fixedSlice)
+    } else {
+      targetIndex = calcMeanIndex(pickAxis)
+    }
+    const clampIndex = (idx) => {
+      if (!Number.isFinite(idx) || dimLen < 1) return null
+      return Math.max(0, Math.min(dimLen - 1, Math.round(idx)))
+    }
+    targetIndex = clampIndex(targetIndex)
+    const applyIndex = (idx) => {
+      if (!Array.isArray(nv.scene?.crosshairPos) || dimLen < 1) return false
+      const v = clampIndex(idx)
+      if (!Number.isInteger(v)) return false
+      nv.scene.crosshairPos[pickAxis] = dimLen > 1 ? v / (dimLen - 1) : 0
+      return true
+    }
+    const canEscalate = () => {
+      const webglTier = String(runtimeEnvRef.current?.webgl?.tier || '').toLowerCase()
+      return !!nv.opts?.is2DSliceShader || webglTier === 'low' || webglTier === 'fallback'
+    }
+    const withinBudget = () => nowMs() - startedAt < budgetMs
+    const tiers = []
+
+    // 1) 标准刷新
+    if (Number.isInteger(targetIndex)) applyIndex(targetIndex)
+    redrawDrawingOverlaySilently()
+    tiers.push('standard')
+    if (!withinBudget() || !canEscalate()) {
+      refreshTelemetryRef.current.last = {
+        strategy: tiers,
+        durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
+        budgetMs,
+        on2DShader: !!nv.opts?.is2DSliceShader
+      }
+      return
+    }
+
+    // 2) 强制扰动刷新
+    if (dimLen > 1 && Number.isInteger(targetIndex)) {
+      const alt = targetIndex < dimLen - 1 ? targetIndex + 1 : targetIndex - 1
+      applyIndex(alt)
+      redrawDrawingOverlaySilently()
+      applyIndex(targetIndex)
+      redrawDrawingOverlaySilently()
+      tiers.push('perturb')
+    } else if (Array.isArray(nv.scene?.crosshairPos)) {
+      const prev = Number(nv.scene.crosshairPos[2] || 0)
+      const nudged = Math.max(0, Math.min(1, prev + 1e-4))
+      nv.scene.crosshairPos[2] = nudged
+      redrawDrawingOverlaySilently()
+      nv.scene.crosshairPos[2] = prev
+      redrawDrawingOverlaySilently()
+      tiers.push('perturb')
+    }
+    if (!withinBudget()) {
+      refreshTelemetryRef.current.last = {
+        strategy: tiers,
+        durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
+        budgetMs,
+        on2DShader: !!nv.opts?.is2DSliceShader
+      }
+      return
+    }
+
+    // 3) 模拟切片切换刷新
+    if (dimLen > 1 && Number.isInteger(targetIndex)) {
+      const alt = targetIndex > 0 ? targetIndex - 1 : targetIndex + 1
+      applyIndex(alt)
+      redrawDrawingOverlaySilently()
+      applyIndex(targetIndex)
+      redrawDrawingOverlaySilently()
+      tiers.push('simulated-slice-switch')
+    }
+
+    refreshTelemetryRef.current.last = {
+      strategy: tiers,
+      durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
+      budgetMs,
+      on2DShader: !!nv.opts?.is2DSliceShader
+    }
   }
 
   const ensureDrawingBitmap = () => {
@@ -856,10 +977,29 @@ const Viewer = forwardRef(function Viewer(
     if (!ensureDrawingBitmap()) return false
 
     const voxPoints = normPoints
-      .map((pt) => toPxPoint(pt, markerCanvas))
-      .filter((pt) => pt !== null)
-      .map((pt) => canvasPosToVox(pt))
-      .filter((pt) => Array.isArray(pt) && pt.length === 3)
+      .map((pt) => {
+        const frac = Array.isArray(pt?.frac) && pt.frac.length >= 3
+          ? [Number(pt.frac[0]), Number(pt.frac[1]), Number(pt.frac[2])]
+          : null
+        if (frac && frac.every((v) => Number.isFinite(v)) && typeof nv.frac2vox === 'function') {
+          const vox = nv.frac2vox(frac)
+          if (Array.isArray(vox) && vox.length >= 3) {
+            return [Number(vox[0]), Number(vox[1]), Number(vox[2])]
+          }
+        }
+        const px = toPxPoint(pt, markerCanvas)
+        if (!px) return null
+        const vox = canvasPosToVox(px)
+        if (!Array.isArray(vox) || vox.length < 3) return null
+        return [Number(vox[0]), Number(vox[1]), Number(vox[2])]
+      })
+      .filter((pt) =>
+        Array.isArray(pt) &&
+        pt.length >= 3 &&
+        Number.isFinite(pt[0]) &&
+        Number.isFinite(pt[1]) &&
+        Number.isFinite(pt[2])
+      )
     if (voxPoints.length < 3) return false
 
     const dims = nv.back?.dims
@@ -994,10 +1134,7 @@ const Viewer = forwardRef(function Viewer(
     }
 
     if (!changed) return false
-    redrawDrawingOverlaySilently()
-    requestAnimationFrame(() => {
-      redrawDrawingOverlaySilently()
-    })
+    refreshDrawingOnTargetSlice({ fixedAxis, fixedSlice: fixed, voxPoints })
     const pushed = pushSnapshot(nv.drawBitmap)
     if (pushed && recordHistory) {
       const imageKey = getImageKey()
@@ -1123,6 +1260,7 @@ const Viewer = forwardRef(function Viewer(
       return null
     },
     exportAnnotations: () => cloneAnnotations(getCurrentAnnotations()),
+    getRefreshDiagnostics: () => ({ ...(refreshTelemetryRef.current || {}) }),
     getAnnotationCount: () => getCurrentAnnotations().length,
     getLabelStats: () => {
       const nv = nvRef.current
@@ -1219,21 +1357,44 @@ const Viewer = forwardRef(function Viewer(
       if (typeof nvRef.current.setCrosshairVisible === 'function') {
         nvRef.current.setCrosshairVisible(false)
       }
+      const runMaskOnly3D = (renderFn) => {
+        if (!renderMaskOnly3DRef.current || maskOnly3DActiveRef.current) return renderFn()
+        const volumes = Array.isArray(nv.volumes) ? nv.volumes : []
+        if (!volumes.length) return renderFn()
+        maskOnly3DActiveRef.current = true
+        const prevOpacities = volumes.map((vol) => Number(vol?.opacity ?? vol?._opacity ?? 1))
+        for (const vol of volumes) {
+          if (!vol) continue
+          vol.opacity = 0
+          vol._opacity = 0
+        }
+        try {
+          return renderFn()
+        } finally {
+          volumes.forEach((vol, idx) => {
+            if (!vol) return
+            const prev = Number.isFinite(prevOpacities[idx]) ? prevOpacities[idx] : 1
+            vol.opacity = prev
+            vol._opacity = prev
+          })
+          maskOnly3DActiveRef.current = false
+        }
+      }
+      if (typeof nv.drawImage3D === 'function') {
+        originalDrawImage3DRef.current = nv.drawImage3D.bind(nv)
+        nv.drawImage3D = (...args) => {
+          const originalDrawImage3D = originalDrawImage3DRef.current
+          if (typeof originalDrawImage3D !== 'function') return undefined
+          return runMaskOnly3D(() => originalDrawImage3D(...args))
+        }
+      }
       if (typeof nv.draw3D === 'function') {
         originalDraw3DRef.current = nv.draw3D.bind(nv)
         nv.draw3D = (...args) => {
           const originalDraw3D = originalDraw3DRef.current
           if (typeof originalDraw3D !== 'function') return undefined
-          if (!renderMaskOnly3DRef.current) return originalDraw3D(...args)
-          const baseVolume = nv.volumes?.[0]
-          if (!baseVolume) return originalDraw3D(...args)
-          const prevOpacity = Number(baseVolume._opacity ?? baseVolume.opacity ?? 1)
-          baseVolume._opacity = 0
-          try {
-            return originalDraw3D(...args)
-          } finally {
-            baseVolume._opacity = prevOpacity
-          }
+          if (typeof originalDrawImage3DRef.current === 'function') return originalDraw3D(...args)
+          return runMaskOnly3D(() => originalDraw3D(...args))
         }
       }
       const previousOnLocationChange = nvRef.current.onLocationChange
@@ -1442,7 +1603,7 @@ const Viewer = forwardRef(function Viewer(
       }
 
       const baseVolume = nv.volumes?.[0]
-      if (baseVolume && !image.isMaskOnly && shouldResetWindow(baseVolume)) {
+      if (baseVolume && !image.isMaskOnly && hasValidRobustWindow(baseVolume)) {
         baseVolume.cal_min = Number(baseVolume.robust_min)
         baseVolume.cal_max = Number(baseVolume.robust_max)
         if (typeof nv.updateGLVolume === 'function') {
@@ -1644,7 +1805,7 @@ const Viewer = forwardRef(function Viewer(
               )
             ) {
               brushStrokeDirtyRef.current = true
-              requestDrawingRefresh()
+              requestDrawingRefresh(vox)
             }
             // 记录起始位置
             lastBrushVoxRef.current = [...vox]
@@ -1755,7 +1916,7 @@ const Viewer = forwardRef(function Viewer(
             )
           ) {
             brushStrokeDirtyRef.current = true
-            requestDrawingRefresh()
+            requestDrawingRefresh(vox)
           }
         }
         lastBrushVoxRef.current = [...vox]

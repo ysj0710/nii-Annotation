@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Layout,
   Button,
@@ -18,17 +18,128 @@ import {
 import JSZip from 'jszip'
 import * as nifti from 'nifti-reader-js'
 import dicomParser from 'dicom-parser'
-import { dicomLoader as niivueDicomLoader } from '@niivue/dicom-loader'
-import { Niivue } from '@niivue/niivue'
-import Viewer from './components/Viewer.jsx'
 import { getAllImages, getImageById, saveImages, updateImage, deleteImage, clearAllImages } from './utils/imageStore.js'
+
+const Viewer = lazy(() => import('./components/Viewer.jsx'))
+
+let niivueCtorPromise = null
+const loadNiivueCtor = async () => {
+  if (!niivueCtorPromise) {
+    niivueCtorPromise = import('@niivue/niivue').then((mod) => mod.Niivue)
+  }
+  return niivueCtorPromise
+}
+
+let niivueDicomLoaderPromise = null
+const loadNiivueDicomLoader = async () => {
+  if (!niivueDicomLoaderPromise) {
+    niivueDicomLoaderPromise = import('@niivue/dicom-loader').then((mod) => mod.dicomLoader)
+  }
+  return niivueDicomLoaderPromise
+}
 
 const { Header, Sider, Content } = Layout
 
 const labelPalette = ['#FF6B6B', '#4D96FF', '#6BCB77', '#FFD93D', '#845EC2', '#FF9671']
 const DEFAULT_LABEL_COLOR = '#FF4D4F'
 const THUMBNAIL_SIZE = 240
+const THUMBNAIL_RENDER_VERSION = 2
 const RASTER_CONVERSION_VERSION = 8
+
+const hasValidRobustWindow = (volume) => {
+  const robustMin = Number(volume?.robust_min)
+  const robustMax = Number(volume?.robust_max)
+  return Number.isFinite(robustMin) && Number.isFinite(robustMax) && robustMax > robustMin
+}
+
+const detectBrowserRuntimeEnv = () => {
+  const nav = typeof navigator !== 'undefined' ? navigator : {}
+  const hasWindow = typeof window !== 'undefined'
+  const hasDocument = typeof document !== 'undefined'
+  const base = {
+    detectedAt: Date.now(),
+    browser: {
+      userAgent: String(nav?.userAgent || ''),
+      platform: String(nav?.platform || ''),
+      language: String(nav?.language || ''),
+      languages: Array.isArray(nav?.languages) ? nav.languages : [],
+      hardwareConcurrency: Number(nav?.hardwareConcurrency || 0),
+      deviceMemoryGB: Number(nav?.deviceMemory || 0),
+      timezone: (() => {
+        try {
+          return Intl.DateTimeFormat().resolvedOptions().timeZone || ''
+        } catch {
+          return ''
+        }
+      })()
+    },
+    webgl: {
+      supported: false,
+      version: 'none',
+      tier: 'fallback',
+      renderer: '',
+      vendor: '',
+      maxTextureSize: 0,
+      max3DTextureSize: 0,
+      majorPerformanceCaveat: false
+    },
+    refreshBudgetMs: 100
+  }
+  if (!hasWindow || !hasDocument) return base
+
+  const makeCtx = (canvas, type, opts = {}) => {
+    try {
+      return canvas.getContext(type, opts)
+    } catch {
+      return null
+    }
+  }
+
+  const canvas = document.createElement('canvas')
+  const webgl2 = makeCtx(canvas, 'webgl2', {
+    antialias: false,
+    alpha: false,
+    preserveDrawingBuffer: false,
+    powerPreference: 'high-performance'
+  })
+  const gl = webgl2 || makeCtx(canvas, 'webgl', { antialias: false, alpha: false }) || makeCtx(canvas, 'experimental-webgl', { antialias: false, alpha: false })
+  if (!gl) return base
+
+  const isWebgl2 = !!webgl2
+  const maxTextureSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE) || 0)
+  const max3DTextureSize = isWebgl2 ? Number(gl.getParameter(gl.MAX_3D_TEXTURE_SIZE) || 0) : 0
+  const debugInfo = gl.getExtension('WEBGL_debug_renderer_info')
+  const renderer = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '') : String(gl.getParameter(gl.RENDERER) || '')
+  const vendor = debugInfo ? String(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) || '') : String(gl.getParameter(gl.VENDOR) || '')
+  const caveatCanvas = document.createElement('canvas')
+  const caveatCtx = makeCtx(caveatCanvas, isWebgl2 ? 'webgl2' : 'webgl', { failIfMajorPerformanceCaveat: true })
+  const majorPerformanceCaveat = !caveatCtx
+  const softwareLike = /(swiftshader|software|llvmpipe|angle \(.*microsoft basic render driver)/i.test(renderer)
+  let tier = 'medium'
+  if (majorPerformanceCaveat || softwareLike || maxTextureSize < 4096) tier = 'low'
+  else if (isWebgl2 && maxTextureSize >= 8192 && max3DTextureSize >= 2048) tier = 'high'
+  const refreshBudgetMs = tier === 'high' ? 80 : tier === 'medium' ? 90 : 100
+
+  const lose = gl.getExtension('WEBGL_lose_context')
+  lose?.loseContext?.()
+  const loseCaveat = caveatCtx?.getExtension?.('WEBGL_lose_context')
+  loseCaveat?.loseContext?.()
+
+  return {
+    ...base,
+    webgl: {
+      supported: true,
+      version: isWebgl2 ? 'webgl2' : 'webgl1',
+      tier,
+      renderer,
+      vendor,
+      maxTextureSize,
+      max3DTextureSize,
+      majorPerformanceCaveat
+    },
+    refreshBudgetMs
+  }
+}
 
 const normalizeBaseName = (name) => {
   if (!name) return ''
@@ -855,6 +966,7 @@ const createNiftiThumbnail = async (buffer, _name, { isMask = false } = {}) => {
 }
 
 const createNiivueThumbnail = async (buffer, name, { isMask = false } = {}) => {
+  const NiivueCtor = await loadNiivueCtor()
   const canvas = document.createElement('canvas')
   canvas.width = THUMBNAIL_SIZE
   canvas.height = THUMBNAIL_SIZE
@@ -862,12 +974,20 @@ const createNiivueThumbnail = async (buffer, name, { isMask = false } = {}) => {
   canvas.style.opacity = '0'
   canvas.style.pointerEvents = 'none'
   document.body.appendChild(canvas)
-  const nv = new Niivue({ show3Dcrosshair: false })
+  const nv = new NiivueCtor({ show3Dcrosshair: false })
   try {
     nv.attachToCanvas(canvas)
     await nv.loadFromArrayBuffer(buffer, name)
     if (typeof nv.setInterpolation === 'function') {
       nv.setInterpolation(true)
+    }
+    const baseVolume = nv.volumes?.[0]
+    if (baseVolume && !isMask && hasValidRobustWindow(baseVolume)) {
+      baseVolume.cal_min = Number(baseVolume.robust_min)
+      baseVolume.cal_max = Number(baseVolume.robust_max)
+      if (typeof nv.updateGLVolume === 'function') {
+        nv.updateGLVolume()
+      }
     }
     const dims = nv.back?.dims
     const is2D = dims && (dims[0] <= 2 || dims[3] <= 1)
@@ -894,10 +1014,12 @@ const createNiivueThumbnail = async (buffer, name, { isMask = false } = {}) => {
 const createThumbnail = async (buffer, name, { isMask = false } = {}) => {
   if (isNiftiFile(name)) {
     if (!isNiftiBuffer(buffer)) return ''
+    const niivueThumb = await createNiivueThumbnail(buffer, name, { isMask })
+    if (niivueThumb) return niivueThumb
     try {
       return await createNiftiThumbnail(buffer, name, { isMask })
     } catch {
-      return createNiivueThumbnail(buffer, name, { isMask })
+      return ''
     }
   }
   return createNiivueThumbnail(buffer, name, { isMask })
@@ -1015,6 +1137,7 @@ export default function App() {
   const [showImageSidebar, setShowImageSidebar] = useState(true)
   const [annotationMenuVisible, setAnnotationMenuVisible] = useState(false)
   const [colorPickerLabelId, setColorPickerLabelId] = useState(null)
+  const [runtimeEnv, setRuntimeEnv] = useState(null)
 
   const [images, setImages] = useState([])
   const [activeImage, setActiveImage] = useState(null)
@@ -1028,6 +1151,8 @@ export default function App() {
   const saveTimerRef = useRef(null)
   const saveIdleRef = useRef(null)
   const saveQueueRef = useRef(Promise.resolve(false))
+  const thumbnailRefreshInFlightRef = useRef(false)
+  const runtimeEnvRef = useRef(null)
   const statsTimerRef = useRef(null)
   const dicomWheelSwitchAtRef = useRef(0)
   const autoImportedRef = useRef(false)
@@ -1157,6 +1282,12 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    const detected = detectBrowserRuntimeEnv()
+    runtimeEnvRef.current = detected
+    setRuntimeEnv(detected)
+  }, [])
+
+  useEffect(() => {
     if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
       setViewerMode('default')
     }
@@ -1193,6 +1324,18 @@ export default function App() {
       const stats = viewerRef.current?.getLabelStats?.() || {}
       setLabelStats(stats)
     }, 120)
+  }
+
+  const buildClientEnvReport = (phase = 'save', extra = {}) => {
+    const refreshState = viewerRef.current?.getRefreshDiagnostics?.() || null
+    return {
+      phase,
+      recordedAt: new Date().toISOString(),
+      imageId: String(activeImageIdRef.current || activeImage?.id || ''),
+      runtime: runtimeEnvRef.current,
+      refresh: refreshState?.last || null,
+      ...extra
+    }
   }
 
   const addLabel = () => {
@@ -1247,6 +1390,7 @@ export default function App() {
       record.sourceName = sourceName
       record.sourceData = originalSourceData
       record.thumbnail = regenerated || record.thumbnail
+      record.thumbnailRenderVersion = THUMBNAIL_RENDER_VERSION
       await updateImage(record.id, {
         data: originalSourceData,
         name: sourceName,
@@ -1257,6 +1401,7 @@ export default function App() {
         sourceName,
         sourceData: originalSourceData,
         thumbnail: record.thumbnail,
+        thumbnailRenderVersion: THUMBNAIL_RENDER_VERSION,
         ...(shouldResetAutoMask
           ? {
               mask: null,
@@ -1269,6 +1414,43 @@ export default function App() {
     }
     const sorted = records.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
     setImages(sorted.map(toListItem))
+    if (!thumbnailRefreshInFlightRef.current) {
+      const candidates = sorted.filter((record) => {
+        if (!record?.id || record?.sourceFormat === 'dicom') return false
+        if ((record?.thumbnailRenderVersion || 0) >= THUMBNAIL_RENDER_VERSION) return false
+        const source = arrayBufferFrom(record?.sourceData || record?.data)
+        return !!(source && isNiftiBuffer(source))
+      })
+      if (candidates.length > 0) {
+        thumbnailRefreshInFlightRef.current = true
+        ;(async () => {
+          try {
+            for (const record of candidates) {
+              const source = arrayBufferFrom(record?.sourceData || record?.data)
+              if (!source) continue
+              const sourceName = record?.sourceName || record?.displayName || record?.name || 'image.nii.gz'
+              const thumbnail = await createThumbnail(source, sourceName, { isMask: !!record?.isMaskOnly })
+              if (!thumbnail) continue
+              await updateImage(record.id, {
+                thumbnail,
+                thumbnailRenderVersion: THUMBNAIL_RENDER_VERSION,
+                updatedAt: Date.now()
+              })
+              setImages((prev) => prev.map((img) => (img.id === record.id ? { ...img, thumbnail } : img)))
+              setActiveImage((prev) => (
+                prev && prev.id === record.id
+                  ? { ...prev, thumbnail, thumbnailRenderVersion: THUMBNAIL_RENDER_VERSION }
+                  : prev
+              ))
+            }
+          } catch (error) {
+            console.warn('后台刷新缩略图失败', error)
+          } finally {
+            thumbnailRefreshInFlightRef.current = false
+          }
+        })()
+      }
+    }
     const activeId = String(activeImageIdRef.current || '')
     if (activeId) {
       const matched = sorted.find((item) => String(item.id) === activeId)
@@ -1404,9 +1586,6 @@ export default function App() {
         await importImageFile(file, hashSet, importBatchId)
       }
 
-      if (!skipUiRefresh) {
-        await refreshImageList()
-      }
       const afterRecords = await getAllImages()
       const afterCount = afterRecords.length
       const imported = afterRecords.filter((record) => record.importBatchId === importBatchId && !record.isMaskOnly)
@@ -1476,7 +1655,7 @@ export default function App() {
         }
       }
       if (!skipUiRefresh) {
-        await refreshImageList()
+        void refreshImageList()
       }
       if (afterCount <= beforeCount) {
         if (!silent) Message.info('影像已存在，已直接加载本地记录')
@@ -1564,12 +1743,15 @@ export default function App() {
     ;(async () => {
       if (initializedRef.current) return
       initializedRef.current = true
+      const hasRemoteBootstrap = !externalCtx.batchId && !!(externalCtx.imageId || externalCtx.imageUrl)
       if (externalCtx.batchId) {
         await clearAllImages()
         setImages([])
         setActiveImage(null)
       }
-      await refreshImageList()
+      if (!hasRemoteBootstrap) {
+        await refreshImageList()
+      }
       if (externalCtx.batchId) {
         try {
           const queue = await loadBatchQueue()
@@ -1590,7 +1772,10 @@ export default function App() {
           await fetchAndImportByImageId()
         }
       } else {
-        await fetchAndImportByImageId()
+        const imported = await fetchAndImportByImageId()
+        if (!imported) {
+          await refreshImageList()
+        }
       }
     })()
   }, [])
@@ -1607,6 +1792,7 @@ export default function App() {
     const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer: activeImage?.data }) : null
     const hasMask = buffer ? hasNonZeroMaskNifti(buffer) : false
     const hasOverlayAnnotations = overlayAnnotations.length > 0
+    const clientEnvReport = buildClientEnvReport('persist')
     if (!buffer && !hasOverlayAnnotations) return false
     if (!hasMask) {
       await updateImage(activeImage.id, {
@@ -1614,6 +1800,7 @@ export default function App() {
         maskName: null,
         maskAttached: false,
         overlayAnnotations,
+        lastClientEnvReport: clientEnvReport,
         modifiedByUser: true,
         updatedAt: Date.now()
       })
@@ -1633,6 +1820,7 @@ export default function App() {
               maskName: null,
               maskAttached: false,
               overlayAnnotations,
+              lastClientEnvReport: clientEnvReport,
               modifiedByUser: true
             }
           : prev
@@ -1645,6 +1833,7 @@ export default function App() {
       maskName: `${fileStem(activeImage.name)}.nii.gz`,
       maskAttached: true,
       overlayAnnotations,
+      lastClientEnvReport: clientEnvReport,
       modifiedByUser: true,
       updatedAt: Date.now()
     })
@@ -1659,6 +1848,7 @@ export default function App() {
             mask: buffer,
             maskAttached: true,
             overlayAnnotations,
+            lastClientEnvReport: clientEnvReport,
             modifiedByUser: true
           }
         : prev
@@ -1719,10 +1909,14 @@ export default function App() {
     const imageName = String(record?.sourceName || record?.name || 'image.nii.gz')
     const maskName = `${fileStem(imageName) || 'mask'}.nii.gz`
     const overlayAnnotations = Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
+    const clientEnvReport = buildClientEnvReport('local-backend', {
+      imageId: String(record?.remoteImageId || record?.id || activeImage.id || '')
+    })
     const annotationsJson = JSON.stringify({
       labels,
       annotations: overlayAnnotations,
-      imageId: String(record?.remoteImageId || record?.id || activeImage.id || '')
+      imageId: String(record?.remoteImageId || record?.id || activeImage.id || ''),
+      clientEnv: clientEnvReport
     })
 
     payload.append('image', new File([imageBuffer], imageName, { type: 'application/octet-stream' }))
@@ -1755,6 +1949,7 @@ export default function App() {
 
     const sourceName = String(record?.sourceName || record?.name || '')
     const sourceNameStem = fileStem(sourceName) || sourceName || `image-${remoteImageId}`
+    const clientEnvReport = buildClientEnvReport('platform-single', { imageId: remoteImageId })
     const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationByImageId`
     const payload = new FormData()
@@ -1772,7 +1967,8 @@ export default function App() {
       'annotations',
       JSON.stringify({
         labels,
-        annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
+        annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : [],
+        clientEnv: clientEnvReport
       })
     )
 
@@ -1796,6 +1992,9 @@ export default function App() {
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationBatch`
     const records = await getAllImages()
     const queueItems = Array.isArray(batchQueue?.images) ? batchQueue.images : []
+    const clientEnvReport = buildClientEnvReport('platform-batch', {
+      batchId: String(externalCtx.batchId || '')
+    })
     if (!queueItems.length) return false
 
     const items = []
@@ -1813,7 +2012,8 @@ export default function App() {
         sourceImageName: sourceNameStem,
         annotations: JSON.stringify({
           labels,
-          annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
+          annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : [],
+          clientEnv: clientEnvReport
         }),
         maskBase64: bufferToBase64(maskBuffer),
         maskFileName: inferMaskFileName(sourceName || `mask-${remoteImageId}.nii.gz`),
@@ -1832,6 +2032,7 @@ export default function App() {
       body: JSON.stringify({
         batchId: String(externalCtx.batchId),
         topicId: externalCtx.topicId ? String(externalCtx.topicId) : null,
+        clientEnv: clientEnvReport,
         items
       })
     })
@@ -1897,11 +2098,8 @@ export default function App() {
   }
 
   const onViewerEvent = (reason = 'draw') => {
-    if (reason === 'annotate') {
-      Message.success('标注创建成功')
-    }
     if (reason === 'curve-complete') {
-      Message.success('曲线标注已完成并保存')
+      Message.success('保存成功')
       setCurveHintVisible(false)
     }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate') {
@@ -1910,6 +2108,13 @@ export default function App() {
     }
     scheduleLabelStatsRefresh()
   }
+
+  useEffect(
+    () => () => {
+      clearAutoSaveSchedule()
+    },
+    []
+  )
 
   const locateLabel = (labelValue) => {
     const ok = viewerRef.current?.jumpToLabel?.(labelValue)
@@ -2064,6 +2269,7 @@ export default function App() {
       importBatchId = null,
       sourceName = null,
       sourceData = null,
+      thumbnailRenderVersion = THUMBNAIL_RENDER_VERSION,
       modifiedByUser = false,
       sourceFormat = 'nifti',
       dicomSourceCount = 0,
@@ -2116,7 +2322,8 @@ export default function App() {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       hash,
-      thumbnail
+      thumbnail,
+      thumbnailRenderVersion
   }
 }
 
@@ -2184,6 +2391,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   const importDicomItems = async (items, hashSet, importBatchId = null) => {
     if (!Array.isArray(items) || items.length === 0) return
     try {
+      const niivueDicomLoader = await loadNiivueDicomLoader()
       const groupedSeries = groupDicomInputsBySeries(items)
       if (!groupedSeries.length) {
         Message.warning('未识别到有效 DICOM 序列')
@@ -3127,18 +3335,21 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
               )}
             </div>
           )}
-          <Viewer
-            ref={viewerRef}
-            image={activeImage}
-            tool={tool}
-            brushSize={brushSize}
-            brushShape={brushShape}
-            activeLabelValue={activeLabel?.value || 1}
-            labels={labels}
-            radiological2D={viewerMode === 'dicom' ? true : radiological2D}
-            renderMaskOnly3D
-            onDrawingChange={onViewerEvent}
-          />
+          <Suspense fallback={<div className="viewer-loading">正在加载影像引擎…</div>}>
+            <Viewer
+              ref={viewerRef}
+              image={activeImage}
+              tool={tool}
+              brushSize={brushSize}
+              brushShape={brushShape}
+              activeLabelValue={activeLabel?.value || 1}
+              labels={labels}
+              radiological2D={viewerMode === 'dicom' ? true : radiological2D}
+              renderMaskOnly3D
+              runtimeEnv={runtimeEnv}
+              onDrawingChange={onViewerEvent}
+            />
+          </Suspense>
         </Content>
 
         <Sider className="label-sidebar" width={360}>
