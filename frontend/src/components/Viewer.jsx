@@ -271,13 +271,16 @@ const Viewer = forwardRef(function Viewer(
       typeof nv.frac2canvasPos === 'function'
     ) {
       const pos = nv.frac2canvasPos([Number(frac[0]), Number(frac[1]), Number(frac[2])])
+      // 过滤掉不在当前视图平面上的点（NiiVue 返回负值表示不可见）
       if (Array.isArray(pos) && pos.length >= 2) {
         const dpr = nv.uiData?.dpr || 1
-        return {
-          x: Number(pos[0] || 0) / dpr,
-          y: Number(pos[1] || 0) / dpr
-        }
+        const x = Number(pos[0] || 0) / dpr
+        const y = Number(pos[1] || 0) / dpr
+        // 如果坐标为负，表示该点不在当前平面视图中
+        if (x < 0 || y < 0) return null
+        return { x, y }
       }
+      return null
     }
     return {
       x: Number(pt?.x || 0) * canvas.width,
@@ -355,7 +358,7 @@ const Viewer = forwardRef(function Viewer(
   }
 
   const drawAnnotation = (ctx, canvas, annotation) => {
-    const points = (annotation?.points || []).map((p) => toPxPoint(p, canvas))
+    const points = (annotation?.points || []).map((p) => toPxPoint(p, canvas)).filter((p) => p !== null)
     if (!points.length) return
     ctx.save()
     ctx.strokeStyle = annotation.color || 'rgba(147, 197, 253, 0.95)'
@@ -710,6 +713,7 @@ const Viewer = forwardRef(function Viewer(
 
     const voxPoints = normPoints
       .map((pt) => toPxPoint(pt, markerCanvas))
+      .filter((pt) => pt !== null)
       .map((pt) => canvasPosToVox(pt))
       .filter((pt) => Array.isArray(pt) && pt.length === 3)
     if (voxPoints.length < 3) return false
@@ -1298,6 +1302,7 @@ const Viewer = forwardRef(function Viewer(
             const p0 = toPxPoint(pts[0], markerCanvas)
             const p1 = toPxPoint(pts[1], markerCanvas)
             const p2 = toPxPoint(pts[2], markerCanvas)
+            if (!p0 || !p1 || !p2) return
             const angle = computeAngle(p0, p1, p2)
             addAnnotation({
               type: currentTool,
@@ -1456,14 +1461,17 @@ const Viewer = forwardRef(function Viewer(
           const norm = toStoredPoint(pos, markerCanvas)
           const draft = annotationDraftRef.current
           if (draft.points.length > 1) draft.points[draft.points.length - 1] = norm
-          const pxPoints = draft.points.map((p) => toPxPoint(p, markerCanvas))
+          const pxPoints = draft.points.map((p) => toPxPoint(p, markerCanvas)).filter((p) => p !== null)
           if (toolRef.current === 'length') {
+            if (pxPoints.length < 2) return
             draft.label = `${formatNumber(lineDistanceMM(pxPoints[0], pxPoints[1]), 2)}mm`
           } else if (toolRef.current === 'ratio') {
+            if (pxPoints.length < 2) return
             const w = Math.abs(pxPoints[1].x - pxPoints[0].x)
             const h = Math.abs(pxPoints[1].y - pxPoints[0].y)
             draft.label = `比值 ${formatNumber(w / Math.max(1e-6, h), 2)}`
           } else if (toolRef.current === 'bidirectional') {
+            if (pxPoints.length < 2) return
             draft.label = `${formatNumber(lineDistanceMM(pxPoints[0], pxPoints[1]), 2)}mm`
           } else if (toolRef.current === 'arrow') {
             draft.label = '箭头标注'
