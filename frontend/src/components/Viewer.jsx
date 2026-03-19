@@ -69,6 +69,12 @@ const Viewer = forwardRef(function Viewer(
   const annotationStepsRef = useRef([])
   const curvePlaneRef = useRef(null)
   const lastBrushVoxRef = useRef(null)
+  const brushSizeRef = useRef(brushSize)
+  const brushShapeRef = useRef(brushShape)
+  const activeLabelValueRef = useRef(activeLabelValue)
+  const labelsRef = useRef(labels)
+  const onDrawingChangeRef = useRef(onDrawingChange)
+  const brushStrokeDirtyRef = useRef(false)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
   imageKeyRef.current = image?.id ? String(image.id) : ''
@@ -91,7 +97,8 @@ const Viewer = forwardRef(function Viewer(
     if (!key) return
     setCurrentAnnotations([...getCurrentAnnotations(), annotation])
     actionHistoryRef.current.push({ type: 'annotation', imageKey: key })
-    if (typeof onDrawingChange === 'function') onDrawingChange('annotate')
+    const notify = onDrawingChangeRef.current
+    if (typeof notify === 'function') notify('annotate')
   }
   const cloneAnnotations = (items) => {
     if (!Array.isArray(items)) return []
@@ -102,7 +109,12 @@ const Viewer = forwardRef(function Viewer(
     }
   }
   const getCurrentAnnotationColor = () =>
-    labels.find((item) => Number(item.value || 0) === Number(activeLabelValue || 0))?.color || '#60a5fa'
+    labelsRef.current.find((item) => Number(item.value || 0) === Number(activeLabelValueRef.current || 0))?.color || '#60a5fa'
+
+  const emitDrawingChange = (reason) => {
+    const notify = onDrawingChangeRef.current
+    if (typeof notify === 'function') notify(reason)
+  }
 
   const compactPoints = (points, maxPoints) => {
     if (!Array.isArray(points) || points.length <= maxPoints) return points
@@ -595,7 +607,7 @@ const Viewer = forwardRef(function Viewer(
       const nz = Math.max(1, Number(dims?.[3] || 1))
       if (nx > 0 && ny > 0 && nz > 0 && nv.drawBitmap) {
         ensureBaseSnapshot(nv.drawBitmap)
-        const fillLabel = Math.max(1, Math.min(255, Number(activeLabelValue || 1)))
+        const fillLabel = Math.max(1, Math.min(255, Number(activeLabelValueRef.current || 1)))
 
         const project = (p) => [Number(p[h] || 0), Number(p[v] || 0)]
         const poly = [...pts.map(project), project(pts[0])]
@@ -748,9 +760,7 @@ const Viewer = forwardRef(function Viewer(
             const imageKey = getImageKey()
             if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
           }
-          if (typeof onDrawingChange === 'function') {
-            onDrawingChange('draw')
-          }
+          emitDrawingChange('draw')
         }
       } else {
         const closedPts = [...pts, [...pts[0]]]
@@ -830,7 +840,7 @@ const Viewer = forwardRef(function Viewer(
     const hEnd = Math.ceil(maxH)
     const vStart = Math.floor(minV)
     const vEnd = Math.ceil(maxV)
-    const fillLabel = Math.max(1, Math.min(255, Number(activeLabelValue || 1)))
+    const fillLabel = Math.max(1, Math.min(255, Number(activeLabelValueRef.current || 1)))
     const xy = nx * ny
     let changed = false
 
@@ -890,7 +900,7 @@ const Viewer = forwardRef(function Viewer(
       const imageKey = getImageKey()
       if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
     }
-    if (typeof onDrawingChange === 'function') onDrawingChange('draw')
+    emitDrawingChange('draw')
     return true
   }
 
@@ -1096,25 +1106,47 @@ const Viewer = forwardRef(function Viewer(
       nvRef.current.onDrawingChanged = (action) => {
         const nv = nvRef.current
         if (!nv?.drawBitmap) return
+        if (toolRef.current === 'brush') return
         ensureBaseSnapshot(nv.drawBitmap)
         const pushed = pushSnapshot(nv.drawBitmap)
         if (pushed && action !== 'undo' && action !== 'redo') {
           const imageKey = getImageKey()
           if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
         }
-        if (typeof onDrawingChange === 'function') {
-          onDrawingChange(action)
-        }
+        emitDrawingChange(action)
       }
-      applyToolSettings(toolRef.current, brushSize, activeLabelValue)
+      applyToolSettings(toolRef.current, brushSizeRef.current, activeLabelValueRef.current)
     }
   }, [])
+
+  useEffect(() => {
+    brushSizeRef.current = brushSize
+  }, [brushSize])
+
+  useEffect(() => {
+    brushShapeRef.current = brushShape
+  }, [brushShape])
+
+  useEffect(() => {
+    activeLabelValueRef.current = activeLabelValue
+  }, [activeLabelValue])
+
+  useEffect(() => {
+    labelsRef.current = labels
+  }, [labels])
+
+  useEffect(() => {
+    onDrawingChangeRef.current = onDrawingChange
+  }, [onDrawingChange])
 
   useEffect(() => {
     toolRef.current = tool
     annotationDraftRef.current = null
     annotationStepsRef.current = []
     curvePlaneRef.current = null
+    resetFillTracking()
+    lastBrushVoxRef.current = null
+    brushStrokeDirtyRef.current = false
     drawStrokeMarkers()
   }, [tool])
 
@@ -1127,6 +1159,8 @@ const Viewer = forwardRef(function Viewer(
     fillPtsRef.current = []
     fillActiveRef.current = false
     activePointerIdRef.current = null
+    lastBrushVoxRef.current = null
+    brushStrokeDirtyRef.current = false
     drawStrokeMarkers()
   }, [image?.id])
 
@@ -1276,15 +1310,13 @@ const Viewer = forwardRef(function Viewer(
         redrawDrawingOverlay()
       }
 
-      applyToolSettings(toolRef.current, brushSize, activeLabelValue)
+      applyToolSettings(toolRef.current, brushSizeRef.current, activeLabelValueRef.current)
       drawStrokeMarkers()
       requestAnimationFrame(() => {
         redrawDrawingOverlay()
         drawStrokeMarkers()
       })
-      if (typeof onDrawingChange === 'function') {
-        onDrawingChange('load')
-      }
+      emitDrawingChange('load')
     }
 
     load().catch((error) => {
@@ -1331,13 +1363,11 @@ const Viewer = forwardRef(function Viewer(
       const currentTool = toolRef.current
       if (isAnnotationTool(currentTool)) {
         event.preventDefault()
-        const now = Date.now()
         const markerCanvas = markerCanvasRef.current
         if (!markerCanvas) return
         const norm = toStoredPoint(pos, markerCanvas)
 
         if (currentTool === 'freehand') {
-          curveLastTapRef.current = now
           const dpr = nv.uiData?.dpr || 1
           const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
           const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
@@ -1368,6 +1398,13 @@ const Viewer = forwardRef(function Viewer(
 
       // brush 工具处理
       if (toolRef.current === 'brush') {
+        if (!ensureDrawingBitmap()) return
+        const bitmap = nv.drawBitmap
+        if (!bitmap) return
+        ensureBaseSnapshot(bitmap)
+        brushStrokeDirtyRef.current = false
+        fillPtsRef.current = []
+        markerPtsRef.current = []
         const dpr = nv.uiData?.dpr || 1
         const frac = nv.canvasPos2frac([pos.x * dpr, pos.y * dpr])
         if (frac && frac[0] >= 0) {
@@ -1380,7 +1417,8 @@ const Viewer = forwardRef(function Viewer(
               Math.round(vox[fillAxCorSagRef.current === 0 ? 2 : fillAxCorSagRef.current === 1 ? 1 : 0])
             
             // 绘制笔刷
-            if (drawBrushAt(vox, brushShape, brushSize, activeLabelValue)) {
+            if (drawBrushAt(vox, brushShapeRef.current, brushSizeRef.current, activeLabelValueRef.current)) {
+              brushStrokeDirtyRef.current = true
               if (typeof nv.refreshDrawing === 'function') {
                 nv.refreshDrawing(true)
               }
@@ -1417,25 +1455,8 @@ const Viewer = forwardRef(function Viewer(
     }
 
     const onPointerMove = (event) => {
-      if (isAnnotationTool(toolRef.current)) {
-        if (!annotationDraftRef.current) return
-        if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
-        const markerCanvas = markerCanvasRef.current
-        if (!markerCanvas) return
-        const pos = getCanvasPos(event)
-        const norm = toStoredPoint(pos, markerCanvas)
-        const draft = annotationDraftRef.current
-        if (toolRef.current === 'dynamic') {
-          draft.points = [...draft.points, norm]
-          draft.points = compactPoints(draft.points, MAX_MARKER_POINTS)
-        } else if (toolRef.current === 'freehand') {
-          // freehand 工具在拖动时不添加点，只是更新 draft 用于显示
-          // 点是通过点击添加的
-        } else {
-          draft.points[1] = norm
-        }
-        annotationDraftRef.current = { ...draft }
-        drawStrokeMarkers()
+      if (toolRef.current === 'freehand') {
+        // freehand 仅通过点击加点，移动时不做重绘，避免高频刷新造成卡顿。
         return
       }
 
@@ -1455,7 +1476,8 @@ const Viewer = forwardRef(function Viewer(
         
         // 如果有上一个位置，插值绘制线条
         if (lastBrushVoxRef.current) {
-          if (drawBrushLine(lastBrushVoxRef.current, vox, brushShape, brushSize, activeLabelValue)) {
+          if (drawBrushLine(lastBrushVoxRef.current, vox, brushShapeRef.current, brushSizeRef.current, activeLabelValueRef.current)) {
+            brushStrokeDirtyRef.current = true
             if (typeof nv.refreshDrawing === 'function') {
               nv.refreshDrawing(true)
             }
@@ -1512,41 +1534,38 @@ const Viewer = forwardRef(function Viewer(
     }
 
     const onPointerUp = (event) => {
-      if (isAnnotationTool(toolRef.current)) {
+      if (toolRef.current === 'freehand') {
         if (!annotationDraftRef.current) return
         if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
-        const markerCanvas = markerCanvasRef.current
-        const pos = getCanvasPos(event)
-        if (markerCanvas) {
-          const norm = toStoredPoint(pos, markerCanvas)
-          const draft = annotationDraftRef.current
-          if (draft.points.length > 1) draft.points[draft.points.length - 1] = norm
-          const pxPoints = draft.points.map((p) => toPxPoint(p, markerCanvas)).filter((p) => p !== null)
-          if (toolRef.current === 'length') {
-            if (pxPoints.length < 2) return
-            draft.label = `${formatNumber(lineDistanceMM(pxPoints[0], pxPoints[1]), 2)}mm`
-          } else if (toolRef.current === 'ratio') {
-            if (pxPoints.length < 2) return
-            const w = Math.abs(pxPoints[1].x - pxPoints[0].x)
-            const h = Math.abs(pxPoints[1].y - pxPoints[0].y)
-            draft.label = `比值 ${formatNumber(w / Math.max(1e-6, h), 2)}`
-          } else if (toolRef.current === 'bidirectional') {
-            if (pxPoints.length < 2) return
-            draft.label = `${formatNumber(lineDistanceMM(pxPoints[0], pxPoints[1]), 2)}mm`
-          } else if (toolRef.current === 'arrow') {
-            draft.label = '箭头标注'
-          } else if (toolRef.current === 'dynamic') {
-            draft.points = smoothPath(draft.points)
-            draft.label = ''
-          }
+        // freehand 在 pointerUp 不清空，等待继续加点或按 Enter 完成
+        const capturedId = activePointerIdRef.current
+        activePointerIdRef.current = null
+        if (capturedId !== null && canvas.hasPointerCapture?.(capturedId)) {
+          canvas.releasePointerCapture?.(capturedId)
         }
-        // curve 工具在 pointerUp 时不处理，等待点击添加点或回车完成
-        if (toolRef.current !== 'curve') {
-          annotationDraftRef.current = null
+        return
+      }
+
+      if (toolRef.current === 'brush') {
+        if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
+        if (activePointerIdRef.current !== null) {
+          canvas.releasePointerCapture?.(activePointerIdRef.current)
         }
         activePointerIdRef.current = null
-        canvas.releasePointerCapture?.(event.pointerId)
-        drawStrokeMarkers()
+        fillActiveRef.current = false
+        fillPtsRef.current = []
+        markerPtsRef.current = []
+        lastBrushVoxRef.current = null
+        const nv = nvRef.current
+        if (brushStrokeDirtyRef.current && nv?.drawBitmap) {
+          const pushed = pushSnapshot(nv.drawBitmap)
+          if (pushed) {
+            const imageKey = getImageKey()
+            if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
+          }
+          emitDrawingChange('draw')
+        }
+        brushStrokeDirtyRef.current = false
         return
       }
 
@@ -1570,6 +1589,8 @@ const Viewer = forwardRef(function Viewer(
     const onPointerCancel = () => {
       activePointerIdRef.current = null
       annotationDraftRef.current = null
+      lastBrushVoxRef.current = null
+      brushStrokeDirtyRef.current = false
       resetFillTracking()
       drawStrokeMarkers()
     }
@@ -1579,6 +1600,7 @@ const Viewer = forwardRef(function Viewer(
       if (event.key === 'Enter') {
         // curve 工具使用 annotationStepsRef
         if (toolRef.current === 'freehand' && annotationStepsRef.current.length > 2) {
+          event.preventDefault()
           const freehandAnnotation = {
             type: 'freehand',
             points: [...annotationStepsRef.current],
@@ -1593,9 +1615,7 @@ const Viewer = forwardRef(function Viewer(
           annotationDraftRef.current = null
           drawStrokeMarkers()
           // 通知父组件 curve 已完成
-          if (typeof onDrawingChange === 'function') {
-            onDrawingChange('curve-complete')
-          }
+          emitDrawingChange('curve-complete')
         }
 
       }
