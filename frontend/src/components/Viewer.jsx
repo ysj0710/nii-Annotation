@@ -8,8 +8,6 @@ const ANNOTATION_TOOLS = new Set([
   'brush'
 ])
 const FOCUS_PLANES = ['A', 'S', 'C']
-const QUAD_LAYOUT_MARGIN = 0.02
-const QUAD_LAYOUT_GAP = 0.02
 
 const isAnnotationTool = (tool) => ANNOTATION_TOOLS.has(tool)
 const toArrayBuffer = (data) => {
@@ -80,6 +78,7 @@ const Viewer = forwardRef(function Viewer(
   const annotationStepsRef = useRef([])
   const curvePlaneRef = useRef(null)
   const curveSliceIndexRef = useRef(null)
+  const curveTileIndexRef = useRef(null)
   const focusedPlaneRef = useRef(null)
   const [focusedPlane, setFocusedPlane] = useState(null)
   const [canFocusPlanes, setCanFocusPlanes] = useState(false)
@@ -114,6 +113,7 @@ const Viewer = forwardRef(function Viewer(
   const MAX_FILL_POINTS = 32000
   const FREEHAND_CONNECT_PX = 14
   const FREEHAND_CLOSE_PX = 12
+  const FREEHAND_RESUME_PX = 28
   const FREEHAND_SAMPLE_STEP_PX = 2.5
   const FREEHAND_OPEN_COLOR = '#db70db'
   imageKeyRef.current = image?.id ? String(image.id) : ''
@@ -621,20 +621,35 @@ const Viewer = forwardRef(function Viewer(
   })
 
   const toStoredPoint = (pt, canvas) => {
+    const sx = Math.max(0, Math.min(1, Number(pt?.x || 0) / Math.max(1, canvas?.width || 1)))
+    const sy = Math.max(0, Math.min(1, Number(pt?.y || 0) / Math.max(1, canvas?.height || 1)))
     const nv = nvRef.current
     if (nv && canvas) {
       const dpr = nv.uiData?.dpr || 1
       const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr])
       if (frac && frac[0] >= 0) {
         return {
-          frac: [Number(frac[0]), Number(frac[1]), Number(frac[2])]
+          frac: [Number(frac[0]), Number(frac[1]), Number(frac[2])],
+          sx,
+          sy
         }
       }
     }
-    return toNormPoint(pt, canvas)
+    const fallback = toNormPoint(pt, canvas)
+    return {
+      ...fallback,
+      sx,
+      sy
+    }
   }
 
   const toPxPoint = (pt, canvas) => {
+    if (Number.isFinite(Number(pt?.sx)) && Number.isFinite(Number(pt?.sy))) {
+      return {
+        x: Number(pt.sx) * canvas.width,
+        y: Number(pt.sy) * canvas.height
+      }
+    }
     const nv = nvRef.current
     const frac = pt?.frac
     if (
@@ -1258,9 +1273,29 @@ const Viewer = forwardRef(function Viewer(
     return FOCUS_PLANES.includes(key) ? key : null
   }
 
-  const clearCustomLayout = () => {
+  const configureMultiplanarGrid = () => {
     const nv = nvRef.current
     if (!nv) return
+    if (typeof nv.setHeroImage === 'function') {
+      nv.setHeroImage(0)
+    } else if (nv?.opts) {
+      nv.opts.heroImageFraction = 0
+    }
+    if (typeof nv.setMultiplanarLayout === 'function') {
+      nv.setMultiplanarLayout(2)
+    } else if (nv?.opts) {
+      nv.opts.multiplanarLayout = 2
+    }
+    if (typeof nv.setMultiplanarPadPixels === 'function') {
+      nv.setMultiplanarPadPixels(10)
+    } else if (nv?.opts) {
+      nv.opts.multiplanarPadPixels = 10
+    }
+    if (nv?.opts) {
+      nv.opts.multiplanarShowRender = 1
+      nv.opts.multiplanarEqualSize = true
+      nv.opts.tileMargin = 0
+    }
     if (typeof nv.clearCustomLayout === 'function') {
       try {
         nv.clearCustomLayout()
@@ -1270,33 +1305,10 @@ const Viewer = forwardRef(function Viewer(
     }
   }
 
-  const applyQuadCustomLayout = () => {
-    const nv = nvRef.current
-    if (!nv || typeof nv.setCustomLayout !== 'function') return false
-    const margin = QUAD_LAYOUT_MARGIN
-    const gap = QUAD_LAYOUT_GAP
-    const tileW = (1 - margin * 2 - gap) / 2
-    const tileH = (1 - margin * 2 - gap) / 2
-    const layout = [
-      { sliceType: nv.sliceTypeSagittal, position: [margin, margin, tileW, tileH] },
-      { sliceType: nv.sliceTypeCoronal, position: [margin + tileW + gap, margin, tileW, tileH] },
-      { sliceType: nv.sliceTypeAxial, position: [margin, margin + tileH + gap, tileW, tileH] },
-      { sliceType: nv.sliceTypeRender, position: [margin + tileW + gap, margin + tileH + gap, tileW, tileH] }
-    ]
-    try {
-      nv.setCustomLayout(layout)
-      return true
-    } catch {
-      return false
-    }
-  }
-
   const normalizePanForQuad = () => {
     const nv = nvRef.current
     if (!nv?.scene) return
-    const currentPan = Array.isArray(nv.scene.pan2Dxyzmm) ? nv.scene.pan2Dxyzmm : [0, 0, 0, 1]
-    const clampedZoom = Math.max(0.85, Math.min(1, Number(currentPan[3] || 1)))
-    const next = [0, 0, 0, clampedZoom]
+    const next = [0, 0, 0, 0.88]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
@@ -1312,9 +1324,6 @@ const Viewer = forwardRef(function Viewer(
     const nv = nvRef.current
     if (!nv || typeof nv.setSliceType !== 'function') return false
     const key = normalizeFocusPlane(planeKey)
-    if (key) {
-      clearCustomLayout()
-    }
     if (key === 'A') {
       nv.setSliceType(nv.sliceTypeAxial)
       return true
@@ -1332,10 +1341,7 @@ const Viewer = forwardRef(function Viewer(
       nv.opts.multiplanarLayout = 2
     }
     nv.setSliceType(nv.sliceTypeMultiplanar)
-    const appliedCustom = applyQuadCustomLayout()
-    if (!appliedCustom) {
-      clearCustomLayout()
-    }
+    configureMultiplanarGrid()
     if (normalizePan) {
       normalizePanForQuad()
     }
@@ -1446,6 +1452,7 @@ const Viewer = forwardRef(function Viewer(
       annotationStepsRef.current = []
       curvePlaneRef.current = null
       curveSliceIndexRef.current = null
+      curveTileIndexRef.current = null
       const currentImageKey = getImageKey()
       actionHistoryRef.current = actionHistoryRef.current.filter((item) => {
         const actionType = typeof item === 'string' ? item : item?.type
@@ -1669,6 +1676,7 @@ const Viewer = forwardRef(function Viewer(
             annotationStepsRef.current = []
             curvePlaneRef.current = null
             curveSliceIndexRef.current = null
+            curveTileIndexRef.current = null
             freehandDrawingRef.current = false
             if (activePointerIdRef.current !== null) {
               const pid = activePointerIdRef.current
@@ -1743,6 +1751,7 @@ const Viewer = forwardRef(function Viewer(
     annotationStepsRef.current = []
     curvePlaneRef.current = null
     curveSliceIndexRef.current = null
+    curveTileIndexRef.current = null
     resetFillTracking()
     lastBrushVoxRef.current = null
     brushStrokeDirtyRef.current = false
@@ -1773,6 +1782,7 @@ const Viewer = forwardRef(function Viewer(
     annotationStepsRef.current = []
     curvePlaneRef.current = null
     curveSliceIndexRef.current = null
+    curveTileIndexRef.current = null
     markerPtsRef.current = []
     fillPtsRef.current = []
     fillActiveRef.current = false
@@ -1905,7 +1915,13 @@ const Viewer = forwardRef(function Viewer(
         setCanFocusPlanes(false)
         focusedPlaneRef.current = null
         setFocusedPlane(null)
-        clearCustomLayout()
+        if (typeof nv.clearCustomLayout === 'function') {
+          try {
+            nv.clearCustomLayout()
+          } catch {
+            // ignore
+          }
+        }
         nv.setRadiologicalConvention(isRaster2D ? true : !!radiological2D)
         nv.setSliceType(nv.sliceTypeAxial)
       } else {
@@ -2015,12 +2031,14 @@ const Viewer = forwardRef(function Viewer(
           if (
             nextSteps.length > 0 &&
             (
+              (Number.isInteger(curveTileIndexRef.current) && curveTileIndexRef.current !== tile) ||
               (curvePlaneRef.current !== null && curvePlaneRef.current !== currentPlane) ||
               (Number.isInteger(curveSliceIndexRef.current) && curveSliceIndexRef.current !== currentSliceIndex)
             )
           ) {
             nextSteps = []
           }
+          curveTileIndexRef.current = tile
           curvePlaneRef.current = currentPlane
           curveSliceIndexRef.current = currentSliceIndex
 
@@ -2029,9 +2047,14 @@ const Viewer = forwardRef(function Viewer(
           } else {
             const last = nextSteps[nextSteps.length - 1]
             const distToLast = pointDistancePx(last, norm, markerCanvas)
-            if (distToLast > FREEHAND_CONNECT_PX) {
-              // 在终点附近之外下笔时，自动连线到新的落笔点
-              nextSteps = [...nextSteps, norm]
+            if (distToLast <= FREEHAND_RESUME_PX) {
+              // 仅在终点附近续画时自动接线，避免跨视口/跨区域长线发散。
+              if (distToLast > FREEHAND_SAMPLE_STEP_PX) {
+                nextSteps = [...nextSteps, norm]
+              }
+            } else {
+              // 与上一落点距离过大，判定为新一笔，不与历史草稿硬连接。
+              nextSteps = [norm]
             }
           }
 
@@ -2126,6 +2149,7 @@ const Viewer = forwardRef(function Viewer(
         const pos = getCanvasPos(event)
         const dpr = nv.uiData?.dpr || 1
         const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
+        if (Number.isInteger(curveTileIndexRef.current) && tile !== curveTileIndexRef.current) return
         const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
         if (currentPlane === null || curvePlaneRef.current === null || currentPlane !== curvePlaneRef.current) return
         const currentSliceIndex = getCurrentSliceIndex(currentPlane)
@@ -2316,6 +2340,7 @@ const Viewer = forwardRef(function Viewer(
       freehandDrawingRef.current = false
       curvePlaneRef.current = null
       curveSliceIndexRef.current = null
+      curveTileIndexRef.current = null
       resetFillTracking()
       drawStrokeMarkers()
     }
@@ -2375,6 +2400,7 @@ const Viewer = forwardRef(function Viewer(
           annotationStepsRef.current = []
           curvePlaneRef.current = null
           curveSliceIndexRef.current = null
+          curveTileIndexRef.current = null
           annotationDraftRef.current = null
           drawStrokeMarkers()
           // 通知父组件 curve 已完成
@@ -2413,16 +2439,14 @@ const Viewer = forwardRef(function Viewer(
   const canShowPlaneSwitch = !!image && canFocusPlanes
   const showPlaneButtonsByPane = canShowPlaneSwitch && !focusedPlane
   const showPlaneButtonsStack = canShowPlaneSwitch && !!focusedPlane
-  const zoomToFitDisabled = isAnnotationTool(tool)
-  const quadTileSize = (1 - QUAD_LAYOUT_MARGIN * 2 - QUAD_LAYOUT_GAP) / 2
-  const firstRowTop = `${(QUAD_LAYOUT_MARGIN * 100) + 1}%`
-  const secondRowTop = `${((QUAD_LAYOUT_MARGIN + quadTileSize + QUAD_LAYOUT_GAP) * 100) + 1}%`
-  const centerGapX = `${(QUAD_LAYOUT_MARGIN + quadTileSize + QUAD_LAYOUT_GAP / 2) * 100}%`
-  const rightGapX = `${(1 - QUAD_LAYOUT_MARGIN / 2) * 100}%`
+  const firstRowCenter = '25%'
+  const secondRowCenter = '75%'
+  const centerGapX = '50%'
+  const rightGapX = '98.2%'
   const planeButtonStyles = {
-    S: { left: centerGapX, top: firstRowTop, transform: 'translateX(-50%)' },
-    A: { left: centerGapX, top: secondRowTop, transform: 'translateX(-50%)' },
-    C: { left: rightGapX, top: firstRowTop, transform: 'translateX(-50%)' }
+    S: { left: centerGapX, top: firstRowCenter, transform: 'translate(-50%, -50%)' },
+    A: { left: centerGapX, top: secondRowCenter, transform: 'translate(-50%, -50%)' },
+    C: { left: rightGapX, top: firstRowCenter, transform: 'translate(-50%, -50%)' }
   }
 
   return (
@@ -2467,17 +2491,6 @@ const Viewer = forwardRef(function Viewer(
                 </button>
               )
             })}
-          </div>
-          <div className="viewer-fit-controls">
-            <button
-              type="button"
-              className="viewer-fit-btn"
-              onClick={() => zoomToFitInternal()}
-              disabled={zoomToFitDisabled}
-              title={zoomToFitDisabled ? '退出标注工具后可用' : '恢复完整视图'}
-            >
-              zoom to fit
-            </button>
           </div>
         </>
       )}
