@@ -8,6 +8,8 @@ const ANNOTATION_TOOLS = new Set([
   'brush'
 ])
 const FOCUS_PLANES = ['A', 'S', 'C']
+const QUAD_LAYOUT_MARGIN = 0.02
+const QUAD_LAYOUT_GAP = 0.02
 
 const isAnnotationTool = (tool) => ANNOTATION_TOOLS.has(tool)
 const toArrayBuffer = (data) => {
@@ -1256,10 +1258,63 @@ const Viewer = forwardRef(function Viewer(
     return FOCUS_PLANES.includes(key) ? key : null
   }
 
-  const setSliceTypeForPlane = (planeKey) => {
+  const clearCustomLayout = () => {
+    const nv = nvRef.current
+    if (!nv) return
+    if (typeof nv.clearCustomLayout === 'function') {
+      try {
+        nv.clearCustomLayout()
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  const applyQuadCustomLayout = () => {
+    const nv = nvRef.current
+    if (!nv || typeof nv.setCustomLayout !== 'function') return false
+    const margin = QUAD_LAYOUT_MARGIN
+    const gap = QUAD_LAYOUT_GAP
+    const tileW = (1 - margin * 2 - gap) / 2
+    const tileH = (1 - margin * 2 - gap) / 2
+    const layout = [
+      { sliceType: nv.sliceTypeSagittal, position: [margin, margin, tileW, tileH] },
+      { sliceType: nv.sliceTypeCoronal, position: [margin + tileW + gap, margin, tileW, tileH] },
+      { sliceType: nv.sliceTypeAxial, position: [margin, margin + tileH + gap, tileW, tileH] },
+      { sliceType: nv.sliceTypeRender, position: [margin + tileW + gap, margin + tileH + gap, tileW, tileH] }
+    ]
+    try {
+      nv.setCustomLayout(layout)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const normalizePanForQuad = () => {
+    const nv = nvRef.current
+    if (!nv?.scene) return
+    const currentPan = Array.isArray(nv.scene.pan2Dxyzmm) ? nv.scene.pan2Dxyzmm : [0, 0, 0, 1]
+    const clampedZoom = Math.max(0.85, Math.min(1, Number(currentPan[3] || 1)))
+    const next = [0, 0, 0, clampedZoom]
+    if (typeof nv.setPan2Dxyzmm === 'function') {
+      nv.setPan2Dxyzmm(next)
+    } else {
+      nv.scene.pan2Dxyzmm = next
+      if (typeof nv.drawScene === 'function') {
+        nv.drawScene()
+      }
+    }
+  }
+
+  const setSliceTypeForPlane = (planeKey, options = {}) => {
+    const { normalizePan = false } = options
     const nv = nvRef.current
     if (!nv || typeof nv.setSliceType !== 'function') return false
     const key = normalizeFocusPlane(planeKey)
+    if (key) {
+      clearCustomLayout()
+    }
     if (key === 'A') {
       nv.setSliceType(nv.sliceTypeAxial)
       return true
@@ -1277,6 +1332,13 @@ const Viewer = forwardRef(function Viewer(
       nv.opts.multiplanarLayout = 2
     }
     nv.setSliceType(nv.sliceTypeMultiplanar)
+    const appliedCustom = applyQuadCustomLayout()
+    if (!appliedCustom) {
+      clearCustomLayout()
+    }
+    if (normalizePan) {
+      normalizePanForQuad()
+    }
     return true
   }
 
@@ -1304,10 +1366,11 @@ const Viewer = forwardRef(function Viewer(
   const toggleFocusPlaneInternal = (planeKey) => {
     const normalized = normalizeFocusPlane(planeKey)
     if (normalized && !canFocusPlanes) return focusedPlaneRef.current
+    const prev = focusedPlaneRef.current
     const next = focusedPlaneRef.current === normalized ? null : normalized
     focusedPlaneRef.current = next
     setFocusedPlane(next)
-    setSliceTypeForPlane(next)
+    setSliceTypeForPlane(next, { normalizePan: prev !== null && next === null })
     requestAnimationFrame(() => {
       redrawDrawingOverlaySilently()
       drawStrokeMarkers()
@@ -1842,6 +1905,7 @@ const Viewer = forwardRef(function Viewer(
         setCanFocusPlanes(false)
         focusedPlaneRef.current = null
         setFocusedPlane(null)
+        clearCustomLayout()
         nv.setRadiologicalConvention(isRaster2D ? true : !!radiological2D)
         nv.setSliceType(nv.sliceTypeAxial)
       } else {
@@ -1850,7 +1914,7 @@ const Viewer = forwardRef(function Viewer(
         const preferredPlane = normalizeFocusPlane(focusedPlaneRef.current)
         focusedPlaneRef.current = preferredPlane
         setFocusedPlane(preferredPlane)
-        setSliceTypeForPlane(preferredPlane)
+        setSliceTypeForPlane(preferredPlane, { normalizePan: preferredPlane === null })
       }
 
       if (image.isMaskOnly) {
@@ -2346,16 +2410,46 @@ const Viewer = forwardRef(function Viewer(
     }
   }, [])
 
-  const showQuadGap = !!image && canFocusPlanes && !focusedPlane
   const canShowPlaneSwitch = !!image && canFocusPlanes
+  const showPlaneButtonsByPane = canShowPlaneSwitch && !focusedPlane
+  const showPlaneButtonsStack = canShowPlaneSwitch && !!focusedPlane
   const zoomToFitDisabled = isAnnotationTool(tool)
+  const quadTileSize = (1 - QUAD_LAYOUT_MARGIN * 2 - QUAD_LAYOUT_GAP) / 2
+  const firstRowTop = `${(QUAD_LAYOUT_MARGIN * 100) + 1}%`
+  const secondRowTop = `${((QUAD_LAYOUT_MARGIN + quadTileSize + QUAD_LAYOUT_GAP) * 100) + 1}%`
+  const centerGapX = `${(QUAD_LAYOUT_MARGIN + quadTileSize + QUAD_LAYOUT_GAP / 2) * 100}%`
+  const rightGapX = `${(1 - QUAD_LAYOUT_MARGIN / 2) * 100}%`
+  const planeButtonStyles = {
+    S: { left: centerGapX, top: firstRowTop, transform: 'translateX(-50%)' },
+    A: { left: centerGapX, top: secondRowTop, transform: 'translateX(-50%)' },
+    C: { left: rightGapX, top: firstRowTop, transform: 'translateX(-50%)' }
+  }
 
   return (
     <div className="viewer-container">
       <canvas ref={canvasRef} className="viewer-canvas" />
       <canvas ref={markerCanvasRef} className="viewer-marker-canvas" />
-      {showQuadGap && <div className="viewer-quad-gap" aria-hidden="true" />}
-      {canShowPlaneSwitch && (
+      {showPlaneButtonsByPane && (
+        <div className="viewer-plane-switch-pane" role="group" aria-label="视口切换">
+          {FOCUS_PLANES.map((plane) => {
+            const active = focusedPlane === plane
+            return (
+              <button
+                key={plane}
+                type="button"
+                className={`viewer-plane-btn viewer-plane-btn-pane${active ? ' active' : ''}`}
+                style={planeButtonStyles[plane]}
+                onClick={() => toggleFocusPlaneInternal(plane)}
+                title={`切换 ${plane} 到主视口`}
+                aria-label={`切换 ${plane} 到主视口`}
+              >
+                {plane}
+              </button>
+            )
+          })}
+        </div>
+      )}
+      {showPlaneButtonsStack && (
         <>
           <div className="viewer-plane-switch" role="group" aria-label="视口切换">
             {FOCUS_PLANES.map((plane) => {
