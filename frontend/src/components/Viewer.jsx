@@ -48,7 +48,17 @@ const hexToRgba = (hex, alpha = 0.45) => {
 }
 
 const Viewer = forwardRef(function Viewer(
-  { image, tool, brushSize, brushShape = 'circle', activeLabelValue, labels = [], radiological2D = true, onDrawingChange },
+  {
+    image,
+    tool,
+    brushSize,
+    brushShape = 'circle',
+    activeLabelValue,
+    labels = [],
+    radiological2D = true,
+    onDrawingChange,
+    renderMaskOnly3D = true
+  },
   ref
 ) {
   const canvasRef = useRef(null)
@@ -75,9 +85,12 @@ const Viewer = forwardRef(function Viewer(
   const activeLabelValueRef = useRef(activeLabelValue)
   const labelsRef = useRef(labels)
   const onDrawingChangeRef = useRef(onDrawingChange)
+  const renderMaskOnly3DRef = useRef(renderMaskOnly3D)
+  const originalDraw3DRef = useRef(null)
   const brushStrokeDirtyRef = useRef(false)
   const drawRefreshPendingRef = useRef(false)
   const markerRedrawRafRef = useRef(null)
+  const suppressDrawingChangedRef = useRef(false)
   const freehandDrawingRef = useRef(false)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
@@ -150,6 +163,10 @@ const Viewer = forwardRef(function Viewer(
       }
     })
   }
+
+  useEffect(() => {
+    renderMaskOnly3DRef.current = !!renderMaskOnly3D
+  }, [renderMaskOnly3D])
 
   const scheduleMarkerRedraw = (delayFrames = 1) => {
     if (markerRedrawRafRef.current !== null) {
@@ -228,9 +245,10 @@ const Viewer = forwardRef(function Viewer(
       nv.drawBitmap = new Uint8Array(snapshot.length)
     }
     nv.drawBitmap.set(snapshot)
-    if (typeof nv.refreshDrawing === 'function') {
-      nv.refreshDrawing(true)
-    }
+    redrawDrawingOverlaySilently()
+    requestAnimationFrame(() => {
+      redrawDrawingOverlaySilently()
+    })
   }
 
   const redrawDrawingOverlay = () => {
@@ -242,6 +260,14 @@ const Viewer = forwardRef(function Viewer(
     if (typeof nv.drawScene === 'function') {
       nv.drawScene()
     }
+  }
+
+  const redrawDrawingOverlaySilently = () => {
+    suppressDrawingChangedRef.current = true
+    redrawDrawingOverlay()
+    requestAnimationFrame(() => {
+      suppressDrawingChangedRef.current = false
+    })
   }
 
   const ensureDrawingBitmap = () => {
@@ -823,7 +849,7 @@ const Viewer = forwardRef(function Viewer(
   }
 
   const rasterizeClosedAnnotationToMask = (normPoints, options = {}) => {
-    const { recordHistory = true, emitChange = true, axCorSag = null } = options
+    const { recordHistory = true, emitChange = true, axCorSag = null, sliceIndex = null } = options
     const nv = nvRef.current
     const markerCanvas = markerCanvasRef.current
     if (!nv || !markerCanvas || !Array.isArray(normPoints) || normPoints.length < 3) return false
@@ -878,8 +904,14 @@ const Viewer = forwardRef(function Viewer(
     }
 
     let fixed = 0
-    for (const p of voxPoints) fixed += Number(p[fixedAxis] || 0)
-    fixed = Math.round(fixed / voxPoints.length)
+    const forcedSlice = Number.isInteger(sliceIndex) ? Number(sliceIndex) : null
+    if (forcedSlice !== null && forcedPlane !== null) {
+      const fixedDimLen = Number(dims?.[fixedAxis + 1] || 0)
+      fixed = Math.max(0, Math.min(Math.max(0, fixedDimLen - 1), forcedSlice))
+    } else {
+      for (const p of voxPoints) fixed += Number(p[fixedAxis] || 0)
+      fixed = Math.round(fixed / voxPoints.length)
+    }
 
     const toHV = (p) => [Number(p[hAxis] || 0), Number(p[vAxis] || 0)]
     const poly = voxPoints.map(toHV)
@@ -962,7 +994,10 @@ const Viewer = forwardRef(function Viewer(
     }
 
     if (!changed) return false
-    redrawDrawingOverlay()
+    redrawDrawingOverlaySilently()
+    requestAnimationFrame(() => {
+      redrawDrawingOverlaySilently()
+    })
     const pushed = pushSnapshot(nv.drawBitmap)
     if (pushed && recordHistory) {
       const imageKey = getImageKey()
@@ -1184,6 +1219,23 @@ const Viewer = forwardRef(function Viewer(
       if (typeof nvRef.current.setCrosshairVisible === 'function') {
         nvRef.current.setCrosshairVisible(false)
       }
+      if (typeof nv.draw3D === 'function') {
+        originalDraw3DRef.current = nv.draw3D.bind(nv)
+        nv.draw3D = (...args) => {
+          const originalDraw3D = originalDraw3DRef.current
+          if (typeof originalDraw3D !== 'function') return undefined
+          if (!renderMaskOnly3DRef.current) return originalDraw3D(...args)
+          const baseVolume = nv.volumes?.[0]
+          if (!baseVolume) return originalDraw3D(...args)
+          const prevOpacity = Number(baseVolume._opacity ?? baseVolume.opacity ?? 1)
+          baseVolume._opacity = 0
+          try {
+            return originalDraw3D(...args)
+          } finally {
+            baseVolume._opacity = prevOpacity
+          }
+        }
+      }
       const previousOnLocationChange = nvRef.current.onLocationChange
       nvRef.current.onLocationChange = (location) => {
         if (typeof previousOnLocationChange === 'function') {
@@ -1215,12 +1267,17 @@ const Viewer = forwardRef(function Viewer(
         scheduleMarkerRedraw(1)
       }
       nvRef.current.onDrawingChanged = (action) => {
+        if (suppressDrawingChangedRef.current) return
         const nv = nvRef.current
         if (!nv?.drawBitmap) return
         if (toolRef.current === 'brush') return
+        if (action === 'undo' || action === 'redo') {
+          emitDrawingChange(action)
+          return
+        }
         ensureBaseSnapshot(nv.drawBitmap)
         const pushed = pushSnapshot(nv.drawBitmap)
-        if (pushed && action !== 'undo' && action !== 'redo') {
+        if (pushed) {
           const imageKey = getImageKey()
           if (imageKey) actionHistoryRef.current.push({ type: 'mask', imageKey })
         }
@@ -1409,6 +1466,11 @@ const Viewer = forwardRef(function Viewer(
         nv.setRadiologicalConvention(isRaster2D ? true : !!radiological2D)
         nv.setSliceType(nv.sliceTypeAxial)
       } else {
+        if (nv?.opts) {
+          // 固定四视图布局，降低不同机器上自动布局策略导致的显示差异。
+          nv.opts.multiplanarShowRender = 1
+          nv.opts.multiplanarLayout = 2
+        }
         nv.setSliceType(nv.sliceTypeMultiplanar)
       }
 
@@ -1846,8 +1908,9 @@ const Viewer = forwardRef(function Viewer(
 
           const maskChanged = rasterizeClosedAnnotationToMask(closedPoints, {
             recordHistory: false,
-            emitChange: false,
-            axCorSag: curvePlaneRef.current
+            emitChange: true,
+            axCorSag: curvePlaneRef.current,
+            sliceIndex: curveSliceIndexRef.current
           })
           const freehandAnnotation = {
             type: 'freehand',

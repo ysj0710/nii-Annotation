@@ -1026,6 +1026,8 @@ export default function App() {
   const annotationToolsRef = useRef(null)
   const processedFilesRef = useRef(new Set())
   const saveTimerRef = useRef(null)
+  const saveIdleRef = useRef(null)
+  const saveQueueRef = useRef(Promise.resolve(false))
   const statsTimerRef = useRef(null)
   const dicomWheelSwitchAtRef = useRef(0)
   const autoImportedRef = useRef(false)
@@ -1623,9 +1625,6 @@ export default function App() {
             : img
         )
       )
-      // 仅在 mask 状态实际发生改变时才递增 maskVersion，
-      // 避免纯标注保存触发 Viewer 不必要的影像重加载
-      const maskActuallyChanged = activeImage.maskAttached === true
       setActiveImage((prev) =>
         prev
           ? {
@@ -1634,8 +1633,7 @@ export default function App() {
               maskName: null,
               maskAttached: false,
               overlayAnnotations,
-              modifiedByUser: true,
-              ...(maskActuallyChanged ? { maskVersion: (prev.maskVersion || 0) + 1 } : {})
+              modifiedByUser: true
             }
           : prev
       )
@@ -1661,13 +1659,51 @@ export default function App() {
             mask: buffer,
             maskAttached: true,
             overlayAnnotations,
-            modifiedByUser: true,
-            // 避免每次自动保存都触发 Viewer 重载，导致笔刷撤销栈被清空、绘制卡顿。
-            ...(prev.maskAttached === true ? {} : { maskVersion: (prev.maskVersion || 0) + 1 })
+            modifiedByUser: true
           }
         : prev
     )
     return true
+  }
+
+  const clearAutoSaveSchedule = () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+      saveTimerRef.current = null
+    }
+    if (saveIdleRef.current !== null) {
+      if (typeof window !== 'undefined' && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(saveIdleRef.current)
+      } else {
+        clearTimeout(saveIdleRef.current)
+      }
+      saveIdleRef.current = null
+    }
+  }
+
+  const enqueuePersistActiveDrawing = async () => {
+    saveQueueRef.current = saveQueueRef.current
+      .then(() => persistActiveDrawing())
+      .catch((error) => {
+        console.error('自动保存失败', error)
+        return false
+      })
+    return saveQueueRef.current
+  }
+
+  const scheduleAutoPersist = (delay = 1200) => {
+    clearAutoSaveSchedule()
+    saveTimerRef.current = setTimeout(() => {
+      const run = () => {
+        saveIdleRef.current = null
+        void enqueuePersistActiveDrawing()
+      }
+      if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+        saveIdleRef.current = window.requestIdleCallback(run, { timeout: 1500 })
+      } else {
+        saveIdleRef.current = setTimeout(run, 0)
+      }
+    }, delay)
   }
 
   const syncActiveAnnotationToLocalBackend = async () => {
@@ -1817,10 +1853,8 @@ export default function App() {
       Message.warning('当前没有可保存的影像')
       return
     }
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = null
-    }
+    clearAutoSaveSchedule()
+    await saveQueueRef.current
     if (!hasUnsavedChangesRef.current) {
       const annotationCount = Number(viewerRef.current?.getAnnotationCount?.() || 0)
       if (annotationCount <= 0) {
@@ -1829,7 +1863,7 @@ export default function App() {
       }
       hasUnsavedChangesRef.current = true
     }
-    const saved = await persistActiveDrawing()
+    const saved = await enqueuePersistActiveDrawing()
     if (!saved) {
       Message.warning('保存失败，请重试')
       return
@@ -1872,10 +1906,7 @@ export default function App() {
     }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate') {
       hasUnsavedChangesRef.current = true
-      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = setTimeout(() => {
-        persistActiveDrawing()
-      }, 800)
+      scheduleAutoPersist(1200)
     }
     scheduleLabelStatsRefresh()
   }
@@ -1893,10 +1924,7 @@ export default function App() {
   const selectImage = async (id) => {
     if (activeImage?.id === id) return
     // 取消待执行的自动保存，防止切换后的旧计时器用错误的影像数据写入 DB
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = null
-    }
+    clearAutoSaveSchedule()
     await persistActiveDrawing()
     const record = await getImageById(id)
     if (!record) return
@@ -2668,10 +2696,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   }
 
   const handleClear = async () => {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current)
-      saveTimerRef.current = null
-    }
+    clearAutoSaveSchedule()
     const id = activeImage?.id
     if (!id) return
 
@@ -3111,6 +3136,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             activeLabelValue={activeLabel?.value || 1}
             labels={labels}
             radiological2D={viewerMode === 'dicom' ? true : radiological2D}
+            renderMaskOnly3D
             onDrawingChange={onViewerEvent}
           />
         </Content>
@@ -3126,7 +3152,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
                 <div className="curve-hint-desc">
                   {tool === 'brush' 
                     ? '按住拖动绘制，可在右侧切换圆形/方形笔刷' 
-                    : '点击放置节点，接近起点时自动闭合，按 Enter 完成'}
+                    : '按住拖动绘制，松开后可继续补画，接近起点自动闭合，按 Enter 完成'}
                 </div>
               </div>
             </div>
