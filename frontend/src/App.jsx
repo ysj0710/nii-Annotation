@@ -1175,9 +1175,9 @@ export default function App() {
     activeImageIdRef.current = String(activeImage?.id || '')
   }, [activeImage?.id])
 
-  // 监听工具变化，控制 curve 提示显示
+  // 监听工具变化，控制 curve/freehand/brush 提示显示
   useEffect(() => {
-    if (tool === 'curve') {
+    if (tool === 'curve' || tool === 'freehand' || tool === 'brush') {
       setCurveHintVisible(true)
     } else {
       setCurveHintVisible(false)
@@ -1864,7 +1864,7 @@ export default function App() {
     if (reason === 'annotate') {
       Message.success('标注创建成功')
     }
-    if (reason === 'curve-complete') {
+    if (reason === 'curve-complete' || reason === 'freehand-complete' || reason === 'brush-complete') {
       Message.success('曲线标注已完成并保存')
       setCurveHintVisible(false)
     }
@@ -2834,6 +2834,12 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
 
   const annotationMenuItems = [
     {
+      key: 'brush',
+      name: '笔刷',
+      active: tool === 'brush',
+      onClick: () => toggleAnnotationTool('brush')
+    },
+    {
       key: 'freehand',
       name: '自由曲线',
       active: tool === 'freehand',
@@ -2942,6 +2948,14 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             <path d="M4 16c2-4 6-4 8 0s6 4 8 0" />
             <circle cx="6" cy="13.5" r="1.2" />
             <circle cx="18" cy="13.5" r="1.2" />
+          </svg>
+        )
+      case 'brush':
+        return (
+          <svg {...iconProps}>
+            <circle cx="12" cy="12" r="4" fill="currentColor" fillOpacity="0.3" />
+            <circle cx="12" cy="12" r="4" />
+            <circle cx="12" cy="12" r="1.5" fill="currentColor" />
           </svg>
         )
       case 'freehand':
@@ -3182,8 +3196,14 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             <div className="curve-hint-banner">
               <div className="curve-hint-icon">✏️</div>
               <div className="curve-hint-text">
-                <div className="curve-hint-title">曲线标注模式</div>
-                <div className="curve-hint-desc">点击绘制曲线，按 Enter 键完成并填充</div>
+                <div className="curve-hint-title">
+                  {tool === 'brush' ? '笔刷标注模式' : '曲线标注模式'}
+                </div>
+                <div className="curve-hint-desc">
+                  {tool === 'brush' 
+                    ? '按住拖动绘制，松开自动闭合填充' 
+                    : '拖动绘制曲线，按 Enter 键完成并填充'}
+                </div>
               </div>
             </div>
           )}
