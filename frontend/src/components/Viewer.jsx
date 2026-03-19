@@ -782,7 +782,7 @@ const Viewer = forwardRef(function Viewer(
   }
 
   const rasterizeClosedAnnotationToMask = (normPoints, options = {}) => {
-    const { recordHistory = true, emitChange = true } = options
+    const { recordHistory = true, emitChange = true, axCorSag = null } = options
     const nv = nvRef.current
     const markerCanvas = markerCanvasRef.current
     if (!nv || !markerCanvas || !Array.isArray(normPoints) || normPoints.length < 3) return false
@@ -801,22 +801,40 @@ const Viewer = forwardRef(function Viewer(
     const nz = Math.max(1, Number(dims?.[3] || 1))
     if (nx < 1 || ny < 1 || nz < 1) return false
 
-    const ranges = [0, 1, 2].map((axis) => {
-      let min = Number.POSITIVE_INFINITY
-      let max = Number.NEGATIVE_INFINITY
-      for (const p of voxPoints) {
-        const v = Number(p[axis] || 0)
-        min = Math.min(min, v)
-        max = Math.max(max, v)
-      }
-      return max - min
-    })
+    const forcedPlane = Number.isInteger(axCorSag) ? Number(axCorSag) : null
     let fixedAxis = 0
-    if (ranges[1] < ranges[fixedAxis]) fixedAxis = 1
-    if (ranges[2] < ranges[fixedAxis]) fixedAxis = 2
-    const axes = [0, 1, 2].filter((axis) => axis !== fixedAxis)
-    const hAxis = axes[0]
-    const vAxis = axes[1]
+    let hAxis = 0
+    let vAxis = 1
+    if (forcedPlane === 0) {
+      fixedAxis = 2
+      hAxis = 0
+      vAxis = 1
+    } else if (forcedPlane === 1) {
+      fixedAxis = 1
+      hAxis = 0
+      vAxis = 2
+    } else if (forcedPlane === 2) {
+      fixedAxis = 0
+      hAxis = 1
+      vAxis = 2
+    } else {
+      const ranges = [0, 1, 2].map((axis) => {
+        let min = Number.POSITIVE_INFINITY
+        let max = Number.NEGATIVE_INFINITY
+        for (const p of voxPoints) {
+          const v = Number(p[axis] || 0)
+          min = Math.min(min, v)
+          max = Math.max(max, v)
+        }
+        return max - min
+      })
+      fixedAxis = 0
+      if (ranges[1] < ranges[fixedAxis]) fixedAxis = 1
+      if (ranges[2] < ranges[fixedAxis]) fixedAxis = 2
+      const axes = [0, 1, 2].filter((axis) => axis !== fixedAxis)
+      hAxis = axes[0]
+      vAxis = axes[1]
+    }
 
     let fixed = 0
     for (const p of voxPoints) fixed += Number(p[fixedAxis] || 0)
@@ -1123,6 +1141,13 @@ const Viewer = forwardRef(function Viewer(
       }
       if (typeof nvRef.current.setCrosshairVisible === 'function') {
         nvRef.current.setCrosshairVisible(false)
+      }
+      const previousOnLocationChange = nvRef.current.onLocationChange
+      nvRef.current.onLocationChange = (location) => {
+        if (typeof previousOnLocationChange === 'function') {
+          previousOnLocationChange(location)
+        }
+        drawStrokeMarkers()
       }
       nvRef.current.onDrawingChanged = (action) => {
         const nv = nvRef.current
@@ -1725,7 +1750,8 @@ const Viewer = forwardRef(function Viewer(
 
           const maskChanged = rasterizeClosedAnnotationToMask(closedPoints, {
             recordHistory: false,
-            emitChange: false
+            emitChange: false,
+            axCorSag: curvePlaneRef.current
           })
           const freehandAnnotation = {
             type: 'freehand',
