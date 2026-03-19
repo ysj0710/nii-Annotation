@@ -1409,26 +1409,34 @@ const Viewer = forwardRef(function Viewer(
       if (typeof nvRef.current.setCrosshairVisible === 'function') {
         nvRef.current.setCrosshairVisible(false)
       }
+      const setRenderBackOpacity = (opacityValue) => {
+        const gl = nv?.gl
+        const shader = nv?.renderShader
+        const uniform = shader?.uniforms?.backOpacity
+        if (!gl || !shader || uniform == null) return false
+        shader.use(gl)
+        gl.uniform1f(uniform, Math.max(0, Number(opacityValue || 0)))
+        return true
+      }
       const runMaskOnly3D = (renderFn) => {
         if (!renderMaskOnly3DRef.current || maskOnly3DActiveRef.current) return renderFn()
-        const volumes = Array.isArray(nv.volumes) ? nv.volumes : []
-        if (!volumes.length) return renderFn()
+        const baseVolume = Array.isArray(nv.volumes) ? nv.volumes[0] : null
+        const baseOpacity = Number(baseVolume?.opacity ?? baseVolume?._opacity ?? 1)
         maskOnly3DActiveRef.current = true
-        const prevOpacities = volumes.map((vol) => Number(vol?.opacity ?? vol?._opacity ?? 1))
-        for (const vol of volumes) {
-          if (!vol) continue
-          vol.opacity = 0
-          vol._opacity = 0
+        let usedUniformMode = setRenderBackOpacity(0)
+        if (!usedUniformMode && baseVolume) {
+          baseVolume.opacity = 0
+          baseVolume._opacity = 0
         }
         try {
           return renderFn()
         } finally {
-          volumes.forEach((vol, idx) => {
-            if (!vol) return
-            const prev = Number.isFinite(prevOpacities[idx]) ? prevOpacities[idx] : 1
-            vol.opacity = prev
-            vol._opacity = prev
-          })
+          if (usedUniformMode) {
+            setRenderBackOpacity(baseOpacity)
+          } else if (baseVolume) {
+            baseVolume.opacity = baseOpacity
+            baseVolume._opacity = baseOpacity
+          }
           maskOnly3DActiveRef.current = false
         }
       }
