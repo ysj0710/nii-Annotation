@@ -1006,6 +1006,7 @@ export default function App() {
   const [activeLabelId, setActiveLabelId] = useState(1)
   const [newLabelName, setNewLabelName] = useState('')
   const [tool, setTool] = useState('pan')
+  const [curveHintVisible, setCurveHintVisible] = useState(false)
   const [brushSize, setBrushSize] = useState(6)
   const [radiological2D, setRadiological2D] = useState(true)
   const [labelStats, setLabelStats] = useState({})
@@ -1173,6 +1174,15 @@ export default function App() {
   useEffect(() => {
     activeImageIdRef.current = String(activeImage?.id || '')
   }, [activeImage?.id])
+
+  // 监听工具变化，控制 curve 提示显示
+  useEffect(() => {
+    if (tool === 'curve') {
+      setCurveHintVisible(true)
+    } else {
+      setCurveHintVisible(false)
+    }
+  }, [tool])
 
   const scheduleLabelStatsRefresh = () => {
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current)
@@ -1853,6 +1863,10 @@ export default function App() {
   const onViewerEvent = (reason = 'draw') => {
     if (reason === 'annotate') {
       Message.success('标注创建成功')
+    }
+    if (reason === 'curve-complete') {
+      Message.success('曲线标注已完成并保存')
+      setCurveHintVisible(false)
     }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate' || reason === 'clear') {
       hasUnsavedChangesRef.current = true
@@ -3164,6 +3178,15 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
         </Content>
 
         <Sider className="label-sidebar" width={360}>
+          {curveHintVisible && (
+            <div className="curve-hint-banner">
+              <div className="curve-hint-icon">✏️</div>
+              <div className="curve-hint-text">
+                <div className="curve-hint-title">曲线标注模式</div>
+                <div className="curve-hint-desc">点击绘制曲线，按 Enter 键完成并填充</div>
+              </div>
+            </div>
+          )}
           <div className="label-side-head">
             <div className="label-side-title">标注项</div>
           </div>

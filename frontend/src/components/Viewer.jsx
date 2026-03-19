@@ -79,6 +79,7 @@ const Viewer = forwardRef(function Viewer(
   const annotationDraftRef = useRef(null)
   const annotationStepsRef = useRef([])
   const curveLastTapRef = useRef(0)
+  const curvePlaneRef = useRef(null)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
   imageKeyRef.current = image?.id ? String(image.id) : ''
@@ -451,9 +452,10 @@ const Viewer = forwardRef(function Viewer(
       for (let i = 1; i < points.length; i += 1) {
         ctx.lineTo(points[i].x, points[i].y)
       }
+      // curve 类型只有用户按回车确认后才闭合和填充（通过 onKeyDown 处理）
+      // freehand 类型保持原有逻辑
       const shouldCloseAndFill =
-        (annotation.type === 'curve' && points.length >= 3) ||
-        (annotation.type === 'freehand' && annotation.closed && points.length >= 3)
+        annotation.type === 'freehand' && annotation.closed && points.length >= 3
       if (shouldCloseAndFill) {
         ctx.closePath()
         ctx.save()
@@ -502,6 +504,32 @@ const Viewer = forwardRef(function Viewer(
       ctx.lineWidth = 1
       ctx.strokeStyle = 'rgba(255, 180, 0, 0.95)'
       ctx.stroke()
+    }
+    // curve 工具：绘制起点和终点的辅助圆圈，提示用户可以继续绘制
+    const draft = annotationDraftRef.current
+    if (draft?.type === 'curve' && draft.points?.length > 0) {
+      const startPt = toPxPoint(draft.points[0], markerCanvas)
+      const endPt = toPxPoint(draft.points[draft.points.length - 1], markerCanvas)
+      if (startPt) {
+        // 起点：绿色圆圈
+        ctx.beginPath()
+        ctx.arc(startPt.x, startPt.y, 6, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.3)'
+        ctx.fill()
+        ctx.lineWidth = 2
+        ctx.strokeStyle = 'rgba(34, 197, 94, 0.9)'
+        ctx.stroke()
+      }
+      if (endPt && draft.points.length > 1) {
+        // 终点：橙色圆圈，提示可继续绘制
+        ctx.beginPath()
+        ctx.arc(endPt.x, endPt.y, 6, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(249, 115, 22, 0.3)'
+        ctx.fill()
+        ctx.lineWidth = 2
+        ctx.strokeStyle = 'rgba(249, 115, 22, 0.9)'
+        ctx.stroke()
+      }
     }
   }
 
@@ -885,6 +913,7 @@ const Viewer = forwardRef(function Viewer(
       if (key) annotationsByImageRef.current.delete(key)
       annotationDraftRef.current = null
       annotationStepsRef.current = []
+      curvePlaneRef.current = null
       const currentImageKey = getImageKey()
       actionHistoryRef.current = actionHistoryRef.current.filter((item) => {
         const actionType = typeof item === 'string' ? item : item?.type
@@ -1055,6 +1084,7 @@ const Viewer = forwardRef(function Viewer(
     toolRef.current = tool
     annotationDraftRef.current = null
     annotationStepsRef.current = []
+    curvePlaneRef.current = null
     drawStrokeMarkers()
   }, [tool])
 
@@ -1311,6 +1341,7 @@ const Viewer = forwardRef(function Viewer(
               color: getCurrentAnnotationColor()
             })
             annotationStepsRef.current = []
+            curvePlaneRef.current = null
           }
           annotationDraftRef.current =
             annotationStepsRef.current.length > 1
@@ -1321,27 +1352,28 @@ const Viewer = forwardRef(function Viewer(
         }
 
         if (currentTool === 'curve') {
-          const gap = now - curveLastTapRef.current
           curveLastTapRef.current = now
-          annotationStepsRef.current = [...annotationStepsRef.current, norm]
-          if (gap < 280 && annotationStepsRef.current.length > 2) {
-            const curveAnnotation = {
-              type: 'curve',
-              points: [...annotationStepsRef.current],
-              label: '',
-              color: getCurrentAnnotationColor()
-            }
-            addAnnotation(curveAnnotation)
-            rasterizeClosedAnnotationToMask(curveAnnotation.points)
-            annotationStepsRef.current = []
-            annotationDraftRef.current = null
+          const dpr = nv.uiData?.dpr || 1
+          const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
+          const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
+          
+          // 如果平面变化，清空之前的点重新开始
+          if (annotationStepsRef.current.length > 0 && curvePlaneRef.current !== null && curvePlaneRef.current !== currentPlane) {
+            annotationStepsRef.current = [norm]
+            curvePlaneRef.current = currentPlane
           } else {
-            annotationDraftRef.current = {
-              type: 'curve',
-              points: [...annotationStepsRef.current],
-              label: '双击结束',
-              color: getCurrentAnnotationColor()
+            annotationStepsRef.current = [...annotationStepsRef.current, norm]
+            if (annotationStepsRef.current.length === 1) {
+              curvePlaneRef.current = currentPlane
             }
+          }
+          
+          annotationDraftRef.current = {
+            type: 'curve',
+            points: [...annotationStepsRef.current],
+            label: '按回车完成',
+            color: getCurrentAnnotationColor(),
+            closed: false
           }
           drawStrokeMarkers()
           return
@@ -1524,10 +1556,34 @@ const Viewer = forwardRef(function Viewer(
       drawStrokeMarkers()
     }
 
+    // 键盘事件：按回车完成 curve 标注
+    const onKeyDown = (event) => {
+      if (event.key === 'Enter' && toolRef.current === 'curve' && annotationStepsRef.current.length > 2) {
+        const curveAnnotation = {
+          type: 'curve',
+          points: [...annotationStepsRef.current],
+          label: '',
+          color: getCurrentAnnotationColor(),
+          closed: true
+        }
+        addAnnotation(curveAnnotation)
+        rasterizeClosedAnnotationToMask(curveAnnotation.points)
+        annotationStepsRef.current = []
+        curvePlaneRef.current = null
+        annotationDraftRef.current = null
+        drawStrokeMarkers()
+        // 通知父组件 curve 已完成
+        if (typeof onDrawingChange === 'function') {
+          onDrawingChange('curve-complete')
+        }
+      }
+    }
+
     canvas.addEventListener('pointerdown', onPointerDown)
     canvas.addEventListener('pointermove', onPointerMove)
     canvas.addEventListener('pointerup', onPointerUp)
     canvas.addEventListener('pointercancel', onPointerCancel)
+    window.addEventListener('keydown', onKeyDown)
 
     return () => {
       resizeObserver.disconnect()
@@ -1535,6 +1591,7 @@ const Viewer = forwardRef(function Viewer(
       canvas.removeEventListener('pointermove', onPointerMove)
       canvas.removeEventListener('pointerup', onPointerUp)
       canvas.removeEventListener('pointercancel', onPointerCancel)
+      window.removeEventListener('keydown', onKeyDown)
     }
   }, [])
 
