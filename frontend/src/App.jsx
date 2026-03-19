@@ -1007,7 +1007,7 @@ export default function App() {
   const [newLabelName, setNewLabelName] = useState('')
   const [tool, setTool] = useState('pan')
   const [curveHintVisible, setCurveHintVisible] = useState(false)
-  const [brushSize, setBrushSize] = useState(6)
+  const [brushSize, setBrushSize] = useState(15)
   const [brushShape, setBrushShape] = useState('circle') // 'circle' | 'square'
   const [radiological2D, setRadiological2D] = useState(true)
   const [labelStats, setLabelStats] = useState({})
@@ -1176,9 +1176,9 @@ export default function App() {
     activeImageIdRef.current = String(activeImage?.id || '')
   }, [activeImage?.id])
 
-  // 监听工具变化，控制 curve/brush 提示显示
+  // 监听工具变化，控制 freehand/brush 提示显示
   useEffect(() => {
-    if (tool === 'curve' || tool === 'brush') {
+    if (tool === 'freehand' || tool === 'brush') {
       setCurveHintVisible(true)
     } else {
       setCurveHintVisible(false)
@@ -2841,10 +2841,10 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       onClick: () => toggleAnnotationTool('brush')
     },
     {
-      key: 'curve',
-      name: '曲线',
-      active: tool === 'curve',
-      onClick: () => toggleAnnotationTool('curve')
+      key: 'freehand',
+      name: '自由曲线',
+      active: tool === 'freehand',
+      onClick: () => toggleAnnotationTool('freehand')
     },
     {
       key: 'undo',
@@ -2876,54 +2876,6 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       'aria-hidden': true
     }
     switch (key) {
-      case 'hu':
-        return (
-          <svg {...iconProps}>
-            <path d="M12 4v16M4 12h16" />
-            <circle cx="12" cy="12" r="7" />
-          </svg>
-        )
-      case 'ellipse':
-        return (
-          <svg {...iconProps}>
-            <ellipse cx="12" cy="12" rx="7" ry="4.8" />
-          </svg>
-        )
-      case 'rect':
-        return (
-          <svg {...iconProps}>
-            <rect x="5" y="6" width="14" height="12" rx="1.8" />
-          </svg>
-        )
-      case 'angle':
-        return (
-          <svg {...iconProps}>
-            <path d="M6 18V6M6 18h12" />
-            <path d="M10 14a4 4 0 0 0-4-4" />
-          </svg>
-        )
-      case 'cobb':
-        return (
-          <svg {...iconProps}>
-            <path d="M5 8l14-3" />
-            <path d="M5 16l14 3" />
-            <path d="M8 11a4.5 4.5 0 0 0 0 2" />
-          </svg>
-        )
-      case 'length':
-        return (
-          <svg {...iconProps}>
-            <path d="M6 17L18 7" />
-            <path d="M4 18h4M16 6h4" />
-          </svg>
-        )
-      case 'arrow':
-        return (
-          <svg {...iconProps}>
-            <path d="M6 17L18 7" />
-            <path d="M12 7h6v6" />
-          </svg>
-        )
       case 'brush':
         return (
           <svg {...iconProps}>
@@ -2931,34 +2883,13 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             <circle cx="12" cy="12" r="6" />
           </svg>
         )
-      case 'text':
-        return (
-          <svg {...iconProps}>
-            <path d="M6 7h12M12 7v10" />
-          </svg>
-        )
-      case 'ratio':
-        return (
-          <svg {...iconProps}>
-            <path d="M6 16c0-4 2-7 4-7s4 3 4 7" />
-            <path d="M10 16c0-3 1.4-5 3-5s3 2 3 5" />
-          </svg>
-        )
-      case 'curve':
+      case 'freehand':
         return (
           <svg {...iconProps}>
             <path d="M5 16c2-6 5-2 7-6 1.8-3.6 5 0 7-4" />
             <circle cx="5" cy="16" r="1.5" fill="currentColor" />
             <circle cx="12" cy="10" r="1.5" fill="currentColor" />
             <circle cx="19" cy="6" r="1.5" fill="currentColor" />
-          </svg>
-        )
-      case 'dynamic':
-      case 'bidirectional':
-        return (
-          <svg {...iconProps}>
-            <path d="M5 12h14" />
-            <path d="M8 9l-3 3 3 3M16 9l3 3-3 3" />
           </svg>
         )
       case 'undo':
@@ -3188,7 +3119,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
               <div className="curve-hint-icon">✏️</div>
               <div className="curve-hint-text">
                 <div className="curve-hint-title">
-                  {tool === 'brush' ? '笔刷标注模式' : '曲线标注模式'}
+                  {tool === 'brush' ? '笔刷标注模式' : '自由曲线标注模式'}
                 </div>
                 <div className="curve-hint-desc">
                   {tool === 'brush' 
