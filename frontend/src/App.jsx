@@ -12,13 +12,12 @@ import {
 import {
   IconPlus,
   IconDelete,
-  IconTool,
   IconSearch
 } from '@arco-design/web-react/icon'
 import JSZip from 'jszip'
 import * as nifti from 'nifti-reader-js'
 import dicomParser from 'dicom-parser'
-import { getAllImages, getImageById, saveImages, updateImage, deleteImage, clearAllImages } from './utils/imageStore.js'
+import { getAllImages, getImageById, saveImages, updateImage, clearAllImages } from './utils/imageStore.js'
 
 const Viewer = lazy(() => import('./components/Viewer.jsx'))
 
@@ -1128,14 +1127,11 @@ export default function App() {
   const [activeLabelId, setActiveLabelId] = useState(1)
   const [newLabelName, setNewLabelName] = useState('')
   const [tool, setTool] = useState('pan')
-  const [curveHintVisible, setCurveHintVisible] = useState(false)
   const [brushSize, setBrushSize] = useState(15)
   const [brushShape, setBrushShape] = useState('circle') // 'circle' | 'square'
   const [radiological2D, setRadiological2D] = useState(true)
   const [labelStats, setLabelStats] = useState({})
   const [viewerMode, setViewerMode] = useState('default')
-  const [showImageSidebar, setShowImageSidebar] = useState(true)
-  const [annotationMenuVisible, setAnnotationMenuVisible] = useState(false)
   const [colorPickerLabelId, setColorPickerLabelId] = useState(null)
   const [runtimeEnv, setRuntimeEnv] = useState(null)
 
@@ -1146,7 +1142,6 @@ export default function App() {
 
   const viewerRef = useRef(null)
   const viewerHostRef = useRef(null)
-  const annotationToolsRef = useRef(null)
   const processedFilesRef = useRef(new Set())
   const saveTimerRef = useRef(null)
   const saveIdleRef = useRef(null)
@@ -1276,11 +1271,6 @@ export default function App() {
     if (queueImages.length > 0) return activeQueueIndex
     return displayImages.findIndex((item) => item.id === activeImage?.id)
   }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
-  const annotationToolDisabled = useMemo(() => {
-    // 标注工具始终可用，不管是否有 mask 文件
-    return false
-  }, [])
-
   useEffect(() => {
     const detected = detectBrowserRuntimeEnv()
     runtimeEnvRef.current = detected
@@ -1308,15 +1298,6 @@ export default function App() {
   useEffect(() => {
     activeImageIdRef.current = String(activeImage?.id || '')
   }, [activeImage?.id])
-
-  // 监听工具变化，控制 freehand/brush 提示显示
-  useEffect(() => {
-    if (tool === 'freehand' || tool === 'brush') {
-      setCurveHintVisible(true)
-    } else {
-      setCurveHintVisible(false)
-    }
-  }, [tool])
 
   const scheduleLabelStatsRefresh = () => {
     if (statsTimerRef.current) clearTimeout(statsTimerRef.current)
@@ -2100,7 +2081,6 @@ export default function App() {
   const onViewerEvent = (reason = 'draw') => {
     if (reason === 'curve-complete') {
       Message.success('保存成功')
-      setCurveHintVisible(false)
     }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate') {
       hasUnsavedChangesRef.current = true
@@ -2168,6 +2148,20 @@ export default function App() {
     }
   }
 
+  const switchDisplayImage = async (direction = 1) => {
+    if (isBatchMode || queueImages.length > 0) {
+      await switchQueueImage(direction)
+      return
+    }
+    if (!displayImages.length) return
+    const currentIndex = displayImages.findIndex((item) => item.id === activeImage?.id)
+    const baseIndex = currentIndex >= 0 ? currentIndex : 0
+    const targetIndex = (baseIndex + direction + displayImages.length) % displayImages.length
+    const target = displayImages[targetIndex]
+    if (!target || !target.id || target._placeholder || String(target.id).startsWith('remote-')) return
+    await selectImage(target.id)
+  }
+
   useEffect(() => {
     const host = viewerHostRef.current
     if (!host) return
@@ -2198,21 +2192,6 @@ export default function App() {
       host.removeEventListener('wheel', onWheelSwitchSeries)
     }
   }, [viewerMode, activeImage?.id, activeImage?.sourceFormat, activeDicomSeries])
-
-  const removeImage = async (id) => {
-    const nextImages = images.filter((img) => img.id !== id)
-    await deleteImage(id)
-    setImages(nextImages)
-    if (activeImage?.id === id) {
-      const next = nextImages[0]
-      if (next) {
-        const record = await getImageById(next.id)
-        setActiveImage(record ? { ...record, maskVersion: hasAttachedMask(record) ? 1 : 0 } : null)
-      } else {
-        setActiveImage(null)
-      }
-    }
-  }
 
   const findImageByBase = (base) => {
     if (!base) return null
@@ -2859,50 +2838,6 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
     }
   }
 
-  const attachSourceMaskToImage = async (id, knownRecord = null) => {
-    const record = knownRecord || (await getImageById(id))
-    if (!record) return
-    const sourceMask = sanitizeMaskBuffer(record.sourceMask || record.mask, { templateBuffer: record.data })
-    const sourceMaskName = record.sourceMaskName || record.maskName
-    if (!sourceMask) return
-
-    await updateImage(id, {
-      mask: sourceMask,
-      maskName: sourceMaskName,
-      maskAttached: true,
-      updatedAt: Date.now()
-    })
-
-    setImages((prev) =>
-      prev.map((img) => (img.id === id ? { ...img, hasMask: true, maskAttached: true } : img))
-    )
-
-    if (activeImage?.id === id) {
-      setActiveImage((prev) =>
-        prev
-          ? {
-              ...prev,
-              mask: sourceMask,
-              maskName: sourceMaskName,
-              maskAttached: true,
-              maskVersion: (prev.maskVersion || 0) + 1
-            }
-          : prev
-      )
-    }
-  }
-
-  const toggleMaskOverlay = async (id, event) => {
-    event?.stopPropagation?.()
-    const record = await getImageById(id)
-    if (!record || !(record.sourceMask || record.mask)) return
-    if (record.maskAttached === false) {
-      await attachSourceMaskToImage(id, record)
-    } else {
-      await detachMaskFromImage(id, record)
-    }
-  }
-
   const handleClear = async () => {
     clearAutoSaveSchedule()
     const id = activeImage?.id
@@ -3180,38 +3115,24 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       <Header className="topbar">
         <div className="brand">影像标注平台</div>
         <Space className="topbar-actions">
-          <div className="annotation-tools-wrap" ref={annotationToolsRef}>
-            <Button
-              icon={<IconTool />}
-              onClick={() => {
-                setAnnotationMenuVisible((prev) => {
-                  const next = !prev
-                  if (!next && tool !== 'pan') {
-                    setTool('pan')
-                  }
-                  if (next) {
-                    requestAnimationFrame(() => {
-                      viewerRef.current?.refreshOverlay?.()
-                    })
-                  }
-                  return next
-                })
-              }}
-            >
-              标注工具
-            </Button>
-            {annotationMenuVisible && <div className="annotation-tools-dropdown">{annotationToolsMenuContent}</div>}
-          </div>
-          {(isBatchMode || queueImages.length > 0) && (
+          {(isBatchMode || queueImages.length > 0 || displayImages.length > 1) && (
             <>
-              <Button onClick={() => switchQueueImage(-1)} disabled={!queueImages.length}>
+              <Button
+                onClick={() => switchDisplayImage(-1)}
+                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : displayImages.length <= 1}
+              >
                 上一张
               </Button>
-              <Button onClick={() => switchQueueImage(1)} disabled={!queueImages.length}>
+              <Button
+                onClick={() => switchDisplayImage(1)}
+                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : displayImages.length <= 1}
+              >
                 下一张
               </Button>
               <span style={{ color: '#cbd5e1', fontSize: 12, minWidth: 84, textAlign: 'center' }}>
-                {queueImages.length ? `${Math.max(1, activeQueueIndex + 1)}/${queueImages.length}` : '批次 0/0'}
+                {isBatchMode || queueImages.length > 0
+                  ? (queueImages.length ? `${Math.max(1, activeQueueIndex + 1)}/${queueImages.length}` : '批次 0/0')
+                  : `${Math.max(1, displayActiveIndex + 1)}/${displayImages.length}`}
               </span>
             </>
           )}
@@ -3223,93 +3144,53 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       </Header>
 
       <Layout className="layout arco-layout-has-sider">
-        <Sider className={`study-sidebar${showImageSidebar ? '' : ' collapsed'}`} width={showImageSidebar ? 300 : 40}>
-          <div className="study-sidebar-inner">
-            <div className="study-rail">
-              <button type="button" className="study-rail-btn" onClick={() => setShowImageSidebar((prev) => !prev)}>
-                ☰
-              </button>
+        <Sider className="tool-sidebar" width={188}>
+          <div className="tool-sidebar-inner">
+            <div className="tool-sidebar-head">
+              <div className="tool-sidebar-title">标注工具</div>
+              <div className="tool-sidebar-subtitle">
+                {displayActiveIndex >= 0 ? `${displayActiveIndex + 1}` : 0} / {displayImages.length || 0}
+              </div>
             </div>
-            {showImageSidebar && (
-              <div className="study-main">
-                <div className="study-main-header">{activeImage?.displayName || activeImage?.name || '影像列表'}</div>
-                <div className="study-main-sub">
-                  {displayActiveIndex >= 0 ? `${displayActiveIndex + 1}` : 0} / {displayImages.length || 0}
-                </div>
-              {displayImages.length === 0 ? (
-                  <div className="sidebar-empty">暂无影像，请从科研平台进入并传入待标注影像</div>
-              ) : (
-                  <div className="study-list">
-                  {displayImages.map((img) => (
-                    <div
-                      key={img.id}
-                      className={`study-item${
-                        activeImage?.id === img.id ||
-                        (activeImage?.remoteImageId && img?.remoteImageId && String(activeImage.remoteImageId) === String(img.remoteImageId))
-                          ? ' active'
-                          : ''
-                      }`}
-                      onClick={async () => {
-                        if (img._placeholder || String(img.id).startsWith('remote-')) {
-                          const queueItem = queueImages.find(
-                            (item) => String(item.imageId || '') === String(img.remoteImageId || '').replace(/^remote-/, '')
-                          )
-                          if (queueItem) {
-                            const ok = await ensureQueueImageLoaded(queueItem)
-                            if (!ok) Message.error('影像加载失败，请检查下载接口')
-                          }
-                          return
-                        }
-                        await selectImage(img.id)
-                      }}
-                      role="button"
-                      tabIndex={0}
+            <div className="tool-sidebar-menu">{annotationToolsMenuContent}</div>
+            {tool === 'brush' && (
+              <div className="brush-settings-panel compact">
+                <div className="brush-settings-title">笔刷设置</div>
+                <div className="brush-shape-selector">
+                  <span className="brush-label">形状：</span>
+                  <div className="brush-shape-options">
+                    <button
+                      type="button"
+                      className={`brush-shape-btn${brushShape === 'circle' ? ' active' : ''}`}
+                      onClick={() => setBrushShape('circle')}
+                      title="圆形"
                     >
-                      <div className="study-thumb">
-                        {img.sourceFormat === 'dicom' && <span className="image-format-badge">DICOM</span>}
-                        {img.isAnnotated && (
-                          <span className={`image-annotated-badge${img.sourceFormat === 'dicom' ? ' with-format' : ''}`}>
-                            已标注
-                          </span>
-                        )}
-                        {img.thumbnail ? (
-                          <img src={img.thumbnail} alt={img.displayName || img.name} />
-                        ) : (
-                          <div className="image-thumb-fallback">NII</div>
-                        )}
-                        {img.hasMask && (
-                          <span
-                            className={`image-badge${img.maskAttached ? ' attached' : ' detached'}`}
-                            onClick={(event) => toggleMaskOverlay(img.id, event)}
-                            role="button"
-                            tabIndex={0}
-                          >
-                            MASK
-                          </span>
-                        )}
-                      </div>
-                      <div className="study-meta">
-                        <span className="study-name">{img.displayName || img.name}</span>
-                        <span className="study-desc">
-                          {img.sourceFormat === 'dicom' ? 'MR/DICOM' : 'NIfTI'} {img.hasMask ? '· 标注' : '· 未标注'}
-                        </span>
-                        <Button
-                          size="mini"
-                          type="text"
-                          icon={<IconDelete />}
-                          className="image-delete"
-                          disabled={!!img._placeholder}
-                          onClick={(event) => {
-                            event.stopPropagation()
-                            if (img._placeholder) return
-                            removeImage(img.id)
-                          }}
-                        />
-                      </div>
-                    </div>
-                  ))}
+                      <svg viewBox="0 0 20 20" width="16" height="16">
+                        <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className={`brush-shape-btn${brushShape === 'square' ? ' active' : ''}`}
+                      onClick={() => setBrushShape('square')}
+                      title="方形"
+                    >
+                      <svg viewBox="0 0 20 20" width="16" height="16">
+                        <rect x="2" y="2" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
-              )}
+                <div className="brush-size-slider">
+                  <span className="brush-label">大小：{brushSize}</span>
+                  <input
+                    type="range"
+                    min="1"
+                    max="50"
+                    value={brushSize}
+                    onChange={(e) => setBrushSize(Number(e.target.value))}
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -3353,61 +3234,6 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
         </Content>
 
         <Sider className="label-sidebar" width={360}>
-          {curveHintVisible && (
-            <div className="curve-hint-banner">
-              <div className="curve-hint-icon">✏️</div>
-              <div className="curve-hint-text">
-                <div className="curve-hint-title">
-                  {tool === 'brush' ? '笔刷标注模式' : '自由曲线标注模式'}
-                </div>
-                <div className="curve-hint-desc">
-                  {tool === 'brush' 
-                    ? '按住拖动绘制，可在右侧切换圆形/方形笔刷' 
-                    : '按住拖动绘制，松开后可继续补画，接近起点自动闭合，按 Enter 完成'}
-                </div>
-              </div>
-            </div>
-          )}
-          {tool === 'brush' && (
-            <div className="brush-settings-panel">
-              <div className="brush-settings-title">笔刷设置</div>
-              <div className="brush-shape-selector">
-                <span className="brush-label">形状：</span>
-                <div className="brush-shape-options">
-                  <button
-                    type="button"
-                    className={`brush-shape-btn${brushShape === 'circle' ? ' active' : ''}`}
-                    onClick={() => setBrushShape('circle')}
-                    title="圆形"
-                  >
-                    <svg viewBox="0 0 20 20" width="16" height="16">
-                      <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
-                    </svg>
-                  </button>
-                  <button
-                    type="button"
-                    className={`brush-shape-btn${brushShape === 'square' ? ' active' : ''}`}
-                    onClick={() => setBrushShape('square')}
-                    title="方形"
-                  >
-                    <svg viewBox="0 0 20 20" width="16" height="16">
-                      <rect x="2" y="2" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              <div className="brush-size-slider">
-                <span className="brush-label">大小：{brushSize}</span>
-                <input
-                  type="range"
-                  min="1"
-                  max="50"
-                  value={brushSize}
-                  onChange={(e) => setBrushSize(Number(e.target.value))}
-                />
-              </div>
-            </div>
-          )}
           <div className="label-side-head">
             <div className="label-side-title">标注项</div>
           </div>

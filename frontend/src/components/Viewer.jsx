@@ -93,6 +93,7 @@ const Viewer = forwardRef(function Viewer(
   const markerRedrawRafRef = useRef(null)
   const suppressDrawingChangedRef = useRef(false)
   const freehandDrawingRef = useRef(false)
+  const last2DTextureSliceRef = useRef(null)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
   const FREEHAND_CONNECT_PX = 18
@@ -163,15 +164,49 @@ const Viewer = forwardRef(function Viewer(
     nv.scene.crosshairPos[2] = nz > 1 ? z / (nz - 1) : 0
   }
 
+  const getCurrent2DShaderSliceIndex = (nv = nvRef.current) => {
+    if (!nv?.opts?.is2DSliceShader) return null
+    const dims = nv.back?.dims
+    const nz = Number(dims?.[3] || 0)
+    if (nz < 1 || typeof nv.frac2vox !== 'function') return null
+    const vox = nv.frac2vox(nv.scene?.crosshairPos || [0, 0, 0])
+    const raw = Number(vox?.[2] || 0)
+    if (!Number.isFinite(raw)) return null
+    return Math.max(0, Math.min(nz - 1, Math.round(raw)))
+  }
+
+  const getDrawingDimsInfo = (nv = nvRef.current) => {
+    if (!nv?.back?.dims) return null
+    const dims = nv.back.dims
+    const nx = Number(dims?.[1] || 0)
+    const ny = Number(dims?.[2] || 0)
+    const nz = Math.max(1, Number(dims?.[3] || 1))
+    if (nx < 1 || ny < 1 || nz < 1) return null
+    return {
+      dims,
+      nx,
+      ny,
+      nz,
+      voxelCount: nx * ny * nz
+    }
+  }
+
+  const hasRefreshableDrawingBitmap = (nv = nvRef.current) => {
+    const dimsInfo = getDrawingDimsInfo(nv)
+    if (!dimsInfo) return false
+    return !!(nv?.drawBitmap && nv.drawBitmap.length === dimsInfo.voxelCount)
+  }
+
   const requestDrawingRefresh = (targetVox = null) => {
     sync2DShaderDrawSliceByVox(targetVox)
     if (drawRefreshPendingRef.current) return
     drawRefreshPendingRef.current = true
     requestAnimationFrame(() => {
       drawRefreshPendingRef.current = false
-      const nv = nvRef.current
-      if (typeof nv?.refreshDrawing === 'function') {
-        nv.refreshDrawing(true)
+      redrawDrawingOverlaySilently()
+      const current2DSlice = getCurrent2DShaderSliceIndex()
+      if (Number.isInteger(current2DSlice)) {
+        last2DTextureSliceRef.current = current2DSlice
       }
     })
   }
@@ -257,6 +292,12 @@ const Viewer = forwardRef(function Viewer(
   const applySnapshot = (snapshot) => {
     const nv = nvRef.current
     if (!nv || !snapshot) return
+    if (!ensureDrawingBitmap()) return
+    if (!nv.drawBitmap || nv.drawBitmap.length !== snapshot.length) {
+      if (typeof nv.createEmptyDrawing === 'function') {
+        nv.createEmptyDrawing()
+      }
+    }
     if (!nv.drawBitmap || nv.drawBitmap.length !== snapshot.length) {
       nv.drawBitmap = new Uint8Array(snapshot.length)
     }
@@ -270,8 +311,8 @@ const Viewer = forwardRef(function Viewer(
   const redrawDrawingOverlay = () => {
     const nv = nvRef.current
     if (!nv) return
-    if (typeof nv.refreshDrawing === 'function') {
-      nv.refreshDrawing(true)
+    if (hasRefreshableDrawingBitmap(nv) && typeof nv.refreshDrawing === 'function') {
+      nv.refreshDrawing(false)
     }
     if (typeof nv.drawScene === 'function') {
       nv.drawScene()
@@ -293,6 +334,18 @@ const Viewer = forwardRef(function Viewer(
     const startedAt = nowMs()
     const budgetMs = Math.max(40, Math.min(100, Number(runtimeEnvRef.current?.refreshBudgetMs || 100)))
     const dims = nv.back?.dims
+    if (!hasRefreshableDrawingBitmap(nv)) {
+      if (typeof nv.drawScene === 'function') {
+        nv.drawScene()
+      }
+      refreshTelemetryRef.current.last = {
+        strategy: ['draw-scene-only'],
+        durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
+        budgetMs,
+        on2DShader: !!nv.opts?.is2DSliceShader
+      }
+      return
+    }
     const pickAxis = nv.opts?.is2DSliceShader ? 2 : (Number.isInteger(fixedAxis) ? Number(fixedAxis) : 2)
     const dimLen = Number(dims?.[pickAxis + 1] || 0)
     const calcMeanIndex = (axis) => {
@@ -394,15 +447,16 @@ const Viewer = forwardRef(function Viewer(
   const ensureDrawingBitmap = () => {
     const nv = nvRef.current
     if (!nv) return false
-    if (nv.drawBitmap?.length) return true
-    const dims = nv.back?.dims
-    const nx = Number(dims?.[1] || 0)
-    const ny = Number(dims?.[2] || 0)
-    const nz = Math.max(1, Number(dims?.[3] || 1))
-    if (nx < 1 || ny < 1 || nz < 1) return false
-    nv.drawBitmap = new Uint8Array(nx * ny * nz)
+    const dimsInfo = getDrawingDimsInfo(nv)
+    if (!dimsInfo) return false
+    if (nv.drawBitmap?.length === dimsInfo.voxelCount) return true
+    if (typeof nv.createEmptyDrawing === 'function') {
+      nv.createEmptyDrawing()
+      return !!(nv.drawBitmap && nv.drawBitmap.length === dimsInfo.voxelCount)
+    }
+    nv.drawBitmap = new Uint8Array(dimsInfo.voxelCount)
     redrawDrawingOverlay()
-    return true
+    return !!(nv.drawBitmap && nv.drawBitmap.length === dimsInfo.voxelCount)
   }
 
   const applyToolSettings = (currentTool, currentBrushSize, currentLabelValue) => {
@@ -948,9 +1002,7 @@ const Viewer = forwardRef(function Viewer(
         smoothLabelInBox()
 
         if (changed) {
-          if (typeof nv.refreshDrawing === 'function') {
-            nv.refreshDrawing(true)
-          }
+          refreshDrawingOnTargetSlice({ fixedAxis: axisFixed, fixedSlice: fixed, voxPoints: pts })
           const pushed = pushSnapshot(nv.drawBitmap)
           if (pushed) {
             const imageKey = getImageKey()
@@ -1393,7 +1445,6 @@ const Viewer = forwardRef(function Viewer(
         nv.draw3D = (...args) => {
           const originalDraw3D = originalDraw3DRef.current
           if (typeof originalDraw3D !== 'function') return undefined
-          if (typeof originalDrawImage3DRef.current === 'function') return originalDraw3D(...args)
           return runMaskOnly3D(() => originalDraw3D(...args))
         }
       }
@@ -1423,6 +1474,12 @@ const Viewer = forwardRef(function Viewer(
                 canvas.releasePointerCapture?.(pid)
               }
             }
+          }
+        }
+        if (nv.opts?.is2DSliceShader && hasRefreshableDrawingBitmap(nv)) {
+          const current2DSlice = getCurrent2DShaderSliceIndex(nv)
+          if (Number.isInteger(current2DSlice) && current2DSlice !== last2DTextureSliceRef.current) {
+            requestDrawingRefresh()
           }
         }
         scheduleMarkerRedraw(1)
@@ -1478,6 +1535,7 @@ const Viewer = forwardRef(function Viewer(
     lastBrushVoxRef.current = null
     brushStrokeDirtyRef.current = false
     freehandDrawingRef.current = false
+    last2DTextureSliceRef.current = null
     drawStrokeMarkers()
   }, [tool])
 
@@ -1505,6 +1563,7 @@ const Viewer = forwardRef(function Viewer(
     lastBrushVoxRef.current = null
     brushStrokeDirtyRef.current = false
     freehandDrawingRef.current = false
+    last2DTextureSliceRef.current = null
     drawStrokeMarkers()
   }, [image?.id])
 
@@ -1654,9 +1713,11 @@ const Viewer = forwardRef(function Viewer(
           nv.loadDrawing(maskVolume)
           redrawDrawingOverlay()
         }
+      } else if (typeof nv.createEmptyDrawing === 'function') {
+        nv.createEmptyDrawing()
+        redrawDrawingOverlay()
       } else if (typeof nv.closeDrawing === 'function') {
         nv.closeDrawing()
-        redrawDrawingOverlay()
       }
 
       applyToolSettings(toolRef.current, brushSizeRef.current, activeLabelValueRef.current)
@@ -2115,6 +2176,9 @@ const Viewer = forwardRef(function Viewer(
     const onWheel = () => {
       // 滚轮切层时，等 NiiVue 完成场景刷新后重绘 marker，避免上一层辅助线残留。
       scheduleMarkerRedraw(2)
+      if (nv.opts?.is2DSliceShader && hasRefreshableDrawingBitmap(nv)) {
+        requestDrawingRefresh()
+      }
     }
 
     canvas.addEventListener('pointerdown', onPointerDown)
