@@ -1008,6 +1008,7 @@ export default function App() {
   const [tool, setTool] = useState('pan')
   const [curveHintVisible, setCurveHintVisible] = useState(false)
   const [brushSize, setBrushSize] = useState(6)
+  const [brushShape, setBrushShape] = useState('circle') // 'circle' | 'square'
   const [radiological2D, setRadiological2D] = useState(true)
   const [labelStats, setLabelStats] = useState({})
   const [viewerMode, setViewerMode] = useState('default')
@@ -1175,9 +1176,9 @@ export default function App() {
     activeImageIdRef.current = String(activeImage?.id || '')
   }, [activeImage?.id])
 
-  // 监听工具变化，控制 curve/freehand/brush 提示显示
+  // 监听工具变化，控制 curve/brush 提示显示
   useEffect(() => {
-    if (tool === 'curve' || tool === 'freehand' || tool === 'brush') {
+    if (tool === 'curve' || tool === 'brush') {
       setCurveHintVisible(true)
     } else {
       setCurveHintVisible(false)
@@ -1864,7 +1865,7 @@ export default function App() {
     if (reason === 'annotate') {
       Message.success('标注创建成功')
     }
-    if (reason === 'curve-complete' || reason === 'freehand-complete' || reason === 'brush-complete') {
+    if (reason === 'curve-complete') {
       Message.success('曲线标注已完成并保存')
       setCurveHintVisible(false)
     }
@@ -2840,10 +2841,10 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       onClick: () => toggleAnnotationTool('brush')
     },
     {
-      key: 'freehand',
-      name: '自由曲线',
-      active: tool === 'freehand',
-      onClick: () => toggleAnnotationTool('freehand')
+      key: 'curve',
+      name: '曲线',
+      active: tool === 'curve',
+      onClick: () => toggleAnnotationTool('curve')
     },
     {
       key: 'undo',
@@ -2923,6 +2924,13 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             <path d="M12 7h6v6" />
           </svg>
         )
+      case 'brush':
+        return (
+          <svg {...iconProps}>
+            <circle cx="12" cy="12" r="3" fill="currentColor" fillOpacity="0.3" />
+            <circle cx="12" cy="12" r="6" />
+          </svg>
+        )
       case 'text':
         return (
           <svg {...iconProps}>
@@ -2939,31 +2947,13 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       case 'curve':
         return (
           <svg {...iconProps}>
-            <path d="M4 16c4-10 8 10 16 0" />
+            <path d="M5 16c2-6 5-2 7-6 1.8-3.6 5 0 7-4" />
+            <circle cx="5" cy="16" r="1.5" fill="currentColor" />
+            <circle cx="12" cy="10" r="1.5" fill="currentColor" />
+            <circle cx="19" cy="6" r="1.5" fill="currentColor" />
           </svg>
         )
       case 'dynamic':
-        return (
-          <svg {...iconProps}>
-            <path d="M4 16c2-4 6-4 8 0s6 4 8 0" />
-            <circle cx="6" cy="13.5" r="1.2" />
-            <circle cx="18" cy="13.5" r="1.2" />
-          </svg>
-        )
-      case 'brush':
-        return (
-          <svg {...iconProps}>
-            <circle cx="12" cy="12" r="4" fill="currentColor" fillOpacity="0.3" />
-            <circle cx="12" cy="12" r="4" />
-            <circle cx="12" cy="12" r="1.5" fill="currentColor" />
-          </svg>
-        )
-      case 'freehand':
-        return (
-          <svg {...iconProps}>
-            <path d="M5 16c2-6 5-2 7-6 1.8-3.6 5 0 7-4" />
-          </svg>
-        )
       case 'bidirectional':
         return (
           <svg {...iconProps}>
@@ -3184,6 +3174,7 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             image={activeImage}
             tool={tool}
             brushSize={brushSize}
+            brushShape={brushShape}
             activeLabelValue={activeLabel?.value || 1}
             labels={labels}
             radiological2D={viewerMode === 'dicom' ? true : radiological2D}
@@ -3201,9 +3192,49 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
                 </div>
                 <div className="curve-hint-desc">
                   {tool === 'brush' 
-                    ? '按住拖动绘制，松开自动闭合填充' 
-                    : '拖动绘制曲线，按 Enter 键完成并填充'}
+                    ? '按住拖动绘制，可在右侧切换圆形/方形笔刷' 
+                    : '点击放置节点，接近起点时自动闭合，按 Enter 完成'}
                 </div>
+              </div>
+            </div>
+          )}
+          {tool === 'brush' && (
+            <div className="brush-settings-panel">
+              <div className="brush-settings-title">笔刷设置</div>
+              <div className="brush-shape-selector">
+                <span className="brush-label">形状：</span>
+                <div className="brush-shape-options">
+                  <button
+                    type="button"
+                    className={`brush-shape-btn${brushShape === 'circle' ? ' active' : ''}`}
+                    onClick={() => setBrushShape('circle')}
+                    title="圆形"
+                  >
+                    <svg viewBox="0 0 20 20" width="16" height="16">
+                      <circle cx="10" cy="10" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    className={`brush-shape-btn${brushShape === 'square' ? ' active' : ''}`}
+                    onClick={() => setBrushShape('square')}
+                    title="方形"
+                  >
+                    <svg viewBox="0 0 20 20" width="16" height="16">
+                      <rect x="2" y="2" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div className="brush-size-slider">
+                <span className="brush-label">大小：{brushSize}</span>
+                <input
+                  type="range"
+                  min="1"
+                  max="50"
+                  value={brushSize}
+                  onChange={(e) => setBrushSize(Number(e.target.value))}
+                />
               </div>
             </div>
           )}

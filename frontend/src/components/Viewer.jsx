@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import { Niivue, NVImage } from '@niivue/niivue'
 
 const isRasterImageName = (name) => /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name || '')
-const MASK_TOOLS = new Set(['eraser'])
+const MASK_TOOLS = new Set(['brush', 'eraser'])
 const ANNOTATION_TOOLS = new Set([
   'hu',
   'ellipse',
@@ -15,9 +15,7 @@ const ANNOTATION_TOOLS = new Set([
   'ratio',
   'curve',
   'dynamic',
-  'freehand',
-  'bidirectional',
-  'brush'
+  'bidirectional'
 ])
 
 const isAnnotationTool = (tool) => ANNOTATION_TOOLS.has(tool)
@@ -60,7 +58,7 @@ const hexToRgba = (hex, alpha = 0.45) => {
 }
 
 const Viewer = forwardRef(function Viewer(
-  { image, tool, brushSize, activeLabelValue, labels = [], radiological2D = true, onDrawingChange },
+  { image, tool, brushSize, brushShape = 'circle', activeLabelValue, labels = [], radiological2D = true, onDrawingChange },
   ref
 ) {
   const canvasRef = useRef(null)
@@ -79,11 +77,7 @@ const Viewer = forwardRef(function Viewer(
   const annotationsByImageRef = useRef(new Map())
   const annotationDraftRef = useRef(null)
   const annotationStepsRef = useRef([])
-  const curveLastTapRef = useRef(0)
   const curvePlaneRef = useRef(null)
-  const freehandPlaneRef = useRef(null)
-  const brushPointsRef = useRef([])
-  const brushPlaneRef = useRef(null)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
   imageKeyRef.current = image?.id ? String(image.id) : ''
@@ -238,6 +232,70 @@ const Viewer = forwardRef(function Viewer(
       safeCall('setPenSize', currentBrushSize)
     }
     redrawDrawingOverlay()
+  }
+
+  // 笔刷绘制函数 - 在指定位置绘制圆形或方形
+  const drawBrushAt = (vox, shape, size, labelValue) => {
+    const nv = nvRef.current
+    if (!nv || !nv.drawBitmap) return
+    
+    const dims = nv.back?.dims
+    const nx = Number(dims?.[1] || 0)
+    const ny = Number(dims?.[2] || 0)
+    const nz = Math.max(1, Number(dims?.[3] || 1))
+    if (nx < 1 || ny < 1 || nz < 1) return
+    
+    const cx = Math.round(vox[0])
+    const cy = Math.round(vox[1])
+    const cz = Math.round(vox[2])
+    const radius = Math.max(1, Math.round(size / 2))
+    const fillLabel = Math.max(1, Math.min(255, Number(labelValue || 1)))
+    
+    const xy = nx * ny
+    let changed = false
+    
+    if (shape === 'square') {
+      // 方形笔刷
+      for (let dz = -radius; dz <= radius; dz++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const x = cx + dx
+            const y = cy + dy
+            const z = cz + dz
+            if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz) {
+              const idx = z * xy + y * nx + x
+              if (nv.drawBitmap[idx] !== fillLabel) {
+                nv.drawBitmap[idx] = fillLabel
+                changed = true
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // 圆形笔刷
+      for (let dz = -radius; dz <= radius; dz++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+            if (dist <= radius) {
+              const x = cx + dx
+              const y = cy + dy
+              const z = cz + dz
+              if (x >= 0 && x < nx && y >= 0 && y < ny && z >= 0 && z < nz) {
+                const idx = z * xy + y * nx + x
+                if (nv.drawBitmap[idx] !== fillLabel) {
+                  nv.drawBitmap[idx] = fillLabel
+                  changed = true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    return changed
   }
 
   const resetFillTracking = () => {
@@ -456,11 +514,8 @@ const Viewer = forwardRef(function Viewer(
       for (let i = 1; i < points.length; i += 1) {
         ctx.lineTo(points[i].x, points[i].y)
       }
-      // curve 类型只有用户按回车确认后才闭合和填充（通过 onKeyDown 处理）
-      // freehand 类型保持原有逻辑
-      const shouldCloseAndFill =
-        annotation.type === 'freehand' && annotation.closed && points.length >= 3
-      if (shouldCloseAndFill) {
+      // curve 类型：显示为折线，不自动填充
+      if (annotation.type === 'curve' && annotation.closed && points.length >= 3) {
         ctx.closePath()
         ctx.save()
         const fillAlpha = 0.45
@@ -509,30 +564,44 @@ const Viewer = forwardRef(function Viewer(
       ctx.strokeStyle = 'rgba(255, 180, 0, 0.95)'
       ctx.stroke()
     }
-    // curve/freehand/brush 工具：绘制起点和终点的辅助圆圈，提示用户可以继续绘制
+    // curve 工具：绘制所有节点（统一粉紫色）
     const draft = annotationDraftRef.current
-    if ((draft?.type === 'curve' || draft?.type === 'freehand' || draft?.type === 'brush') && draft.points?.length > 0) {
-      const startPt = toPxPoint(draft.points[0], markerCanvas)
-      const endPt = toPxPoint(draft.points[draft.points.length - 1], markerCanvas)
-      if (startPt) {
-        // 起点：绿色圆圈
+    if (draft?.type === 'curve' && draft.points?.length > 0) {
+      // 绘制所有节点 - 统一粉紫色
+      draft.points.forEach((pt, idx) => {
+        const pxPt = toPxPoint(pt, markerCanvas)
+        if (!pxPt) return
+        
+        const isLast = idx === draft.points.length - 1
+        const radius = isLast ? 5 : 4
+        
         ctx.beginPath()
-        ctx.arc(startPt.x, startPt.y, 6, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(34, 197, 94, 0.3)'
+        ctx.arc(pxPt.x, pxPt.y, radius, 0, Math.PI * 2)
+        // 粉紫色节点 (DB70DB)
+        ctx.fillStyle = 'rgba(219, 112, 219, 0.6)'
         ctx.fill()
-        ctx.lineWidth = 2
-        ctx.strokeStyle = 'rgba(34, 197, 94, 0.9)'
+        ctx.lineWidth = isLast ? 2 : 1.5
+        ctx.strokeStyle = 'rgba(219, 112, 219, 1)'
         ctx.stroke()
-      }
-      if (endPt && draft.points.length > 1) {
-        // 终点：橙色圆圈，提示可继续绘制
-        ctx.beginPath()
-        ctx.arc(endPt.x, endPt.y, 6, 0, Math.PI * 2)
-        ctx.fillStyle = 'rgba(249, 115, 22, 0.3)'
-        ctx.fill()
-        ctx.lineWidth = 2
-        ctx.strokeStyle = 'rgba(249, 115, 22, 0.9)'
-        ctx.stroke()
+      })
+      
+      // 如果接近闭合（距离起点很近），绘制虚线提示
+      if (draft.points.length > 2) {
+        const firstPt = toPxPoint(draft.points[0], markerCanvas)
+        const lastPt = toPxPoint(draft.points[draft.points.length - 1], markerCanvas)
+        if (firstPt && lastPt) {
+          const dist = Math.hypot(firstPt.x - lastPt.x, firstPt.y - lastPt.y)
+          if (dist < 20) {
+            ctx.beginPath()
+            ctx.moveTo(lastPt.x, lastPt.y)
+            ctx.lineTo(firstPt.x, firstPt.y)
+            ctx.setLineDash([4, 4])
+            ctx.lineWidth = 2
+            ctx.strokeStyle = 'rgba(219, 112, 219, 0.6)'
+            ctx.stroke()
+            ctx.setLineDash([])
+          }
+        }
       }
     }
   }
@@ -918,9 +987,6 @@ const Viewer = forwardRef(function Viewer(
       annotationDraftRef.current = null
       annotationStepsRef.current = []
       curvePlaneRef.current = null
-      freehandPlaneRef.current = null
-      brushPointsRef.current = []
-      brushPlaneRef.current = null
       const currentImageKey = getImageKey()
       actionHistoryRef.current = actionHistoryRef.current.filter((item) => {
         const actionType = typeof item === 'string' ? item : item?.type
@@ -1092,9 +1158,6 @@ const Viewer = forwardRef(function Viewer(
     annotationDraftRef.current = null
     annotationStepsRef.current = []
     curvePlaneRef.current = null
-    freehandPlaneRef.current = null
-    brushPointsRef.current = []
-    brushPlaneRef.current = null
     drawStrokeMarkers()
   }, [tool])
 
@@ -1389,29 +1452,12 @@ const Viewer = forwardRef(function Viewer(
           return
         }
 
-        // drag based tools
+        // 其他 drag based tools
         annotationDraftRef.current = {
           type: currentTool === 'length' ? 'line' : currentTool,
           points: [norm, norm],
           label: '',
           color: getCurrentAnnotationColor()
-        }
-        if (currentTool === 'freehand' || currentTool === 'dynamic') {
-          annotationDraftRef.current.points = [norm]
-          // 记录 freehand 的起始平面
-          if (currentTool === 'freehand') {
-            const dpr = nv.uiData?.dpr || 1
-            const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
-            freehandPlaneRef.current = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
-          }
-        }
-        // brush 工具初始化
-        if (currentTool === 'brush') {
-          annotationDraftRef.current.points = [norm]
-          brushPointsRef.current = [norm]
-          const dpr = nv.uiData?.dpr || 1
-          const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
-          brushPlaneRef.current = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
         }
         activePointerIdRef.current = event.pointerId
         canvas.setPointerCapture?.(event.pointerId)
@@ -1419,7 +1465,32 @@ const Viewer = forwardRef(function Viewer(
         return
       }
 
-      // 旧的 brush 逻辑，现在 brush 是标注工具
+      // brush 工具处理
+      if (toolRef.current === 'brush') {
+        const dpr = nv.uiData?.dpr || 1
+        const frac = nv.canvasPos2frac([pos.x * dpr, pos.y * dpr])
+        if (frac && frac[0] >= 0) {
+          const vox = nv.frac2vox(frac)
+          const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
+          if (tile >= 0 && nv.screenSlices?.[tile]) {
+            fillAxCorSagRef.current = nv.screenSlices[tile].axCorSag
+            // 锁定Z轴（平面绘制）
+            vox[fillAxCorSagRef.current === 0 ? 2 : fillAxCorSagRef.current === 1 ? 1 : 0] = 
+              Math.round(vox[fillAxCorSagRef.current === 0 ? 2 : fillAxCorSagRef.current === 1 ? 1 : 0])
+            
+            if (drawBrushAt(vox, brushShape, brushSize, activeLabelValue)) {
+              if (typeof nv.refreshDrawing === 'function') {
+                nv.refreshDrawing(true)
+              }
+            }
+          }
+        }
+        activePointerIdRef.current = event.pointerId
+        canvas.setPointerCapture?.(event.pointerId)
+        fillActiveRef.current = true
+        return
+      }
+
       if (toolRef.current === 'eraser') return
       if (!nv.opts?.drawingEnabled) return
 
@@ -1450,30 +1521,12 @@ const Viewer = forwardRef(function Viewer(
         const pos = getCanvasPos(event)
         const norm = toStoredPoint(pos, markerCanvas)
         const draft = annotationDraftRef.current
-        if (toolRef.current === 'freehand' || toolRef.current === 'dynamic') {
-          // freehand 模式下检查平面是否变化
-          if (toolRef.current === 'freehand') {
-            const dpr = nv.uiData?.dpr || 1
-            const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
-            const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
-            // 如果平面变化，不再添加新点
-            if (freehandPlaneRef.current !== null && freehandPlaneRef.current !== currentPlane) {
-              return
-            }
-          }
+        if (toolRef.current === 'dynamic') {
           draft.points = [...draft.points, norm]
           draft.points = compactPoints(draft.points, MAX_MARKER_POINTS)
-        } else if (toolRef.current === 'brush') {
-          // brush 模式下检查平面是否变化
-          const dpr = nv.uiData?.dpr || 1
-          const tile = nv.tileIndex(pos.x * dpr, pos.y * dpr)
-          const currentPlane = tile >= 0 && nv.screenSlices?.[tile] ? nv.screenSlices[tile].axCorSag : null
-          if (brushPlaneRef.current !== null && brushPlaneRef.current !== currentPlane) {
-            return
-          }
-          draft.points = [...draft.points, norm]
-          brushPointsRef.current = [...brushPointsRef.current, norm]
-          draft.points = compactPoints(draft.points, MAX_MARKER_POINTS)
+        } else if (toolRef.current === 'curve') {
+          // curve 工具在拖动时不添加点，只是更新 draft 用于显示
+          // 点是通过点击添加的
         } else {
           draft.points[1] = norm
         }
@@ -1483,6 +1536,27 @@ const Viewer = forwardRef(function Viewer(
       }
 
       if (!fillActiveRef.current) return
+      
+      // brush 工具的连续绘制
+      if (toolRef.current === 'brush') {
+        if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
+        const pos = getCanvasPos(event)
+        const dpr = nv.uiData?.dpr || 1
+        const frac = nv.canvasPos2frac([pos.x * dpr, pos.y * dpr])
+        if (!frac || frac[0] < 0) return
+        const vox = nv.frac2vox(frac)
+        // 锁定Z轴
+        vox[fillAxCorSagRef.current === 0 ? 2 : fillAxCorSagRef.current === 1 ? 1 : 0] = 
+          Math.round(vox[fillAxCorSagRef.current === 0 ? 2 : fillAxCorSagRef.current === 1 ? 1 : 0])
+        
+        if (drawBrushAt(vox, brushShape, brushSize, activeLabelValue)) {
+          if (typeof nv.refreshDrawing === 'function') {
+            nv.refreshDrawing(true)
+          }
+        }
+        return
+      }
+      
       if (toolRef.current !== 'eraser') return
       if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
       const pos = getCanvasPos(event)
@@ -1556,34 +1630,10 @@ const Viewer = forwardRef(function Viewer(
           } else if (toolRef.current === 'dynamic') {
             draft.points = smoothPath(draft.points)
             draft.label = ''
-          } else if (toolRef.current === 'freehand') {
-            // 不再自动闭合，等待用户按回车确认
-            draft.label = '按回车完成'
-          } else if (toolRef.current === 'brush') {
-            // brush 工具松开鼠标后自动闭合和填充
-            if (brushPointsRef.current.length > 2) {
-              const brushAnnotation = {
-                type: 'brush',
-                points: [...brushPointsRef.current, brushPointsRef.current[0]], // 闭合
-                label: '',
-                color: getCurrentAnnotationColor(),
-                closed: true
-              }
-              addAnnotation(brushAnnotation)
-              rasterizeClosedAnnotationToMask(brushAnnotation.points)
-              if (typeof onDrawingChange === 'function') {
-                onDrawingChange('brush-complete')
-              }
-            }
-            brushPointsRef.current = []
-            brushPlaneRef.current = null
           }
         }
-        // freehand 工具保留 draft 等待回车确认，brush 在上面已处理
-        if (toolRef.current !== 'freehand' && toolRef.current !== 'brush') {
-          annotationDraftRef.current = null
-        } else if (toolRef.current === 'brush') {
-          // brush 需要清空 draft
+        // curve 工具在 pointerUp 时不处理，等待点击添加点或回车完成
+        if (toolRef.current !== 'curve') {
           annotationDraftRef.current = null
         }
         activePointerIdRef.current = null
@@ -1616,7 +1666,7 @@ const Viewer = forwardRef(function Viewer(
       drawStrokeMarkers()
     }
 
-    // 键盘事件：按回车完成 curve/freehand 标注
+    // 键盘事件：按回车完成 curve 标注
     const onKeyDown = (event) => {
       if (event.key === 'Enter') {
         // curve 工具使用 annotationStepsRef
@@ -1639,28 +1689,7 @@ const Viewer = forwardRef(function Viewer(
             onDrawingChange('curve-complete')
           }
         }
-        // freehand 工具使用 annotationDraftRef
-        else if (toolRef.current === 'freehand' && annotationDraftRef.current?.points?.length > 2) {
-          const draft = annotationDraftRef.current
-          const freehandAnnotation = {
-            type: 'freehand',
-            points: [...draft.points, draft.points[0]], // 闭合
-            label: '',
-            color: getCurrentAnnotationColor(),
-            closed: true
-          }
-          addAnnotation(freehandAnnotation)
-          rasterizeClosedAnnotationToMask(freehandAnnotation.points)
-          freehandPlaneRef.current = null
-          annotationDraftRef.current = null
-          activePointerIdRef.current = null
-          canvas.releasePointerCapture?.(event.pointerId)
-          drawStrokeMarkers()
-          // 通知父组件 freehand 已完成
-          if (typeof onDrawingChange === 'function') {
-            onDrawingChange('freehand-complete')
-          }
-        }
+
       }
     }
 
