@@ -421,9 +421,12 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   flex: 1;
   min-height: 0;
   background: #111;
+  overflow: hidden;
 }
 
 .viewer-canvas {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   display: block;
@@ -432,9 +435,112 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 .viewer-marker-canvas {
   position: absolute;
   inset: 0;
+  z-index: 6;
   width: 100%;
   height: 100%;
   pointer-events: none;
+}
+.viewer-quad-gap {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.viewer-quad-gap::before,
+.viewer-quad-gap::after {
+  content: '';
+  position: absolute;
+  background: rgba(15, 23, 42, 0.88);
+  box-shadow: 0 0 0 1px rgba(100, 116, 139, 0.42);
+}
+
+.viewer-quad-gap::before {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 8px;
+  transform: translateX(-50%);
+}
+
+.viewer-quad-gap::after {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 8px;
+  transform: translateY(-50%);
+}
+
+.viewer-plane-switch {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 26;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  backdrop-filter: blur(3px);
+}
+
+.viewer-plane-btn {
+  width: 30px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(15, 23, 42, 0.9);
+  color: #dbeafe;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease, transform 0.16s ease;
+}
+
+.viewer-plane-btn:hover {
+  border-color: rgba(125, 211, 252, 0.95);
+  background: rgba(30, 41, 59, 0.95);
+  transform: translateY(-1px);
+}
+
+.viewer-plane-btn.active {
+  border-color: rgba(125, 211, 252, 0.95);
+  background: rgba(30, 64, 175, 0.78);
+  color: #eff6ff;
+}
+
+.viewer-fit-controls {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 26;
+}
+
+.viewer-fit-btn {
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.8);
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1;
+  padding: 8px 12px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.viewer-fit-btn:hover:not(:disabled) {
+  border-color: rgba(125, 211, 252, 0.95);
+  background: rgba(30, 41, 59, 0.95);
+}
+
+.viewer-fit-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 .viewer-loading {
   position: absolute;

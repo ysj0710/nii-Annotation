@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { Niivue, NVImage } from '@niivue/niivue'
 
 const isRasterImageName = (name) => /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name || '')
@@ -7,6 +7,7 @@ const ANNOTATION_TOOLS = new Set([
   'freehand',
   'brush'
 ])
+const FOCUS_PLANES = ['A', 'S', 'C']
 
 const isAnnotationTool = (tool) => ANNOTATION_TOOLS.has(tool)
 const toArrayBuffer = (data) => {
@@ -24,6 +25,9 @@ const hasValidRobustWindow = (volume) => {
   const robustMax = Number(volume?.robust_max)
   return Number.isFinite(robustMin) && Number.isFinite(robustMax) && robustMax > robustMin
 }
+
+const THREE_D_CROSSHAIR_COLOR = [0.23, 0.56, 1.0, 1.0]
+const THREE_D_CROSSHAIR_MIN_WIDTH = 2
 
 const formatNumber = (value, digits = 1) => {
   const num = Number(value)
@@ -74,6 +78,9 @@ const Viewer = forwardRef(function Viewer(
   const annotationStepsRef = useRef([])
   const curvePlaneRef = useRef(null)
   const curveSliceIndexRef = useRef(null)
+  const focusedPlaneRef = useRef(null)
+  const [focusedPlane, setFocusedPlane] = useState(null)
+  const [canFocusPlanes, setCanFocusPlanes] = useState(false)
   const lastBrushVoxRef = useRef(null)
   const brushSizeRef = useRef(brushSize)
   const brushShapeRef = useRef(brushShape)
@@ -91,13 +98,20 @@ const Viewer = forwardRef(function Viewer(
   const brushStrokeDirtyRef = useRef(false)
   const drawRefreshPendingRef = useRef(false)
   const markerRedrawRafRef = useRef(null)
+  const markerDrawRafRef = useRef(null)
+  const lastLocationRefreshAtRef = useRef(0)
+  const refreshPerfRef = useRef({
+    emaMs: 0,
+    samples: 0,
+    lastEscalationAt: 0
+  })
   const suppressDrawingChangedRef = useRef(false)
   const freehandDrawingRef = useRef(false)
   const last2DTextureSliceRef = useRef(null)
   const MAX_MARKER_POINTS = 24000
   const MAX_FILL_POINTS = 32000
-  const FREEHAND_CONNECT_PX = 18
-  const FREEHAND_CLOSE_PX = 20
+  const FREEHAND_CONNECT_PX = 14
+  const FREEHAND_CLOSE_PX = 12
   const FREEHAND_SAMPLE_STEP_PX = 2.5
   const FREEHAND_OPEN_COLOR = '#db70db'
   imageKeyRef.current = image?.id ? String(image.id) : ''
@@ -232,7 +246,7 @@ const Viewer = forwardRef(function Viewer(
           return
         }
         markerRedrawRafRef.current = null
-        drawStrokeMarkers()
+        drawStrokeMarkers(true)
       })
     }
     run(waitFrames)
@@ -332,18 +346,54 @@ const Viewer = forwardRef(function Viewer(
     if (!nv) return
     const nowMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now())
     const startedAt = nowMs()
-    const budgetMs = Math.max(40, Math.min(100, Number(runtimeEnvRef.current?.refreshBudgetMs || 100)))
+    const runtimeEnv = runtimeEnvRef.current || {}
+    const refreshPolicy = runtimeEnv.refreshPolicy || {}
+    const configuredMaxTier = Math.max(1, Math.min(3, Number(refreshPolicy.maxTier || 1)))
+    const budgetMs = Math.max(40, Math.min(100, Number(runtimeEnv.refreshBudgetMs || 100)))
+    const perfState = refreshPerfRef.current || {
+      emaMs: 0,
+      samples: 0,
+      lastEscalationAt: 0
+    }
+    let effectiveMaxTier = configuredMaxTier
+    const emaMs = Number(perfState.emaMs || 0)
+    if (emaMs > 32) {
+      effectiveMaxTier = 1
+    } else if (emaMs > 20) {
+      effectiveMaxTier = Math.min(effectiveMaxTier, 2)
+    }
+    const escalationCooldownMs = Math.max(20, Number(refreshPolicy.escalationCooldownMs || 80))
+    const canEscalateNow = nowMs() - Number(perfState.lastEscalationAt || 0) >= escalationCooldownMs
+    const finalizeTelemetry = (strategy) => {
+      const durationMs = Math.round((nowMs() - startedAt) * 100) / 100
+      const prev = refreshPerfRef.current || {
+        emaMs: 0,
+        samples: 0,
+        lastEscalationAt: 0
+      }
+      const prevEma = Number(prev.emaMs || 0)
+      const nextEma = prevEma > 0 ? prevEma * 0.8 + durationMs * 0.2 : durationMs
+      refreshPerfRef.current = {
+        ...prev,
+        emaMs: nextEma,
+        samples: Math.min(999, Number(prev.samples || 0) + 1)
+      }
+      refreshTelemetryRef.current.last = {
+        strategy,
+        durationMs,
+        budgetMs,
+        maxTier: configuredMaxTier,
+        effectiveMaxTier,
+        emaMs: Math.round(nextEma * 100) / 100,
+        on2DShader: !!nv.opts?.is2DSliceShader
+      }
+    }
     const dims = nv.back?.dims
     if (!hasRefreshableDrawingBitmap(nv)) {
       if (typeof nv.drawScene === 'function') {
         nv.drawScene()
       }
-      refreshTelemetryRef.current.last = {
-        strategy: ['draw-scene-only'],
-        durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
-        budgetMs,
-        on2DShader: !!nv.opts?.is2DSliceShader
-      }
+      finalizeTelemetry(['draw-scene-only'])
       return
     }
     const pickAxis = nv.opts?.is2DSliceShader ? 2 : (Number.isInteger(fixedAxis) ? Number(fixedAxis) : 2)
@@ -379,8 +429,7 @@ const Viewer = forwardRef(function Viewer(
       return true
     }
     const canEscalate = () => {
-      const webglTier = String(runtimeEnvRef.current?.webgl?.tier || '').toLowerCase()
-      return !!nv.opts?.is2DSliceShader || webglTier === 'low' || webglTier === 'fallback'
+      return !!nv.opts?.is2DSliceShader && effectiveMaxTier > 1 && canEscalateNow
     }
     const withinBudget = () => nowMs() - startedAt < budgetMs
     const tiers = []
@@ -390,44 +439,40 @@ const Viewer = forwardRef(function Viewer(
     redrawDrawingOverlaySilently()
     tiers.push('standard')
     if (!withinBudget() || !canEscalate()) {
-      refreshTelemetryRef.current.last = {
-        strategy: tiers,
-        durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
-        budgetMs,
-        on2DShader: !!nv.opts?.is2DSliceShader
-      }
+      finalizeTelemetry(tiers)
       return
     }
 
     // 2) 强制扰动刷新
-    if (dimLen > 1 && Number.isInteger(targetIndex)) {
-      const alt = targetIndex < dimLen - 1 ? targetIndex + 1 : targetIndex - 1
-      applyIndex(alt)
-      redrawDrawingOverlaySilently()
-      applyIndex(targetIndex)
-      redrawDrawingOverlaySilently()
-      tiers.push('perturb')
-    } else if (Array.isArray(nv.scene?.crosshairPos)) {
-      const prev = Number(nv.scene.crosshairPos[2] || 0)
-      const nudged = Math.max(0, Math.min(1, prev + 1e-4))
-      nv.scene.crosshairPos[2] = nudged
-      redrawDrawingOverlaySilently()
-      nv.scene.crosshairPos[2] = prev
-      redrawDrawingOverlaySilently()
-      tiers.push('perturb')
-    }
-    if (!withinBudget()) {
-      refreshTelemetryRef.current.last = {
-        strategy: tiers,
-        durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
-        budgetMs,
-        on2DShader: !!nv.opts?.is2DSliceShader
+    if (effectiveMaxTier >= 2) {
+      if (dimLen > 1 && Number.isInteger(targetIndex)) {
+        const alt = targetIndex < dimLen - 1 ? targetIndex + 1 : targetIndex - 1
+        applyIndex(alt)
+        redrawDrawingOverlaySilently()
+        applyIndex(targetIndex)
+        redrawDrawingOverlaySilently()
+        tiers.push('perturb')
+      } else if (Array.isArray(nv.scene?.crosshairPos)) {
+        const prev = Number(nv.scene.crosshairPos[2] || 0)
+        const nudged = Math.max(0, Math.min(1, prev + 1e-4))
+        nv.scene.crosshairPos[2] = nudged
+        redrawDrawingOverlaySilently()
+        nv.scene.crosshairPos[2] = prev
+        redrawDrawingOverlaySilently()
+        tiers.push('perturb')
       }
+      refreshPerfRef.current = {
+        ...(refreshPerfRef.current || perfState),
+        lastEscalationAt: nowMs()
+      }
+    }
+    if (!withinBudget() || effectiveMaxTier < 3) {
+      finalizeTelemetry(tiers)
       return
     }
 
     // 3) 模拟切片切换刷新
-    if (dimLen > 1 && Number.isInteger(targetIndex)) {
+    if (effectiveMaxTier >= 3 && dimLen > 1 && Number.isInteger(targetIndex)) {
       const alt = targetIndex > 0 ? targetIndex - 1 : targetIndex + 1
       applyIndex(alt)
       redrawDrawingOverlaySilently()
@@ -435,13 +480,7 @@ const Viewer = forwardRef(function Viewer(
       redrawDrawingOverlaySilently()
       tiers.push('simulated-slice-switch')
     }
-
-    refreshTelemetryRef.current.last = {
-      strategy: tiers,
-      durationMs: Math.round((nowMs() - startedAt) * 100) / 100,
-      budgetMs,
-      on2DShader: !!nv.opts?.is2DSliceShader
-    }
+    finalizeTelemetry(tiers)
   }
 
   const ensureDrawingBitmap = () => {
@@ -768,7 +807,7 @@ const Viewer = forwardRef(function Viewer(
     ctx.restore()
   }
 
-  const drawStrokeMarkers = () => {
+  const drawStrokeMarkersNow = () => {
     const markerCanvas = markerCanvasRef.current
     if (!markerCanvas) return
     const ctx = markerCanvas.getContext('2d')
@@ -823,6 +862,22 @@ const Viewer = forwardRef(function Viewer(
       ctx.stroke()
     }
     // freehand 草稿仅保留线条本身：未闭合粉紫、接近/闭合时按标签色（通常红色）
+  }
+
+  const drawStrokeMarkers = (immediate = false) => {
+    if (immediate) {
+      if (markerDrawRafRef.current !== null) {
+        cancelAnimationFrame(markerDrawRafRef.current)
+        markerDrawRafRef.current = null
+      }
+      drawStrokeMarkersNow()
+      return
+    }
+    if (markerDrawRafRef.current !== null) return
+    markerDrawRafRef.current = requestAnimationFrame(() => {
+      markerDrawRafRef.current = null
+      drawStrokeMarkersNow()
+    })
   }
 
   const maybeFillClosedStroke = () => {
@@ -1196,11 +1251,78 @@ const Viewer = forwardRef(function Viewer(
     return true
   }
 
+  const normalizeFocusPlane = (planeKey) => {
+    const key = String(planeKey || '').trim().toUpperCase()
+    return FOCUS_PLANES.includes(key) ? key : null
+  }
+
+  const setSliceTypeForPlane = (planeKey) => {
+    const nv = nvRef.current
+    if (!nv || typeof nv.setSliceType !== 'function') return false
+    const key = normalizeFocusPlane(planeKey)
+    if (key === 'A') {
+      nv.setSliceType(nv.sliceTypeAxial)
+      return true
+    }
+    if (key === 'S') {
+      nv.setSliceType(nv.sliceTypeSagittal)
+      return true
+    }
+    if (key === 'C') {
+      nv.setSliceType(nv.sliceTypeCoronal)
+      return true
+    }
+    if (nv?.opts) {
+      nv.opts.multiplanarShowRender = 1
+      nv.opts.multiplanarLayout = 2
+    }
+    nv.setSliceType(nv.sliceTypeMultiplanar)
+    return true
+  }
+
+  const zoomToFitInternal = () => {
+    const nv = nvRef.current
+    if (!nv) return false
+    const defaultPan2D = [0, 0, 0, 1]
+    if (typeof nv.setPan2Dxyzmm === 'function') {
+      nv.setPan2Dxyzmm(defaultPan2D)
+    } else if (nv.scene) {
+      nv.scene.pan2Dxyzmm = [...defaultPan2D]
+      if (typeof nv.drawScene === 'function') {
+        nv.drawScene()
+      }
+    } else {
+      return false
+    }
+    requestAnimationFrame(() => {
+      redrawDrawingOverlaySilently()
+      drawStrokeMarkers()
+    })
+    return true
+  }
+
+  const toggleFocusPlaneInternal = (planeKey) => {
+    const normalized = normalizeFocusPlane(planeKey)
+    if (normalized && !canFocusPlanes) return focusedPlaneRef.current
+    const next = focusedPlaneRef.current === normalized ? null : normalized
+    focusedPlaneRef.current = next
+    setFocusedPlane(next)
+    setSliceTypeForPlane(next)
+    requestAnimationFrame(() => {
+      redrawDrawingOverlaySilently()
+      drawStrokeMarkers()
+    })
+    return next
+  }
+
   useImperativeHandle(ref, () => ({
     refreshOverlay: () => {
       drawStrokeMarkers()
       return true
     },
+    toggleFocusPlane: (planeKey) => toggleFocusPlaneInternal(planeKey),
+    getFocusedPlane: () => focusedPlaneRef.current,
+    zoomToFit: () => zoomToFitInternal(),
     undoToolAction: () => {
       const currentImageKey = getImageKey()
       if (!currentImageKey) return false
@@ -1381,7 +1503,18 @@ const Viewer = forwardRef(function Viewer(
       nvRef.current.attachToCanvas(canvasRef.current)
       const nv = nvRef.current
       if (nv?.opts?.crosshairWidth !== undefined) {
-        crosshairWidthRef.current = nv.opts.crosshairWidth
+        const baseWidth = Number(nv.opts.crosshairWidth || 1)
+        crosshairWidthRef.current = Math.max(THREE_D_CROSSHAIR_MIN_WIDTH, baseWidth)
+      } else {
+        crosshairWidthRef.current = THREE_D_CROSSHAIR_MIN_WIDTH
+      }
+      if (typeof nv?.setCrosshairColor === 'function') {
+        nv.setCrosshairColor([...THREE_D_CROSSHAIR_COLOR])
+      } else if (nv?.opts) {
+        nv.opts.crosshairColor = [...THREE_D_CROSSHAIR_COLOR]
+      }
+      if (typeof nv?.setCrosshairWidth === 'function' && Number.isFinite(crosshairWidthRef.current)) {
+        nv.setCrosshairWidth(crosshairWidthRef.current)
       }
       const originalMouseClick = nv.mouseClick?.bind(nv)
       if (originalMouseClick) {
@@ -1487,7 +1620,15 @@ const Viewer = forwardRef(function Viewer(
         if (nv.opts?.is2DSliceShader && hasRefreshableDrawingBitmap(nv)) {
           const current2DSlice = getCurrent2DShaderSliceIndex(nv)
           if (Number.isInteger(current2DSlice) && current2DSlice !== last2DTextureSliceRef.current) {
-            requestDrawingRefresh()
+            const now = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
+            const minInterval = Math.max(
+              20,
+              Number(runtimeEnvRef.current?.refreshPolicy?.locationRefreshMinIntervalMs || 48)
+            )
+            if (now - Number(lastLocationRefreshAtRef.current || 0) >= minInterval) {
+              lastLocationRefreshAtRef.current = now
+              requestDrawingRefresh()
+            }
           }
         }
         scheduleMarkerRedraw(1)
@@ -1544,6 +1685,7 @@ const Viewer = forwardRef(function Viewer(
     brushStrokeDirtyRef.current = false
     freehandDrawingRef.current = false
     last2DTextureSliceRef.current = null
+    lastLocationRefreshAtRef.current = 0
     drawStrokeMarkers()
   }, [tool])
 
@@ -1552,6 +1694,10 @@ const Viewer = forwardRef(function Viewer(
       if (markerRedrawRafRef.current !== null) {
         cancelAnimationFrame(markerRedrawRafRef.current)
         markerRedrawRafRef.current = null
+      }
+      if (markerDrawRafRef.current !== null) {
+        cancelAnimationFrame(markerDrawRafRef.current)
+        markerDrawRafRef.current = null
       }
     },
     []
@@ -1572,6 +1718,7 @@ const Viewer = forwardRef(function Viewer(
     brushStrokeDirtyRef.current = false
     freehandDrawingRef.current = false
     last2DTextureSliceRef.current = null
+    lastLocationRefreshAtRef.current = 0
     drawStrokeMarkers()
   }, [image?.id])
 
@@ -1691,15 +1838,19 @@ const Viewer = forwardRef(function Viewer(
       const sourceName = image?.displayName || image?.name
       const isRaster2D = isRasterImageName(sourceName)
       if (is2D) {
+        if (cancelled) return
+        setCanFocusPlanes(false)
+        focusedPlaneRef.current = null
+        setFocusedPlane(null)
         nv.setRadiologicalConvention(isRaster2D ? true : !!radiological2D)
         nv.setSliceType(nv.sliceTypeAxial)
       } else {
-        if (nv?.opts) {
-          // 固定四视图布局，降低不同机器上自动布局策略导致的显示差异。
-          nv.opts.multiplanarShowRender = 1
-          nv.opts.multiplanarLayout = 2
-        }
-        nv.setSliceType(nv.sliceTypeMultiplanar)
+        if (cancelled) return
+        setCanFocusPlanes(true)
+        const preferredPlane = normalizeFocusPlane(focusedPlaneRef.current)
+        focusedPlaneRef.current = preferredPlane
+        setFocusedPlane(preferredPlane)
+        setSliceTypeForPlane(preferredPlane)
       }
 
       if (image.isMaskOnly) {
@@ -1812,14 +1963,9 @@ const Viewer = forwardRef(function Viewer(
           if (nextSteps.length === 0) {
             nextSteps = [norm]
           } else {
-            const first = nextSteps[0]
             const last = nextSteps[nextSteps.length - 1]
             const distToLast = pointDistancePx(last, norm, markerCanvas)
-            const distToFirst = pointDistancePx(first, norm, markerCanvas)
-            if (distToFirst <= FREEHAND_CONNECT_PX && nextSteps.length > 2) {
-              // 在起点附近续画时，直接从起点接入，便于快速闭合
-              nextSteps = [...nextSteps, first]
-            } else if (distToLast > FREEHAND_CONNECT_PX) {
+            if (distToLast > FREEHAND_CONNECT_PX) {
               // 在终点附近之外下笔时，自动连线到新的落笔点
               nextSteps = [...nextSteps, norm]
             }
@@ -1937,14 +2083,7 @@ const Viewer = forwardRef(function Viewer(
         const dist = pointDistancePx(last, norm, markerCanvas)
         if (dist < FREEHAND_SAMPLE_STEP_PX) return
 
-        let next = [...current, norm]
-        if (next.length > 2) {
-          const first = next[0]
-          const tail = next[next.length - 1]
-          if (pointDistancePx(first, tail, markerCanvas) <= FREEHAND_CLOSE_PX) {
-            next[next.length - 1] = first
-          }
-        }
+        const next = [...current, norm]
         annotationStepsRef.current = compactPoints(next, MAX_MARKER_POINTS)
         const nearClosed =
           annotationStepsRef.current.length > 2 &&
@@ -2207,10 +2346,47 @@ const Viewer = forwardRef(function Viewer(
     }
   }, [])
 
+  const showQuadGap = !!image && canFocusPlanes && !focusedPlane
+  const canShowPlaneSwitch = !!image && canFocusPlanes
+  const zoomToFitDisabled = isAnnotationTool(tool)
+
   return (
     <div className="viewer-container">
       <canvas ref={canvasRef} className="viewer-canvas" />
       <canvas ref={markerCanvasRef} className="viewer-marker-canvas" />
+      {showQuadGap && <div className="viewer-quad-gap" aria-hidden="true" />}
+      {canShowPlaneSwitch && (
+        <>
+          <div className="viewer-plane-switch" role="group" aria-label="视口切换">
+            {FOCUS_PLANES.map((plane) => {
+              const active = focusedPlane === plane
+              return (
+                <button
+                  key={plane}
+                  type="button"
+                  className={`viewer-plane-btn${active ? ' active' : ''}`}
+                  onClick={() => toggleFocusPlaneInternal(plane)}
+                  title={active ? '返回四视口' : `切换 ${plane} 到主视口`}
+                  aria-label={active ? `返回四视口（当前 ${plane}）` : `切换 ${plane} 到主视口`}
+                >
+                  {active ? '▣' : plane}
+                </button>
+              )
+            })}
+          </div>
+          <div className="viewer-fit-controls">
+            <button
+              type="button"
+              className="viewer-fit-btn"
+              onClick={() => zoomToFitInternal()}
+              disabled={zoomToFitDisabled}
+              title={zoomToFitDisabled ? '退出标注工具后可用' : '恢复完整视图'}
+            >
+              zoom to fit
+            </button>
+          </div>
+        </>
+      )}
       {!image && <div className="empty">上传 .nii/.nii.gz 或 .zip 开始</div>}
     </div>
   )

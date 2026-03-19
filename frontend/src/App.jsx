@@ -55,11 +55,20 @@ const detectBrowserRuntimeEnv = () => {
   const nav = typeof navigator !== 'undefined' ? navigator : {}
   const hasWindow = typeof window !== 'undefined'
   const hasDocument = typeof document !== 'undefined'
+  const userAgent = String(nav?.userAgent || '')
+  const platform = String(nav?.platform || '')
+  const isWindows = /win/i.test(platform) || /windows/i.test(userAgent)
+  const isMac = /mac/i.test(platform) || /mac os/i.test(userAgent)
+  const isLinux = !isWindows && !isMac && (/linux/i.test(platform) || /linux/i.test(userAgent))
   const base = {
     detectedAt: Date.now(),
     browser: {
-      userAgent: String(nav?.userAgent || ''),
-      platform: String(nav?.platform || ''),
+      userAgent,
+      platform,
+      os: isWindows ? 'windows' : isMac ? 'macos' : isLinux ? 'linux' : 'unknown',
+      isWindows,
+      isMac,
+      isLinux,
       language: String(nav?.language || ''),
       languages: Array.isArray(nav?.languages) ? nav.languages : [],
       hardwareConcurrency: Number(nav?.hardwareConcurrency || 0),
@@ -82,7 +91,12 @@ const detectBrowserRuntimeEnv = () => {
       max3DTextureSize: 0,
       majorPerformanceCaveat: false
     },
-    refreshBudgetMs: 100
+    refreshBudgetMs: 100,
+    refreshPolicy: {
+      maxTier: 1,
+      locationRefreshMinIntervalMs: 80,
+      escalationCooldownMs: 120
+    }
   }
   if (!hasWindow || !hasDocument) return base
 
@@ -118,6 +132,16 @@ const detectBrowserRuntimeEnv = () => {
   if (majorPerformanceCaveat || softwareLike || maxTextureSize < 4096) tier = 'low'
   else if (isWebgl2 && maxTextureSize >= 8192 && max3DTextureSize >= 2048) tier = 'high'
   const refreshBudgetMs = tier === 'high' ? 80 : tier === 'medium' ? 90 : 100
+  let maxTier = tier === 'high' ? 3 : tier === 'medium' ? 2 : 1
+  if (isWindows) {
+    // Windows/ANGLE 在 2D 频繁刷新上更容易卡顿，默认限制到二级刷新。
+    maxTier = Math.min(maxTier, 2)
+  }
+  const refreshPolicy = {
+    maxTier,
+    locationRefreshMinIntervalMs: maxTier >= 3 ? 34 : maxTier >= 2 ? 48 : 72,
+    escalationCooldownMs: maxTier >= 3 ? 40 : maxTier >= 2 ? 75 : 120
+  }
 
   const lose = gl.getExtension('WEBGL_lose_context')
   lose?.loseContext?.()
@@ -136,7 +160,8 @@ const detectBrowserRuntimeEnv = () => {
       max3DTextureSize,
       majorPerformanceCaveat
     },
-    refreshBudgetMs
+    refreshBudgetMs,
+    refreshPolicy
   }
 }
 
