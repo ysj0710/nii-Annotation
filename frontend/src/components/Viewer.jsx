@@ -92,7 +92,6 @@ const Viewer = forwardRef(function Viewer(
   const refreshTelemetryRef = useRef({
     last: null
   })
-  const contentAwarePanRef = useRef([0, 0, 0])
   const brushStrokeDirtyRef = useRef(false)
   const drawRefreshPendingRef = useRef(false)
   const markerRedrawRafRef = useRef(null)
@@ -243,6 +242,38 @@ const Viewer = forwardRef(function Viewer(
     return parts.join(' ')
   }
 
+  const cloneMat4Like = (matrix) => {
+    if (Array.isArray(matrix)) return [...matrix]
+    if (ArrayBuffer.isView(matrix)) return Array.from(matrix)
+    return [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1
+    ]
+  }
+
+  const getVoxelDisplayOrthoInfo = (volume) => {
+    const dimsRAS = Array.isArray(volume?.dimsRAS) ? volume.dimsRAS : null
+    const pixDimsRAS = Array.isArray(volume?.pixDimsRAS) ? volume.pixDimsRAS : null
+    const nx = safeInt(dimsRAS?.[1], 0)
+    const ny = safeInt(dimsRAS?.[2], 0)
+    const nz = safeInt(dimsRAS?.[3], 0)
+    const pixX = Number(pixDimsRAS?.[1] ?? NaN)
+    const pixY = Number(pixDimsRAS?.[2] ?? NaN)
+    const pixZ = Number(pixDimsRAS?.[3] ?? NaN)
+    if (nx < 1 || ny < 1 || nz < 1) return null
+    if (!Number.isFinite(pixX) || !Number.isFinite(pixY) || !Number.isFinite(pixZ)) return null
+    return {
+      nx,
+      ny,
+      nz,
+      pixX,
+      pixY,
+      pixZ
+    }
+  }
+
   const getOrientationInfo = () => {
     const nv = nvRef.current
     const vol = nv?.volumes?.[0]
@@ -272,7 +303,7 @@ const Viewer = forwardRef(function Viewer(
       permRAS: Array.isArray(vol?.permRAS) ? vol.permRAS.map((v) => safeInt(v, 0)) : null,
       dimsRAS: Array.isArray(vol?.dimsRAS) ? vol.dimsRAS.map((v) => safeInt(v, 0)) : null,
       pixDimsRAS: Array.isArray(vol?.pixDimsRAS)
-        ? [toFixedNum(vol.pixDimsRAS[0], 5), toFixedNum(vol.pixDimsRAS[1], 5), toFixedNum(vol.pixDimsRAS[2], 5)]
+        ? [toFixedNum(vol.pixDimsRAS[1], 5), toFixedNum(vol.pixDimsRAS[2], 5), toFixedNum(vol.pixDimsRAS[3], 5)]
         : null,
       affineDet: toFixedNum(det, 6),
       axisSignature: inferAxisSignature(affine),
@@ -327,6 +358,62 @@ const Viewer = forwardRef(function Viewer(
     }
   }
 
+  const normalizeVolumeDisplayOrthoForVoxelSpace = (volume, context = 'base') => {
+    const orthoInfo = getVoxelDisplayOrthoInfo(volume)
+    if (!orthoInfo) return null
+    const { nx, ny, nz, pixX, pixY, pixZ } = orthoInfo
+    const scaleX = pixX * nx
+    const scaleY = pixY * ny
+    const scaleZ = pixZ * nz
+    const translateX = -0.5 * pixX
+    const translateY = -0.5 * pixY
+    const translateZ = -0.5 * pixZ
+    const nextOrtho = cloneMat4Like(volume?.frac2mmOrtho)
+    const before = {
+      extentsMinOrtho: Array.isArray(volume?.extentsMinOrtho) ? volume.extentsMinOrtho.map((v) => toFixedNum(v, 5)) : null,
+      extentsMaxOrtho: Array.isArray(volume?.extentsMaxOrtho) ? volume.extentsMaxOrtho.map((v) => toFixedNum(v, 5)) : null,
+      frac2mmOrtho: Array.isArray(volume?.frac2mmOrtho) || ArrayBuffer.isView(volume?.frac2mmOrtho)
+        ? [toFixedNum(volume.frac2mmOrtho[0], 5), toFixedNum(volume.frac2mmOrtho[5], 5), toFixedNum(volume.frac2mmOrtho[10], 5), toFixedNum(volume.frac2mmOrtho[12], 5), toFixedNum(volume.frac2mmOrtho[13], 5), toFixedNum(volume.frac2mmOrtho[14], 5)]
+        : null
+    }
+    nextOrtho[0] = scaleX
+    nextOrtho[1] = 0
+    nextOrtho[2] = 0
+    nextOrtho[3] = 0
+    nextOrtho[4] = 0
+    nextOrtho[5] = scaleY
+    nextOrtho[6] = 0
+    nextOrtho[7] = 0
+    nextOrtho[8] = 0
+    nextOrtho[9] = 0
+    nextOrtho[10] = scaleZ
+    nextOrtho[11] = 0
+    nextOrtho[12] = translateX
+    nextOrtho[13] = translateY
+    nextOrtho[14] = translateZ
+    nextOrtho[15] = 1
+    volume.frac2mmOrtho = nextOrtho
+    volume.extentsMinOrtho = [translateX, translateY, translateZ]
+    volume.extentsMaxOrtho = [translateX + scaleX, translateY + scaleY, translateZ + scaleZ]
+    console.info('[ViewerFix] normalized-ortho-display', {
+      context,
+      imageName: image?.displayName || image?.name || '',
+      dimsRAS: [nx, ny, nz],
+      pixDimsRAS: [toFixedNum(pixX, 5), toFixedNum(pixY, 5), toFixedNum(pixZ, 5)],
+      before,
+      after: {
+        extentsMinOrtho: volume.extentsMinOrtho.map((v) => toFixedNum(v, 5)),
+        extentsMaxOrtho: volume.extentsMaxOrtho.map((v) => toFixedNum(v, 5)),
+        frac2mmOrtho: [toFixedNum(nextOrtho[0], 5), toFixedNum(nextOrtho[5], 5), toFixedNum(nextOrtho[10], 5), toFixedNum(nextOrtho[12], 5), toFixedNum(nextOrtho[13], 5), toFixedNum(nextOrtho[14], 5)]
+      }
+    })
+    return {
+      context,
+      dimsRAS: [nx, ny, nz],
+      pixDimsRAS: [pixX, pixY, pixZ]
+    }
+  }
+
   const getWindowInfo = () => {
     const nv = nvRef.current
     const vol = nv?.volumes?.[0]
@@ -347,91 +434,6 @@ const Viewer = forwardRef(function Viewer(
       calMax: toFixedNum(calMax, 2),
       ww: toFixedNum(ww, 2),
       wl: toFixedNum(wl, 2)
-    }
-  }
-
-  const computeContentBounds = (volume) => {
-    const hdrDims = volume?.hdr?.dims
-    const nx = safeInt(hdrDims?.[1], 0)
-    const ny = safeInt(hdrDims?.[2], 0)
-    const nz = safeInt(hdrDims?.[3], 0)
-    const img = volume?.img
-    if (!img || nx < 1 || ny < 1 || nz < 1) return null
-
-    const slope = Number(volume?.hdr?.scl_slope || 0) === 0 ? 1 : Number(volume?.hdr?.scl_slope || 1)
-    const inter = Number(volume?.hdr?.scl_inter || 0)
-    const globalMin = Number(volume?.global_min)
-    const globalMax = Number(volume?.global_max)
-    const calMin = Number(volume?.cal_min)
-    const range = Number.isFinite(globalMax - globalMin) && globalMax > globalMin ? globalMax - globalMin : 0
-    const baseThreshold = Number.isFinite(calMin) ? Math.max(-350, calMin - 180) : Math.max(-350, globalMin + range * 0.12)
-    const threshold = Number.isFinite(baseThreshold) ? baseThreshold : -350
-
-    const stepX = nx > 384 ? 2 : 1
-    const stepY = ny > 384 ? 2 : 1
-    const stepZ = nz > 96 ? 2 : 1
-    const xy = nx * ny
-    let minX = nx
-    let minY = ny
-    let minZ = nz
-    let maxX = -1
-    let maxY = -1
-    let maxZ = -1
-
-    for (let z = 0; z < nz; z += stepZ) {
-      const zOffset = z * xy
-      for (let y = 0; y < ny; y += stepY) {
-        const rowOffset = zOffset + y * nx
-        for (let x = 0; x < nx; x += stepX) {
-          const raw = Number(img[rowOffset + x] || 0)
-          const value = raw * slope + inter
-          if (!Number.isFinite(value) || value < threshold) continue
-          if (x < minX) minX = x
-          if (y < minY) minY = y
-          if (z < minZ) minZ = z
-          if (x > maxX) maxX = x
-          if (y > maxY) maxY = y
-          if (z > maxZ) maxZ = z
-        }
-      }
-    }
-
-    if (maxX < minX || maxY < minY || maxZ < minZ) return null
-    return {
-      minX: Math.max(0, minX - stepX),
-      maxX: Math.min(nx - 1, maxX + stepX),
-      minY: Math.max(0, minY - stepY),
-      maxY: Math.min(ny - 1, maxY + stepY),
-      minZ: Math.max(0, minZ - stepZ),
-      maxZ: Math.min(nz - 1, maxZ + stepZ),
-      threshold: toFixedNum(threshold, 2)
-    }
-  }
-
-  const computeContentAwarePan = (volume) => {
-    const hdrDims = volume?.hdr?.dims
-    const nx = safeInt(hdrDims?.[1], 0)
-    const ny = safeInt(hdrDims?.[2], 0)
-    const nz = safeInt(hdrDims?.[3], 0)
-    if (nx < 1 || ny < 1 || nz < 1) return { pan: [0, 0, 0], bounds: null }
-    const bounds = computeContentBounds(volume)
-    if (!bounds) return { pan: [0, 0, 0], bounds: null }
-
-    const volumeCenter = [(nx - 1) * 0.5, (ny - 1) * 0.5, (nz - 1) * 0.5]
-    const contentCenter = [
-      (bounds.minX + bounds.maxX) * 0.5,
-      (bounds.minY + bounds.maxY) * 0.5,
-      (bounds.minZ + bounds.maxZ) * 0.5
-    ]
-    const maxShift = [nx * 0.12, ny * 0.12, nz * 0.2]
-    const pan = volumeCenter.map((center, index) => {
-      const delta = center - contentCenter[index]
-      const limit = maxShift[index]
-      return Math.max(-limit, Math.min(limit, delta))
-    })
-    return {
-      pan: [toFixedNum(pan[0], 3), toFixedNum(pan[1], 3), toFixedNum(pan[2], 3)],
-      bounds
     }
   }
 
@@ -456,6 +458,7 @@ const Viewer = forwardRef(function Viewer(
     const nv = nvRef.current
     if (!nv) return
     const canvas = canvasRef.current
+    const volume = nv?.volumes?.[0]
     const pan = Array.isArray(nv?.scene?.pan2Dxyzmm) ? nv.scene.pan2Dxyzmm : []
     const crosshair = Array.isArray(nv?.scene?.crosshairPos) ? nv.scene.crosshairPos : []
     const dims = nv?.back?.dims
@@ -480,10 +483,14 @@ const Viewer = forwardRef(function Viewer(
         tileMargin: nv?.opts?.tileMargin,
         fontPx: toFixedNum(nv?.fontPx, 2)
       },
-      contentAwarePan: Array.isArray(contentAwarePanRef.current)
-        ? contentAwarePanRef.current.map((v) => toFixedNum(v, 3))
-        : null,
       orientation: getOrientationInfo(),
+      orthoDisplay: {
+        extentsMinOrtho: Array.isArray(volume?.extentsMinOrtho) ? volume.extentsMinOrtho.map((v) => toFixedNum(v, 5)) : null,
+        extentsMaxOrtho: Array.isArray(volume?.extentsMaxOrtho) ? volume.extentsMaxOrtho.map((v) => toFixedNum(v, 5)) : null,
+        frac2mmOrtho: Array.isArray(volume?.frac2mmOrtho) || ArrayBuffer.isView(volume?.frac2mmOrtho)
+          ? [toFixedNum(volume.frac2mmOrtho[0], 5), toFixedNum(volume.frac2mmOrtho[5], 5), toFixedNum(volume.frac2mmOrtho[10], 5), toFixedNum(volume.frac2mmOrtho[12], 5), toFixedNum(volume.frac2mmOrtho[13], 5), toFixedNum(volume.frac2mmOrtho[14], 5)]
+          : null
+      },
       window: windowInfo,
       windowSource: extra?.windowSource || null,
       tiles
@@ -1607,24 +1614,27 @@ const Viewer = forwardRef(function Viewer(
     const cssWidth = Math.max(1, Number(rect?.width || canvas.clientWidth || 1))
     const cssHeight = Math.max(1, Number(rect?.height || canvas.clientHeight || 1))
     const fontPx = Math.max(11, Math.ceil(Number(nv?.fontPx || 12)))
-    const outerX = Math.max(14, Math.min(22, Math.round(fontPx * 1.15)))
-    const outerTop = Math.max(14, Math.min(24, Math.round(fontPx * 1.05)))
-    const outerBottom = Math.max(18, Math.min(28, Math.round(fontPx * 1.5)))
-    const gapX = Math.max(26, Math.min(42, Math.round(fontPx * 2.1)))
-    const gapY = Math.max(34, Math.min(54, Math.round(fontPx * 2.75)))
+    const outerX = Math.max(16, Math.min(24, Math.round(fontPx * 1.2)))
+    const outerTop = Math.max(12, Math.min(18, Math.round(fontPx * 0.95)))
+    const outerBottom = Math.max(16, Math.min(24, Math.round(fontPx * 1.35)))
+    const gapX = Math.max(24, Math.min(36, Math.round(fontPx * 1.9)))
+    const gapY = Math.max(22, Math.min(34, Math.round(fontPx * 1.8)))
     const tileWidth = Math.max(120, (cssWidth - outerX * 2 - gapX) / 2)
-    const tileHeight = Math.max(120, (cssHeight - outerTop - outerBottom - gapY) / 2)
+    const totalTileHeight = Math.max(260, cssHeight - outerTop - outerBottom - gapY)
+    const topTileHeight = Math.max(130, Math.round(totalTileHeight * 0.56))
+    const bottomTileHeight = Math.max(120, totalTileHeight - topTileHeight)
     const left = outerX / cssWidth
     const top = outerTop / cssHeight
     const width = tileWidth / cssWidth
-    const height = tileHeight / cssHeight
+    const topHeight = topTileHeight / cssHeight
+    const bottomTop = (outerTop + topTileHeight + gapY) / cssHeight
+    const bottomHeight = bottomTileHeight / cssHeight
     const gapWidth = gapX / cssWidth
-    const gapHeight = gapY / cssHeight
     return [
-      { sliceType: nv.sliceTypeCoronal, position: [left, top, width, height] },
-      { sliceType: nv.sliceTypeSagittal, position: [left + width + gapWidth, top, width, height] },
-      { sliceType: nv.sliceTypeAxial, position: [left, top + height + gapHeight, width, height] },
-      { sliceType: nv.sliceTypeRender, position: [left + width + gapWidth, top + height + gapHeight, width, height] }
+      { sliceType: nv.sliceTypeCoronal, position: [left, top, width, topHeight] },
+      { sliceType: nv.sliceTypeSagittal, position: [left + width + gapWidth, top, width, topHeight] },
+      { sliceType: nv.sliceTypeAxial, position: [left, bottomTop, width, bottomHeight] },
+      { sliceType: nv.sliceTypeRender, position: [left + width + gapWidth, bottomTop, width, bottomHeight] }
     ]
   }
 
@@ -1703,8 +1713,7 @@ const Viewer = forwardRef(function Viewer(
     const nv = nvRef.current
     if (!nv?.scene) return
     // 四窗统一 fit：中心对齐 + 轻微安全缩放，避免边界裁切和跨影像表现不一致。
-    const contentPan = Array.isArray(contentAwarePanRef.current) ? contentAwarePanRef.current : [0, 0, 0]
-    const next = [Number(contentPan[0] || 0), Number(contentPan[1] || 0), Number(contentPan[2] || 0), 0.96]
+    const next = [0, 0, 0, 0.95]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
@@ -2211,7 +2220,6 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => {
     // 切换影像时清空临时态，避免上一张的草稿/轨迹残留到下一张。
     imageKeyRef.current = image?.id ? String(image.id) : ''
-    contentAwarePanRef.current = [0, 0, 0]
     annotationDraftRef.current = null
     annotationStepsRef.current = []
     curvePlaneRef.current = null
@@ -2306,13 +2314,6 @@ const Viewer = forwardRef(function Viewer(
       })
       if (cancelled) return
       normalizeVolumeOrientationFromQform(nextVolume, 'base')
-      const contentAwareFit = computeContentAwarePan(nextVolume)
-      contentAwarePanRef.current = Array.isArray(contentAwareFit?.pan) ? contentAwareFit.pan : [0, 0, 0]
-      console.info('[ViewerFix] content-aware-fit', {
-        imageName: image?.displayName || image?.name || '',
-        pan: contentAwarePanRef.current,
-        bounds: contentAwareFit?.bounds || null
-      })
 
       historyRef.current = { stack: [], index: -1 }
       actionHistoryRef.current = []
@@ -2332,6 +2333,7 @@ const Viewer = forwardRef(function Viewer(
       }
 
       const baseVolume = nv.volumes?.[0]
+      normalizeVolumeDisplayOrthoForVoxelSpace(baseVolume, 'base')
       const sourceName = image?.displayName || image?.sourceName || image?.name
       const windowRange =
         baseVolume && !image.isMaskOnly
@@ -2423,6 +2425,7 @@ const Viewer = forwardRef(function Viewer(
           })
           if (cancelled) return
           normalizeVolumeOrientationFromQform(maskVolume, 'mask')
+          normalizeVolumeDisplayOrthoForVoxelSpace(maskVolume, 'mask')
           nv.loadDrawing(maskVolume)
           redrawDrawingOverlay()
         }
