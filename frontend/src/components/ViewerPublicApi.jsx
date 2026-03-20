@@ -275,6 +275,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const markerDrawRafRef = useRef(null)
   const drawRefreshPendingRef = useRef(false)
   const pendingDrawRefreshPayloadRef = useRef(null)
+  const paneLayoutSyncRafRef = useRef(null)
   const crosshairSyncRafRef = useRef(null)
   const pendingCrosshairSyncRef = useRef(null)
   const syncingLocationRef = useRef(false)
@@ -954,6 +955,32 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return true
   }
 
+  const syncPaneLayoutNow = (paneKey) => {
+    const nv = getPaneNv(paneKey)
+    if (!nv) return false
+    nv.resizeListener?.()
+    syncMarkerCanvasSize(paneKey)
+    applyPaneBounds(paneKey)
+    nv.drawScene?.()
+    return true
+  }
+
+  const schedulePaneLayoutSync = (paneKeys = getVisiblePaneKeys(), { redrawMarkers = true } = {}) => {
+    const targetKeys = Array.isArray(paneKeys) ? paneKeys.filter((key) => !!getPaneNv(key)) : getVisiblePaneKeys()
+    if (!targetKeys.length) return
+    if (paneLayoutSyncRafRef.current !== null) {
+      cancelAnimationFrame(paneLayoutSyncRafRef.current)
+      paneLayoutSyncRafRef.current = null
+    }
+    paneLayoutSyncRafRef.current = requestAnimationFrame(() => {
+      paneLayoutSyncRafRef.current = requestAnimationFrame(() => {
+        paneLayoutSyncRafRef.current = null
+        for (const key of targetKeys) syncPaneLayoutNow(key)
+        if (redrawMarkers) drawStrokeMarkers(true)
+      })
+    })
+  }
+
   const withTemporarySliceNudge = (paneKey, targetVox, run) => {
     const cfg = PANE_CONFIGS[paneKey]
     const nv = getPaneNv(paneKey)
@@ -1414,11 +1441,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const markerCanvas = getPaneMarkerCanvas(key)
       if (markerCanvas) syncMarkerCanvasSize(key)
       const observer = new ResizeObserver(() => {
-        syncMarkerCanvasSize(key)
-        applyPaneBounds(key)
-        drawStrokeMarkers()
+        schedulePaneLayoutSync([key], { redrawMarkers: true })
       })
-      observer.observe(canvas)
+      observer.observe(canvas.parentElement || canvas)
       paneResizeObserversRef.current[key] = observer
     }))
     initializedRef.current = true
@@ -1700,6 +1725,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       console.error('Viewer 初始化失败', error)
     })
     return () => {
+      if (paneLayoutSyncRafRef.current !== null) cancelAnimationFrame(paneLayoutSyncRafRef.current)
       if (crosshairSyncRafRef.current !== null) cancelAnimationFrame(crosshairSyncRafRef.current)
       if (markerRedrawRafRef.current !== null) cancelAnimationFrame(markerRedrawRafRef.current)
       if (markerDrawRafRef.current !== null) cancelAnimationFrame(markerDrawRafRef.current)
@@ -1716,6 +1742,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     applyToolSettings(tool)
     drawStrokeMarkers()
   }, [tool])
+
+  useEffect(() => {
+    if (!panesReady) return
+    schedulePaneLayoutSync(getVisiblePaneKeys(), { redrawMarkers: true })
+  }, [panesReady, visiblePaneKeys, focusedPlane])
 
   useEffect(() => {
     brushSizeRef.current = brushSize
@@ -1785,6 +1816,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const paneCfg = PANE_CONFIGS[paneKey]
         const markerCanvas = getPaneMarkerCanvas(paneKey)
         if (!markerCanvas) return
+        if (isSinglePane2DMode(paneKey)) {
+          syncPaneLayoutNow(paneKey)
+        }
         const pos = getCanvasPos(event)
         const norm = toStoredPoint(paneKey, pos, markerCanvas)
         if (currentTool === 'freehand') {
