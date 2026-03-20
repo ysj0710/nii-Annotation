@@ -23,6 +23,8 @@ const toArrayBuffer = (data) => {
 
 const THREE_D_CROSSHAIR_COLOR = [0.23, 0.56, 1.0, 1.0]
 const THREE_D_CROSSHAIR_MIN_WIDTH = 2
+const ORIENTATION_TEXT_COLOR = [0.9, 0.93, 0.98, 1.0]
+const SAGITTAL_NOSE_LEFT = true
 
 const formatNumber = (value, digits = 1) => {
   const num = Number(value)
@@ -1619,23 +1621,36 @@ const Viewer = forwardRef(function Viewer(
     const outerBottom = Math.max(16, Math.min(24, Math.round(fontPx * 1.35)))
     const gapX = Math.max(24, Math.min(36, Math.round(fontPx * 1.9)))
     const gapY = Math.max(22, Math.min(34, Math.round(fontPx * 1.8)))
-    const tileWidth = Math.max(120, (cssWidth - outerX * 2 - gapX) / 2)
+    const cellWidth = Math.max(120, (cssWidth - outerX * 2 - gapX) / 2)
     const totalTileHeight = Math.max(260, cssHeight - outerTop - outerBottom - gapY)
-    const topTileHeight = Math.max(130, Math.round(totalTileHeight * 0.56))
-    const bottomTileHeight = Math.max(120, totalTileHeight - topTileHeight)
+    const topCellHeight = Math.max(138, Math.round(totalTileHeight * 0.55))
+    const bottomCellHeight = Math.max(120, totalTileHeight - topCellHeight)
+    const mprInsetX = Math.max(10, Math.min(18, Math.round(fontPx * 0.95)))
+    const mprInsetTop = Math.max(4, Math.min(8, Math.round(fontPx * 0.45)))
+    const mprInsetBottom = Math.max(18, Math.min(28, Math.round(fontPx * 1.55)))
+    const topTileWidth = Math.max(96, cellWidth - mprInsetX * 2)
+    const topTileHeight = Math.max(112, topCellHeight - mprInsetTop - mprInsetBottom)
     const left = outerX / cssWidth
-    const top = outerTop / cssHeight
-    const width = tileWidth / cssWidth
-    const topHeight = topTileHeight / cssHeight
-    const bottomTop = (outerTop + topTileHeight + gapY) / cssHeight
-    const bottomHeight = bottomTileHeight / cssHeight
+    const width = cellWidth / cssWidth
     const gapWidth = gapX / cssWidth
+    const topLeft = (outerX + mprInsetX) / cssWidth
+    const top = (outerTop + mprInsetTop) / cssHeight
+    const topWidth = topTileWidth / cssWidth
+    const topHeight = topTileHeight / cssHeight
+    const bottomTop = (outerTop + topCellHeight + gapY) / cssHeight
+    const bottomHeight = bottomCellHeight / cssHeight
     return [
-      { sliceType: nv.sliceTypeCoronal, position: [left, top, width, topHeight] },
-      { sliceType: nv.sliceTypeSagittal, position: [left + width + gapWidth, top, width, topHeight] },
+      { sliceType: nv.sliceTypeCoronal, position: [topLeft, top, topWidth, topHeight] },
+      { sliceType: nv.sliceTypeSagittal, position: [topLeft + width + gapWidth, top, topWidth, topHeight] },
       { sliceType: nv.sliceTypeAxial, position: [left, bottomTop, width, bottomHeight] },
       { sliceType: nv.sliceTypeRender, position: [left + width + gapWidth, bottomTop, width, bottomHeight] }
     ]
+  }
+
+  const applyViewportDisplayPreferences = (nv) => {
+    if (!nv?.opts) return
+    nv.opts.fontColor = [...ORIENTATION_TEXT_COLOR]
+    nv.opts.sagittalNoseLeft = SAGITTAL_NOSE_LEFT
   }
 
   const configureMultiplanarGrid = () => {
@@ -1644,6 +1659,7 @@ const Viewer = forwardRef(function Viewer(
     // 固定四窗矩形，避免顶部 MPR 被挤扁，且让影像在各自视口内等比适配。
     const fontPx = Math.max(10, Math.ceil(Number(nv?.fontPx || 12)))
     const dynamicPad = Math.max(14, Math.min(20, fontPx + 4))
+    applyViewportDisplayPreferences(nv)
     if (typeof nv.setHeroImage === 'function') {
       nv.setHeroImage(0)
     } else if (nv?.opts) {
@@ -2010,6 +2026,7 @@ const Viewer = forwardRef(function Viewer(
       nvRef.current = new Niivue({ show3Dcrosshair: false })
       nvRef.current.attachToCanvas(canvasRef.current)
       const nv = nvRef.current
+      applyViewportDisplayPreferences(nv)
       if (nv?.opts?.crosshairWidth !== undefined) {
         const baseWidth = Number(nv.opts.crosshairWidth || 1)
         crosshairWidthRef.current = Math.max(THREE_D_CROSSHAIR_MIN_WIDTH, baseWidth)
