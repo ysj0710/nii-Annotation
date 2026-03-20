@@ -276,6 +276,26 @@ const Viewer = forwardRef(function Viewer(
     }
   }
 
+  const getPlaneDisplayAspect = (volume, planeKey) => {
+    const info = getVoxelDisplayOrthoInfo(volume)
+    if (!info) return 1
+    const { nx, ny, nz, pixX, pixY, pixZ } = info
+    let widthMM = nx * pixX
+    let heightMM = ny * pixY
+    if (planeKey === 'C') {
+      widthMM = nx * pixX
+      heightMM = nz * pixZ
+    } else if (planeKey === 'S') {
+      widthMM = ny * pixY
+      heightMM = nz * pixZ
+    } else if (planeKey === 'A') {
+      widthMM = nx * pixX
+      heightMM = ny * pixY
+    }
+    if (!Number.isFinite(widthMM) || !Number.isFinite(heightMM) || widthMM <= 0 || heightMM <= 0) return 1
+    return heightMM / widthMM
+  }
+
   const getOrientationInfo = () => {
     const nv = nvRef.current
     const vol = nv?.volumes?.[0]
@@ -1616,32 +1636,42 @@ const Viewer = forwardRef(function Viewer(
     const cssWidth = Math.max(1, Number(rect?.width || canvas.clientWidth || 1))
     const cssHeight = Math.max(1, Number(rect?.height || canvas.clientHeight || 1))
     const fontPx = Math.max(11, Math.ceil(Number(nv?.fontPx || 12)))
+    const volume = nv?.volumes?.[0]
     const outerX = Math.max(16, Math.min(24, Math.round(fontPx * 1.2)))
     const outerTop = Math.max(12, Math.min(18, Math.round(fontPx * 0.95)))
     const outerBottom = Math.max(16, Math.min(24, Math.round(fontPx * 1.35)))
     const gapX = Math.max(24, Math.min(36, Math.round(fontPx * 1.9)))
-    const gapY = Math.max(22, Math.min(34, Math.round(fontPx * 1.8)))
+    const gapY = Math.max(28, Math.min(40, Math.round(fontPx * 2.2)))
     const cellWidth = Math.max(120, (cssWidth - outerX * 2 - gapX) / 2)
     const totalTileHeight = Math.max(260, cssHeight - outerTop - outerBottom - gapY)
     const topCellHeight = Math.max(138, Math.round(totalTileHeight * 0.55))
     const bottomCellHeight = Math.max(120, totalTileHeight - topCellHeight)
-    const mprInsetX = Math.max(10, Math.min(18, Math.round(fontPx * 0.95)))
-    const mprInsetTop = Math.max(4, Math.min(8, Math.round(fontPx * 0.45)))
-    const mprInsetBottom = Math.max(18, Math.min(28, Math.round(fontPx * 1.55)))
-    const topTileWidth = Math.max(96, cellWidth - mprInsetX * 2)
+    const mprInsetTop = Math.max(6, Math.min(12, Math.round(fontPx * 0.7)))
+    const mprInsetBottom = Math.max(32, Math.min(46, Math.round(fontPx * 2.45)))
     const topTileHeight = Math.max(112, topCellHeight - mprInsetTop - mprInsetBottom)
+    const topFillRatio = 0.68
+    const minTopSideInset = Math.max(24, Math.min(40, Math.round(fontPx * 2.05)))
+    const corAspect = getPlaneDisplayAspect(volume, 'C')
+    const sagAspect = getPlaneDisplayAspect(volume, 'S')
+    const calcTopTileWidth = (aspect) => {
+      const widthByHeight = topTileHeight * topFillRatio / Math.max(0.2, Number(aspect) || 1)
+      return Math.max(118, Math.min(cellWidth - minTopSideInset * 2, widthByHeight))
+    }
+    const corTileWidth = calcTopTileWidth(corAspect)
+    const sagTileWidth = calcTopTileWidth(sagAspect)
     const left = outerX / cssWidth
     const width = cellWidth / cssWidth
     const gapWidth = gapX / cssWidth
-    const topLeft = (outerX + mprInsetX) / cssWidth
     const top = (outerTop + mprInsetTop) / cssHeight
-    const topWidth = topTileWidth / cssWidth
     const topHeight = topTileHeight / cssHeight
     const bottomTop = (outerTop + topCellHeight + gapY) / cssHeight
     const bottomHeight = bottomCellHeight / cssHeight
+    const corLeft = (outerX + (cellWidth - corTileWidth) * 0.5) / cssWidth
+    const sagCellLeft = outerX + cellWidth + gapX
+    const sagLeft = (sagCellLeft + (cellWidth - sagTileWidth) * 0.5) / cssWidth
     return [
-      { sliceType: nv.sliceTypeCoronal, position: [topLeft, top, topWidth, topHeight] },
-      { sliceType: nv.sliceTypeSagittal, position: [topLeft + width + gapWidth, top, topWidth, topHeight] },
+      { sliceType: nv.sliceTypeCoronal, position: [corLeft, top, corTileWidth / cssWidth, topHeight] },
+      { sliceType: nv.sliceTypeSagittal, position: [sagLeft, top, sagTileWidth / cssWidth, topHeight] },
       { sliceType: nv.sliceTypeAxial, position: [left, bottomTop, width, bottomHeight] },
       { sliceType: nv.sliceTypeRender, position: [left + width + gapWidth, bottomTop, width, bottomHeight] }
     ]
@@ -2023,7 +2053,10 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => {
     if (!canvasRef.current) return
     if (!nvRef.current) {
-      nvRef.current = new Niivue({ show3Dcrosshair: false })
+      nvRef.current = new Niivue({
+        show3Dcrosshair: false,
+        logLevel: 'error'
+      })
       nvRef.current.attachToCanvas(canvasRef.current)
       const nv = nvRef.current
       applyViewportDisplayPreferences(nv)
