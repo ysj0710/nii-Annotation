@@ -439,6 +439,21 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 .viewer-container.single-pane .viewer-pane-grid {
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
+  gap: 0;
+  padding: 14px;
+}
+
+.viewer-container.single-pane .viewer-pane-A {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+}
+
+.viewer-container.mode-2d .viewer-pane {
+  border-radius: 14px;
+}
+
+.viewer-container.mode-2d .viewer-pane-inner {
+  background: #0b0f16;
 }
 
 .viewer-pane {

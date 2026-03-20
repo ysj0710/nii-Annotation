@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 're
 import { Niivue, NVImage } from '@niivue/niivue'
 import { resolveAutoWindowRange } from '../utils/windowPresets.js'
 
-const ANNOTATION_TOOLS = new Set(['freehand', 'brush'])
+const ANNOTATION_TOOLS = new Set(['freehand', 'brush', 'clearLabel'])
 const FOCUS_PLANES = ['A', 'S', 'C']
 const PANE_ORDER = ['C', 'S', 'A', 'R']
 const PANE_CONFIGS = {
@@ -25,6 +25,7 @@ const MAX_MARKER_POINTS = 24000
 
 const isRasterImageName = (name) => /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name || '')
 const isAnnotationTool = (tool) => ANNOTATION_TOOLS.has(tool)
+const isBrushLikeTool = (tool) => tool === 'brush' || tool === 'clearLabel'
 
 const toArrayBuffer = (data) => {
   if (!data) return null
@@ -106,6 +107,16 @@ const calcDet3 = (m) => {
 }
 
 const formatAffineRow = (row = []) => [toFixedNum(row?.[0], 5), toFixedNum(row?.[1], 5), toFixedNum(row?.[2], 5), toFixedNum(row?.[3], 5)]
+
+const isSingleSliceVolume = (hdr) => {
+  const dims = hdr?.dims
+  const hdrIntent = Number(hdr?.intent_code ?? hdr?.intentCode ?? 0)
+  const hdrDim0 = Number(dims?.[0] ?? 0)
+  const hdrDim3 = Number(dims?.[3] ?? 1)
+  const hdrDim5 = Number(dims?.[5] ?? 0)
+  const isVector2D = (hdrIntent === 1007 || hdrDim5 > 1) && hdrDim3 <= 1
+  return hdrDim0 <= 2 || hdrDim3 <= 1 || isVector2D
+}
 
 const inferAxisSignature = (affine) => {
   if (!Array.isArray(affine) || affine.length < 3) return null
@@ -264,6 +275,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const markerDrawRafRef = useRef(null)
   const drawRefreshPendingRef = useRef(false)
   const pendingDrawRefreshPayloadRef = useRef(null)
+  const crosshairSyncRafRef = useRef(null)
+  const pendingCrosshairSyncRef = useRef(null)
+  const syncingLocationRef = useRef(false)
   const activePointerIdRef = useRef(null)
   const activePointerPaneKeyRef = useRef(null)
   const freehandDrawingRef = useRef(false)
@@ -575,6 +589,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     }
   }
 
+  const isSinglePane2DMode = (paneKey) =>
+    PANE_CONFIGS[paneKey]?.is2D &&
+    visiblePaneKeysRef.current.length === 1 &&
+    visiblePaneKeysRef.current[0] === paneKey
+
   const getPaneBounds = (paneKey) => {
     const { width, height } = getPaneCanvasSize(paneKey)
     if (!PANE_CONFIGS[paneKey]?.is2D) {
@@ -582,6 +601,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const insetX = clamp(renderInsetPx / width, 0.02, 0.12)
       const insetY = clamp(renderInsetPx / height, 0.02, 0.12)
       return [insetX, insetY, 1 - insetX, 1 - insetY]
+    }
+    if (isSinglePane2DMode(paneKey)) {
+      const minSide = Math.max(1, Math.min(width, height))
+      const sideInsetPx = clamp(Math.round(minSide * 0.07), 28, 72)
+      const topInsetPx = clamp(Math.round(minSide * 0.08), 28, 76)
+      const bottomInsetPx = clamp(Math.round(minSide * 0.11), 36, 96)
+      const insetX = clamp(sideInsetPx / width, 0.04, 0.14)
+      const insetY = clamp(topInsetPx / height, 0.04, 0.14)
+      const insetBottom = clamp(bottomInsetPx / height, 0.06, 0.18)
+      return [insetX, insetY, 1 - insetX, 1 - insetBottom]
     }
     const sideInsetPx = clamp(Math.round(width * 0.075), 24, 52)
     const verticalInsetPx = clamp(Math.round(height * 0.1), 24, 60)
@@ -695,6 +724,59 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return true
   }
 
+  const crosshairEquals = (a, b, epsilon = 1e-6) => {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length < 3 || b.length < 3) return false
+    for (let i = 0; i < 3; i += 1) {
+      if (Math.abs(Number(a[i] || 0) - Number(b[i] || 0)) > epsilon) return false
+    }
+    return true
+  }
+
+  const normalizeCrosshair = (crosshair) => {
+    if (!Array.isArray(crosshair) || crosshair.length < 3) return null
+    const next = [0, 1, 2].map((axis) => clamp(Number(crosshair[axis] || 0), 0, 1))
+    return next.every((value) => Number.isFinite(value)) ? next : null
+  }
+
+  const applyManualCrosshairSync = (sourcePaneKey, crosshair) => {
+    const nextCrosshair = normalizeCrosshair(crosshair)
+    if (!nextCrosshair || syncingLocationRef.current) return false
+    syncingLocationRef.current = true
+    let changed = false
+    try {
+      for (const key of getVisiblePaneKeys()) {
+        if (key === sourcePaneKey) continue
+        const nv = getPaneNv(key)
+        if (!nv?.scene?.crosshairPos || crosshairEquals(nv.scene.crosshairPos, nextCrosshair)) continue
+        nv.scene.crosshairPos[0] = nextCrosshair[0]
+        nv.scene.crosshairPos[1] = nextCrosshair[1]
+        nv.scene.crosshairPos[2] = nextCrosshair[2]
+        nv.drawScene?.()
+        changed = true
+      }
+    } finally {
+      syncingLocationRef.current = false
+    }
+    return changed
+  }
+
+  const scheduleCrosshairSync = (sourcePaneKey) => {
+    const sourceNv = getPaneNv(sourcePaneKey)
+    const crosshair = normalizeCrosshair(sourceNv?.scene?.crosshairPos)
+    if (!crosshair) return
+    pendingCrosshairSyncRef.current = { sourcePaneKey, crosshair }
+    if (crosshairSyncRafRef.current !== null) return
+    crosshairSyncRafRef.current = requestAnimationFrame(() => {
+      crosshairSyncRafRef.current = null
+      const pending = pendingCrosshairSyncRef.current
+      pendingCrosshairSyncRef.current = null
+      if (!pending) return
+      applyManualCrosshairSync(pending.sourcePaneKey, pending.crosshair)
+    })
+  }
+
+  const getBrushLabelValue = () => (toolRef.current === 'clearLabel' ? 0 : Number(activeLabelValueRef.current || 1))
+
   const ensureDrawingBitmap = () => {
     const bitmap = getSharedBitmap()
     if (bitmap) return true
@@ -716,7 +798,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (nx < 1 || ny < 1 || nz < 1) return false
     const center = [Math.round(vox[0]), Math.round(vox[1]), Math.round(vox[2])]
     const radius = Math.max(1, Math.round(size / 2))
-    const fillLabel = Math.max(1, Math.min(255, Number(labelValue || 1)))
+    const fillLabel = Math.max(0, Math.min(255, Number(labelValue || 0)))
     const fixedAxis = axCorSag === 0 ? 2 : axCorSag === 1 ? 1 : 0
     const axes = [0, 1, 2].filter((axis) => axis !== fixedAxis)
     const hAxis = axes[0]
@@ -1281,12 +1363,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   }
 
   const configurePaneSync = () => {
-    const keys = getVisiblePaneKeys()
     for (const key of PANE_ORDER) {
       const nv = getPaneNv(key)
       if (!nv) continue
-      const others = keys.filter((otherKey) => otherKey !== key).map((otherKey) => getPaneNv(otherKey)).filter(Boolean)
-      nv.broadcastTo(others, { crosshair: true })
+      nv.broadcastTo?.([], {})
     }
   }
 
@@ -1317,6 +1397,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       nv.setSliceType(getPaneSliceType(nv, key))
       applyPaneBounds(key)
       nv.onLocationChange = () => {
+        if (!syncingLocationRef.current) scheduleCrosshairSync(key)
         if (
           curvePaneKeyRef.current &&
           curvePaneKeyRef.current === key &&
@@ -1376,11 +1457,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       : null
     const hdr = baseTemplate?.hdr
     const dims = hdr?.dims
-    const hdrIntent = Number(hdr?.intent_code ?? hdr?.intentCode ?? 0)
-    const hdrDim5 = Number(dims?.[5] ?? 0)
-    const hdrDim3 = Number(dims?.[3] ?? 1)
-    const isVector2D = (hdrIntent === 1007 || hdrDim5 > 1) && hdrDim3 <= 1
-    const is2D = hdrDim3 <= 1 || isVector2D
+    const is2D = isSingleSliceVolume(hdr)
     const nextVisiblePaneKeys = is2D ? ['A'] : [...PANE_ORDER]
     visiblePaneKeysRef.current = nextVisiblePaneKeys
     setVisiblePaneKeys(nextVisiblePaneKeys)
@@ -1579,6 +1656,31 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const result = await nv.saveImage({ filename: '', isSaveDrawing: true })
       return result instanceof Uint8Array ? result : null
     },
+    exportPersistState: () => {
+      const dimsInfo = getDrawingDimsInfo()
+      const bitmap = getSharedBitmap()
+      if (!dimsInfo || !bitmap || bitmap.length !== dimsInfo.voxelCount) {
+        return {
+          bitmap: null,
+          dims: dimsInfo ? [dimsInfo.nx, dimsInfo.ny, dimsInfo.nz] : null,
+          hasMask: false,
+          overlayAnnotations: cloneAnnotations(getCurrentAnnotations())
+        }
+      }
+      const nextBitmap = new Uint8Array(bitmap.length)
+      let hasMask = false
+      for (let i = 0; i < bitmap.length; i += 1) {
+        const value = Number(bitmap[i] || 0)
+        nextBitmap[i] = value
+        if (!hasMask && value !== 0) hasMask = true
+      }
+      return {
+        bitmap: nextBitmap,
+        dims: [dimsInfo.nx, dimsInfo.ny, dimsInfo.nz],
+        hasMask,
+        overlayAnnotations: cloneAnnotations(getCurrentAnnotations())
+      }
+    },
     exportAnnotations: () => cloneAnnotations(getCurrentAnnotations()),
     getRefreshDiagnostics: () => ({ ...(refreshTelemetryRef.current || {}) }),
     getAnnotationCount: () => getCurrentAnnotations().length,
@@ -1598,6 +1700,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       console.error('Viewer 初始化失败', error)
     })
     return () => {
+      if (crosshairSyncRafRef.current !== null) cancelAnimationFrame(crosshairSyncRafRef.current)
       if (markerRedrawRafRef.current !== null) cancelAnimationFrame(markerRedrawRafRef.current)
       if (markerDrawRafRef.current !== null) cancelAnimationFrame(markerDrawRafRef.current)
       for (const observer of Object.values(paneResizeObserversRef.current)) {
@@ -1724,7 +1827,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           drawStrokeMarkers()
           return
         }
-        if (currentTool === 'brush') {
+        if (isBrushLikeTool(currentTool)) {
           event.preventDefault()
           if (!ensureDrawingBitmap()) return
           const vox = canvasPosToVox(paneKey, pos)
@@ -1738,7 +1841,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           canvas.setPointerCapture?.(event.pointerId)
           fillActiveRef.current = true
           brushStrokeDirtyRef.current = false
-          if (drawBrushAt(vox, paneCfg.axCorSag, brushShapeRef.current, brushSizeRef.current, activeLabelValueRef.current)) {
+          const brushLabelValue = getBrushLabelValue()
+          if (drawBrushAt(vox, paneCfg.axCorSag, brushShapeRef.current, brushSizeRef.current, brushLabelValue)) {
             brushStrokeDirtyRef.current = true
             setCrosshairFromVox(vox, { redraw: false })
             requestDrawingRefresh({ sourcePaneKey: paneKey, targetVox: vox })
@@ -1780,7 +1884,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           drawStrokeMarkers(true)
           return
         }
-        if (currentTool === 'brush') {
+        if (isBrushLikeTool(currentTool)) {
           if (!fillActiveRef.current) return
           if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
           if (activePointerPaneKeyRef.current !== paneKey) return
@@ -1790,7 +1894,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           const fixedAxis = PANE_CONFIGS[paneKey].fixedAxis
           vox[fixedAxis] = Math.round(vox[fixedAxis])
           if (lastBrushVoxRef.current) {
-            if (drawBrushLine(lastBrushVoxRef.current, vox, fillAxCorSagRef.current, brushShapeRef.current, brushSizeRef.current, activeLabelValueRef.current)) {
+            const brushLabelValue = getBrushLabelValue()
+            if (drawBrushLine(lastBrushVoxRef.current, vox, fillAxCorSagRef.current, brushShapeRef.current, brushSizeRef.current, brushLabelValue)) {
               brushStrokeDirtyRef.current = true
               setCrosshairFromVox(vox, { redraw: false })
               requestDrawingRefresh({ sourcePaneKey: paneKey, targetVox: vox })
@@ -1820,7 +1925,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           }
           return
         }
-        if (currentTool === 'brush') {
+        if (isBrushLikeTool(currentTool)) {
           if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
           if (activePointerPaneKeyRef.current !== paneKey) return
           const wasDirty = brushStrokeDirtyRef.current
@@ -1932,6 +2037,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const containerClassNames = [
     'viewer-container',
     visiblePaneKeys.length === 1 ? 'single-pane' : 'quad-pane',
+    visiblePaneKeys.length === 1 && visiblePaneKeys[0] === 'A' ? 'mode-2d' : '',
     focusedPlane ? `focus-${focusedPlane}` : ''
   ].filter(Boolean).join(' ')
 

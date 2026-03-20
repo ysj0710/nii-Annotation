@@ -1904,21 +1904,47 @@ export default function App() {
 
   const captureViewerPersistPayload = async (imageRecord, phase = 'persist') => {
     if (!imageRecord?.id) return null
-    const overlayAnnotations = viewerRef.current?.exportAnnotations?.() || []
+    const templateBuffer = imageRecord?.sourceData || imageRecord?.data || null
+    const persistedState = viewerRef.current?.exportPersistState?.() || null
+    const overlayAnnotations = persistedState?.overlayAnnotations || viewerRef.current?.exportAnnotations?.() || []
+    const hasOverlayAnnotations = overlayAnnotations.length > 0
+    const hadExistingContent =
+      !!(imageRecord?.maskAttached || imageRecord?.mask || imageRecord?.sourceMask) ||
+      (Array.isArray(imageRecord?.overlayAnnotations) && imageRecord.overlayAnnotations.length > 0)
+    const clientEnvReport = buildClientEnvReport(phase, { imageId: String(imageRecord.id || '') })
+    if (persistedState?.bitmap && Array.isArray(persistedState?.dims)) {
+      return {
+        imageId: imageRecord.id,
+        imageName: imageRecord.name,
+        sourceMask: imageRecord.sourceMask || null,
+        overlayAnnotations,
+        bitmap: persistedState.bitmap,
+        dims: persistedState.dims,
+        buffer: null,
+        hasMask: !!persistedState.hasMask,
+        hasOverlayAnnotations,
+        hadExistingContent,
+        templateBuffer,
+        clientEnvReport
+      }
+    }
+
     const exported = await viewerRef.current?.exportDrawing()
     const raw = arrayBufferFrom(exported)
-    const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer: imageRecord?.data }) : null
+    const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer }) : null
     const hasMask = buffer ? hasNonZeroMaskNifti(buffer) : false
-    const hasOverlayAnnotations = overlayAnnotations.length > 0
-    const clientEnvReport = buildClientEnvReport(phase, { imageId: String(imageRecord.id || '') })
     return {
       imageId: imageRecord.id,
       imageName: imageRecord.name,
       sourceMask: imageRecord.sourceMask || null,
       overlayAnnotations,
       buffer,
+      bitmap: null,
+      dims: null,
       hasMask,
       hasOverlayAnnotations,
+      hadExistingContent,
+      templateBuffer,
       clientEnvReport
     }
   }
@@ -1931,9 +1957,13 @@ export default function App() {
         localPersistDirtyRef.current = false
       }
     }
-    const hasMask = !!payload.hasMask
+    let buffer = payload.buffer || null
+    if (!buffer && payload.hasMask && payload.bitmap && Array.isArray(payload.dims)) {
+      buffer = encodeMaskBitmapToNifti(payload.bitmap, payload.dims, { templateBuffer: payload.templateBuffer })
+    }
+    const hasMask = !!(payload.hasMask && buffer)
     const hasOverlayAnnotations = Array.isArray(payload.overlayAnnotations) && payload.overlayAnnotations.length > 0
-    if (!payload.buffer && !hasOverlayAnnotations) {
+    if (!buffer && !hasOverlayAnnotations && !payload.hadExistingContent) {
       clearCurrentDirtyFlag()
       return false
     }
@@ -1974,7 +2004,7 @@ export default function App() {
     }
 
     const updated = await updateImage(imageId, {
-      mask: payload.buffer,
+      mask: buffer,
       maskName: `${fileStem(payload.imageName)}.nii.gz`,
       maskAttached: true,
       overlayAnnotations: payload.overlayAnnotations,
@@ -1991,7 +2021,7 @@ export default function App() {
       prev && prev.id === imageId
         ? {
             ...prev,
-            mask: payload.buffer,
+            mask: buffer,
             maskAttached: true,
             overlayAnnotations: payload.overlayAnnotations,
             lastClientEnvReport: payload.clientEnvReport,
@@ -2560,7 +2590,39 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   })
 }
 
-  const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
+const encodeMaskBitmapToNifti = (bitmap, dims, { templateBuffer = null } = {}) => {
+  const width = Math.max(1, Number(dims?.[0] || 0))
+  const height = Math.max(1, Number(dims?.[1] || 0))
+  const depth = Math.max(1, Number(dims?.[2] || 1))
+  const voxelCount = width * height * depth
+  if (!bitmap || voxelCount < 1 || bitmap.length !== voxelCount) return null
+
+  let referenceHeader = null
+  const template = arrayBufferFrom(templateBuffer)
+  if (template && isNiftiBuffer(template)) {
+    try {
+      referenceHeader = decodeNifti(template).header
+    } catch {
+      referenceHeader = null
+    }
+  }
+
+  return encodeNiftiUInt8({
+    width,
+    height,
+    depth,
+    components: 1,
+    voxels: bitmap instanceof Uint8Array ? bitmap : new Uint8Array(bitmap),
+    spacing: [
+      Math.max(1e-6, Number(referenceHeader?.pixDims?.[1] || 1)),
+      Math.max(1e-6, Number(referenceHeader?.pixDims?.[2] || 1)),
+      Math.max(1e-6, Number(referenceHeader?.pixDims?.[3] || 1))
+    ],
+    headerTemplate: referenceHeader
+  })
+}
+
+const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
   const source = arrayBufferFrom(maskBuffer)
   if (!source || !isNiftiBuffer(source)) return source
   try {
@@ -3217,6 +3279,12 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
       onClick: () => toggleAnnotationTool('brush')
     },
     {
+      key: 'clearLabel',
+      name: '橡皮擦',
+      active: tool === 'clearLabel',
+      onClick: () => toggleAnnotationTool('clearLabel')
+    },
+    {
       key: 'freehand',
       name: '自由曲线',
       active: tool === 'freehand',
@@ -3266,6 +3334,14 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
             <circle cx="5" cy="16" r="1.5" fill="currentColor" />
             <circle cx="12" cy="10" r="1.5" fill="currentColor" />
             <circle cx="19" cy="6" r="1.5" fill="currentColor" />
+          </svg>
+        )
+      case 'clearLabel':
+        return (
+          <svg {...iconProps}>
+            <path d="M6 15l5-6h6l3 3-6 6H9z" />
+            <path d="M13 9l4 4" />
+            <path d="M5 19h8" />
           </svg>
         )
       case 'undo':
@@ -3359,9 +3435,9 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
               </div>
             </div>
             <div className="tool-sidebar-menu">{annotationToolsMenuContent}</div>
-            {tool === 'brush' && (
+            {(tool === 'brush' || tool === 'clearLabel') && (
               <div className="brush-settings-panel compact">
-                <div className="brush-settings-title">笔刷设置</div>
+                <div className="brush-settings-title">{tool === 'clearLabel' ? '橡皮擦设置' : '笔刷设置'}</div>
                 <div className="brush-shape-selector">
                   <span className="brush-label">形状：</span>
                   <div className="brush-shape-options">
