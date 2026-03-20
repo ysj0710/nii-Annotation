@@ -18,6 +18,7 @@ import JSZip from 'jszip'
 import * as nifti from 'nifti-reader-js'
 import dicomParser from 'dicom-parser'
 import { getAllImages, getImageById, saveImages, updateImage, clearAllImages } from './utils/imageStore.js'
+import { resolveAutoWindowRange } from './utils/windowPresets.js'
 
 const Viewer = lazy(() => import('./components/Viewer.jsx'))
 
@@ -44,12 +45,6 @@ const DEFAULT_LABEL_COLOR = '#FF4D4F'
 const THUMBNAIL_SIZE = 240
 const THUMBNAIL_RENDER_VERSION = 2
 const RASTER_CONVERSION_VERSION = 8
-
-const hasValidRobustWindow = (volume) => {
-  const robustMin = Number(volume?.robust_min)
-  const robustMax = Number(volume?.robust_max)
-  return Number.isFinite(robustMin) && Number.isFinite(robustMax) && robustMax > robustMin
-}
 
 const detectBrowserRuntimeEnv = () => {
   const nav = typeof navigator !== 'undefined' ? navigator : {}
@@ -1006,9 +1001,15 @@ const createNiivueThumbnail = async (buffer, name, { isMask = false } = {}) => {
       nv.setInterpolation(true)
     }
     const baseVolume = nv.volumes?.[0]
-    if (baseVolume && !isMask && hasValidRobustWindow(baseVolume)) {
-      baseVolume.cal_min = Number(baseVolume.robust_min)
-      baseVolume.cal_max = Number(baseVolume.robust_max)
+    const windowRange = !isMask
+      ? resolveAutoWindowRange({
+          volume: baseVolume,
+          imageMeta: { name }
+        })
+      : null
+    if (baseVolume && windowRange) {
+      baseVolume.cal_min = Number(windowRange.min)
+      baseVolume.cal_max = Number(windowRange.max)
       if (typeof nv.updateGLVolume === 'function') {
         nv.updateGLVolume()
       }
@@ -1038,13 +1039,15 @@ const createNiivueThumbnail = async (buffer, name, { isMask = false } = {}) => {
 const createThumbnail = async (buffer, name, { isMask = false } = {}) => {
   if (isNiftiFile(name)) {
     if (!isNiftiBuffer(buffer)) return ''
+    try {
+      const fastThumb = await createNiftiThumbnail(buffer, name, { isMask })
+      if (fastThumb) return fastThumb
+    } catch {
+      // ignore and fallback to niivue renderer
+    }
     const niivueThumb = await createNiivueThumbnail(buffer, name, { isMask })
     if (niivueThumb) return niivueThumb
-    try {
-      return await createNiftiThumbnail(buffer, name, { isMask })
-    } catch {
-      return ''
-    }
+    return ''
   }
   return createNiivueThumbnail(buffer, name, { isMask })
 }
@@ -1174,11 +1177,13 @@ export default function App() {
   const thumbnailRefreshInFlightRef = useRef(false)
   const runtimeEnvRef = useRef(null)
   const statsTimerRef = useRef(null)
+  const statsIdleRef = useRef(null)
   const dicomWheelSwitchAtRef = useRef(0)
   const autoImportedRef = useRef(false)
   const initializedRef = useRef(false)
   const queueNavIndexRef = useRef(-1)
   const hasUnsavedChangesRef = useRef(false)
+  const localPersistDirtyRef = useRef(false)
   const activeImageIdRef = useRef('')
   const queueSwitchingRef = useRef(false)
 
@@ -1318,18 +1323,42 @@ export default function App() {
 
   useEffect(() => {
     hasUnsavedChangesRef.current = false
+    localPersistDirtyRef.current = false
   }, [activeImage?.id])
 
   useEffect(() => {
     activeImageIdRef.current = String(activeImage?.id || '')
   }, [activeImage?.id])
 
+  const clearLabelStatsSchedule = () => {
+    if (statsTimerRef.current !== null) {
+      clearTimeout(statsTimerRef.current)
+      statsTimerRef.current = null
+    }
+    if (statsIdleRef.current !== null) {
+      if (typeof window !== 'undefined' && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(statsIdleRef.current)
+      } else {
+        clearTimeout(statsIdleRef.current)
+      }
+      statsIdleRef.current = null
+    }
+  }
+
   const scheduleLabelStatsRefresh = () => {
-    if (statsTimerRef.current) clearTimeout(statsTimerRef.current)
+    clearLabelStatsSchedule()
     statsTimerRef.current = setTimeout(() => {
-      const stats = viewerRef.current?.getLabelStats?.() || {}
-      setLabelStats(stats)
-    }, 120)
+      const run = () => {
+        statsIdleRef.current = null
+        const stats = viewerRef.current?.getLabelStats?.() || {}
+        setLabelStats(stats)
+      }
+      if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+        statsIdleRef.current = window.requestIdleCallback(run, { timeout: 260 })
+      } else {
+        run()
+      }
+    }, 200)
   }
 
   const buildClientEnvReport = (phase = 'save', extra = {}) => {
@@ -1799,7 +1828,10 @@ export default function App() {
     const hasMask = buffer ? hasNonZeroMaskNifti(buffer) : false
     const hasOverlayAnnotations = overlayAnnotations.length > 0
     const clientEnvReport = buildClientEnvReport('persist')
-    if (!buffer && !hasOverlayAnnotations) return false
+    if (!buffer && !hasOverlayAnnotations) {
+      localPersistDirtyRef.current = false
+      return false
+    }
     if (!hasMask) {
       await updateImage(activeImage.id, {
         mask: null,
@@ -1831,6 +1863,7 @@ export default function App() {
             }
           : prev
       )
+      localPersistDirtyRef.current = false
       return true
     }
 
@@ -1859,6 +1892,7 @@ export default function App() {
           }
         : prev
     )
+    localPersistDirtyRef.current = false
     return true
   }
 
@@ -2109,6 +2143,7 @@ export default function App() {
     }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate') {
       hasUnsavedChangesRef.current = true
+      localPersistDirtyRef.current = true
       scheduleAutoPersist(1200)
     }
     scheduleLabelStatsRefresh()
@@ -2117,6 +2152,7 @@ export default function App() {
   useEffect(
     () => () => {
       clearAutoSaveSchedule()
+      clearLabelStatsSchedule()
     },
     []
   )
@@ -2135,7 +2171,10 @@ export default function App() {
     if (activeImage?.id === id) return
     // 取消待执行的自动保存，防止切换后的旧计时器用错误的影像数据写入 DB
     clearAutoSaveSchedule()
-    await persistActiveDrawing()
+    await saveQueueRef.current
+    if (localPersistDirtyRef.current) {
+      await persistActiveDrawing()
+    }
     const record = await getImageById(id)
     if (!record) return
     activeImageIdRef.current = String(record.id)

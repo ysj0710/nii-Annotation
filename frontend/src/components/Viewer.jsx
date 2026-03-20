@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { Niivue, NVImage } from '@niivue/niivue'
+import { resolveAutoWindowRange } from '../utils/windowPresets.js'
 
 const isRasterImageName = (name) => /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name || '')
 const MASK_TOOLS = new Set(['eraser'])
@@ -18,12 +19,6 @@ const toArrayBuffer = (data) => {
     return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength)
   }
   return null
-}
-
-const hasValidRobustWindow = (volume) => {
-  const robustMin = Number(volume?.robust_min)
-  const robustMax = Number(volume?.robust_max)
-  return Number.isFinite(robustMin) && Number.isFinite(robustMax) && robustMax > robustMin
 }
 
 const THREE_D_CROSSHAIR_COLOR = [0.23, 0.56, 1.0, 1.0]
@@ -1299,7 +1294,7 @@ const Viewer = forwardRef(function Viewer(
     }
     if (nv?.opts) {
       nv.opts.multiplanarShowRender = 1
-      nv.opts.multiplanarEqualSize = false
+      nv.opts.multiplanarEqualSize = true
       // 使用 niivue 的自适应安全边距，给 A/R/L/P/S/I 方向字母留出固定空间，
       // 防止影像边缘在四窗模式压住方向标记或出现裁切观感。
       nv.opts.tileMargin = -1
@@ -1327,10 +1322,10 @@ const Viewer = forwardRef(function Viewer(
       nv.opts.isCornerOrientationText = false
     }
     if (typeof nv.setSliceMM === 'function') {
-      // 四窗显示优先保证几何居中与完整性，使用 voxel-space 可避免部分数据的 world-space 偏移。
-      nv.setSliceMM(false)
+      // 与 ITK-SNAP 一致使用 world-space 切片，保证方向与空间显示一致性。
+      nv.setSliceMM(true)
     } else if (nv?.opts) {
-      nv.opts.isSliceMM = false
+      nv.opts.isSliceMM = true
     }
   }
 
@@ -1936,9 +1931,20 @@ const Viewer = forwardRef(function Viewer(
       }
 
       const baseVolume = nv.volumes?.[0]
-      if (baseVolume && !image.isMaskOnly && hasValidRobustWindow(baseVolume)) {
-        baseVolume.cal_min = Number(baseVolume.robust_min)
-        baseVolume.cal_max = Number(baseVolume.robust_max)
+      const sourceName = image?.displayName || image?.sourceName || image?.name
+      const windowRange =
+        baseVolume && !image.isMaskOnly
+          ? resolveAutoWindowRange({
+              volume: baseVolume,
+              imageMeta: {
+                name: sourceName,
+                seriesDescription: image?.dicomSeriesDescription || ''
+              }
+            })
+          : null
+      if (baseVolume && windowRange) {
+        baseVolume.cal_min = Number(windowRange.min)
+        baseVolume.cal_max = Number(windowRange.max)
         if (typeof nv.updateGLVolume === 'function') {
           nv.updateGLVolume()
         } else if (typeof nv.drawScene === 'function') {
@@ -1954,7 +1960,6 @@ const Viewer = forwardRef(function Viewer(
       const hdrDim3 = Number(hdrDims?.[3] ?? 1)
       const isVector2D = (hdrIntent === 1007 || hdrDim5 > 1) && hdrDim3 <= 1
       const is2D = !!(dims && (dims[0] <= 2 || dims[3] <= 1 || isVector2D))
-      const sourceName = image?.displayName || image?.name
       const isRaster2D = isRasterImageName(sourceName)
       if (is2D) {
         if (cancelled) return
@@ -1978,6 +1983,8 @@ const Viewer = forwardRef(function Viewer(
       } else {
         if (cancelled) return
         setCanFocusPlanes(true)
+        // 3D/四窗同样遵循 radiological 约定，避免 L/R 显示反向。
+        nv.setRadiologicalConvention(!!radiological2D)
         if (Array.isArray(nv.scene?.crosshairPos)) {
           nv.scene.crosshairPos[0] = 0.5
           nv.scene.crosshairPos[1] = 0.5
