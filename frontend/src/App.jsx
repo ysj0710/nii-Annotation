@@ -52,6 +52,9 @@ const detectBrowserRuntimeEnv = () => {
   const hasDocument = typeof document !== 'undefined'
   const userAgent = String(nav?.userAgent || '')
   const platform = String(nav?.platform || '')
+  const hardwareConcurrency = Number(nav?.hardwareConcurrency || 0)
+  const deviceMemoryGB = Number(nav?.deviceMemory || 0)
+  const currentDpr = hasWindow ? Number(window.devicePixelRatio || 1) : 1
   const isWindows = /win/i.test(platform) || /windows/i.test(userAgent)
   const isMac = /mac/i.test(platform) || /mac os/i.test(userAgent)
   const isLinux = !isWindows && !isMac && (/linux/i.test(platform) || /linux/i.test(userAgent))
@@ -66,8 +69,8 @@ const detectBrowserRuntimeEnv = () => {
       isLinux,
       language: String(nav?.language || ''),
       languages: Array.isArray(nav?.languages) ? nav.languages : [],
-      hardwareConcurrency: Number(nav?.hardwareConcurrency || 0),
-      deviceMemoryGB: Number(nav?.deviceMemory || 0),
+      hardwareConcurrency,
+      deviceMemoryGB,
       timezone: (() => {
         try {
           return Intl.DateTimeFormat().resolvedOptions().timeZone || ''
@@ -91,6 +94,14 @@ const detectBrowserRuntimeEnv = () => {
       maxTier: 1,
       locationRefreshMinIntervalMs: 80,
       escalationCooldownMs: 120
+    },
+    viewerProfile: {
+      lowPowerMode: false,
+      mediumPowerMode: true,
+      forceDevicePixelRatio: 1,
+      strokeRefreshTarget: 'source-only',
+      liveCrosshairDuringAnnotation: false,
+      labelStatsDelayMs: 420
     }
   }
   if (!hasWindow || !hasDocument) return base
@@ -132,10 +143,30 @@ const detectBrowserRuntimeEnv = () => {
     // Windows/ANGLE 在 2D 频繁刷新上更容易卡顿，默认限制到二级刷新。
     maxTier = Math.min(maxTier, 2)
   }
+  const lowPowerMode =
+    tier === 'low' ||
+    (hardwareConcurrency > 0 && hardwareConcurrency <= 4) ||
+    (deviceMemoryGB > 0 && deviceMemoryGB <= 4)
+  const mediumPowerMode =
+    !lowPowerMode &&
+    (tier === 'medium' || isWindows || (hardwareConcurrency > 0 && hardwareConcurrency <= 8) || (deviceMemoryGB > 0 && deviceMemoryGB <= 8))
+  const forceDevicePixelRatio = lowPowerMode
+    ? 1
+    : mediumPowerMode
+      ? Math.min(1.25, currentDpr || 1)
+      : Math.min(1.5, currentDpr || 1)
   const refreshPolicy = {
     maxTier,
     locationRefreshMinIntervalMs: maxTier >= 3 ? 34 : maxTier >= 2 ? 48 : 72,
     escalationCooldownMs: maxTier >= 3 ? 40 : maxTier >= 2 ? 75 : 120
+  }
+  const viewerProfile = {
+    lowPowerMode,
+    mediumPowerMode,
+    forceDevicePixelRatio,
+    strokeRefreshTarget: lowPowerMode || mediumPowerMode ? 'source-only' : 'all-2d',
+    liveCrosshairDuringAnnotation: false,
+    labelStatsDelayMs: lowPowerMode ? 680 : mediumPowerMode ? 420 : 240
   }
 
   const lose = gl.getExtension('WEBGL_lose_context')
@@ -156,7 +187,8 @@ const detectBrowserRuntimeEnv = () => {
       majorPerformanceCaveat
     },
     refreshBudgetMs,
-    refreshPolicy
+    refreshPolicy,
+    viewerProfile
   }
 }
 
@@ -1347,6 +1379,7 @@ export default function App() {
 
   const scheduleLabelStatsRefresh = () => {
     clearLabelStatsSchedule()
+    const statsDelayMs = Math.max(180, Number(runtimeEnvRef.current?.viewerProfile?.labelStatsDelayMs || 320))
     statsTimerRef.current = setTimeout(() => {
       const run = () => {
         statsIdleRef.current = null
@@ -1358,7 +1391,7 @@ export default function App() {
       } else {
         run()
       }
-    }, 200)
+    }, statsDelayMs)
   }
 
   const buildClientEnvReport = (phase = 'save', extra = {}) => {
@@ -2146,7 +2179,9 @@ export default function App() {
       localPersistDirtyRef.current = true
       scheduleAutoPersist(1200)
     }
-    scheduleLabelStatsRefresh()
+    if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'clear' || reason === 'load' || reason === 'curve-complete') {
+      scheduleLabelStatsRefresh()
+    }
   }
 
   useEffect(

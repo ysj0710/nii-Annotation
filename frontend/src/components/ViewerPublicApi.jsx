@@ -16,6 +16,7 @@ const THREE_D_CROSSHAIR_COLOR = [0.23, 0.56, 1.0, 1.0]
 const THREE_D_CROSSHAIR_MIN_WIDTH = 2
 const ORIENTATION_TEXT_COLOR = [0.95, 0.98, 1.0, 1.0]
 const SAGITTAL_NOSE_LEFT = true
+const DEFAULT_PAN2D_VIEW = [0, 0, 0, 0.98]
 const FREEHAND_CLOSE_PX = 10
 const FREEHAND_RESUME_PX = 28
 const FREEHAND_SAMPLE_STEP_PX = 2.5
@@ -63,6 +64,16 @@ const safeInt = (value, fallback = 0) => {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback
   return Math.trunc(n)
+}
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
+
+const isViewerDebugEnabled = () => {
+  try {
+    return typeof window !== 'undefined' && window.__NII_VIEWER_DEBUG__ === true
+  } catch {
+    return false
+  }
 }
 
 const compactPoints = (points, maxPoints) => {
@@ -152,14 +163,16 @@ const normalizeVolumeOrientationFromQform = (volume, image, context = 'base') =>
   const beforeSignature = inferAxisSignature(hdr?.affine)
   const afterSignature = inferAxisSignature(qAffine)
   volume.setAffine(qAffine)
-  console.info('[ViewerFix] normalized-orientation', {
-    context,
-    imageName: image?.displayName || image?.name || '',
-    qformCode,
-    sformCode,
-    beforeSignature,
-    afterSignature
-  })
+  if (isViewerDebugEnabled()) {
+    console.info('[ViewerFix] normalized-orientation', {
+      context,
+      imageName: image?.displayName || image?.name || '',
+      qformCode,
+      sformCode,
+      beforeSignature,
+      afterSignature
+    })
+  }
   return { qformCode, sformCode, beforeSignature, afterSignature }
 }
 
@@ -259,6 +272,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const brushStrokeDirtyRef = useRef(false)
   const refreshTelemetryRef = useRef({ last: null })
   const refreshPerfRef = useRef({ emaMs: 0, samples: 0 })
+  const labelAnalysisRef = useRef({ dirty: true, stats: {}, centroids: {} })
   const [panesReady, setPanesReady] = useState(false)
   const [focusedPlane, setFocusedPlane] = useState(null)
   const [canFocusPlanes, setCanFocusPlanes] = useState(false)
@@ -335,6 +349,81 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return { dims, nx, ny, nz, voxelCount: nx * ny * nz }
   }
 
+  const getViewerPerfProfile = () => {
+    const runtime = runtimeEnvRef.current || {}
+    const profile = runtime.viewerProfile || {}
+    const nav = typeof navigator !== 'undefined' ? navigator : {}
+    const dpr = typeof window !== 'undefined' ? Number(window.devicePixelRatio || 1) : 1
+    const hw = Number(nav?.hardwareConcurrency || 0)
+    const mem = Number(nav?.deviceMemory || 0)
+    const tier = String(runtime?.webgl?.tier || '')
+    const lowPowerMode =
+      typeof profile.lowPowerMode === 'boolean'
+        ? profile.lowPowerMode
+        : tier === 'low' || (hw > 0 && hw <= 4) || (mem > 0 && mem <= 4)
+    const mediumPowerMode =
+      typeof profile.mediumPowerMode === 'boolean'
+        ? profile.mediumPowerMode
+        : !lowPowerMode && (tier === 'medium' || (hw > 0 && hw <= 8) || (mem > 0 && mem <= 8))
+    const forceDevicePixelRatio = clamp(
+      Number(profile.forceDevicePixelRatio) || (lowPowerMode ? 1 : mediumPowerMode ? Math.min(1.25, dpr) : Math.min(1.5, dpr)),
+      1,
+      2
+    )
+    return {
+      lowPowerMode,
+      mediumPowerMode,
+      forceDevicePixelRatio,
+      strokeRefreshTarget: profile.strokeRefreshTarget || (lowPowerMode || mediumPowerMode ? 'source-only' : 'all-2d'),
+      liveCrosshairDuringAnnotation: !!profile.liveCrosshairDuringAnnotation
+    }
+  }
+
+  const invalidateLabelAnalysis = () => {
+    labelAnalysisRef.current.dirty = true
+  }
+
+  const getLabelAnalysis = () => {
+    if (!labelAnalysisRef.current.dirty) return labelAnalysisRef.current
+    const bitmap = getSharedBitmap()
+    const dims = getPrimaryNv()?.back?.dims
+    const nx = Number(dims?.[1] || 0)
+    const ny = Number(dims?.[2] || 0)
+    const nz = Math.max(1, Number(dims?.[3] || 1))
+    if (!bitmap?.length || nx < 1 || ny < 1 || nz < 1) {
+      labelAnalysisRef.current = { dirty: false, stats: {}, centroids: {} }
+      return labelAnalysisRef.current
+    }
+    const xy = nx * ny
+    const stats = {}
+    const sums = {}
+    for (let z = 0; z < nz; z += 1) {
+      const zOff = z * xy
+      for (let y = 0; y < ny; y += 1) {
+        const yOff = zOff + y * nx
+        for (let x = 0; x < nx; x += 1) {
+          const idx = yOff + x
+          const v = Number(bitmap[idx] || 0)
+          if (v <= 0) continue
+          stats[v] = (stats[v] || 0) + 1
+          const sum = sums[v] || (sums[v] = { sx: 0, sy: 0, sz: 0 })
+          sum.sx += x
+          sum.sy += y
+          sum.sz += z
+        }
+      }
+    }
+    const centroids = {}
+    for (const [labelValue, count] of Object.entries(stats)) {
+      const numericCount = Number(count || 0)
+      const sum = sums[labelValue]
+      if (!sum || numericCount <= 0) continue
+      centroids[labelValue] = [sum.sx / numericCount, sum.sy / numericCount, sum.sz / numericCount]
+    }
+    labelAnalysisRef.current = { dirty: false, stats, centroids }
+    return labelAnalysisRef.current
+  }
+
   const hasRefreshableDrawingBitmap = (nv) => {
     const dimsInfo = getDrawingDimsInfo(nv)
     if (!dimsInfo) return false
@@ -345,6 +434,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
   const applySharedBitmap = (bitmap, { refresh = true, reason = 'commit', sourcePaneKey = null, targetVox = null } = {}) => {
     if (!bitmap) return false
+    invalidateLabelAnalysis()
     sharedDrawBitmapRef.current = bitmap
     const primary = getPrimaryNv()
     if (primary) {
@@ -434,6 +524,40 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const nextHeight = Math.max(1, Math.round(rect.height))
     if (markerCanvas.width !== nextWidth) markerCanvas.width = nextWidth
     if (markerCanvas.height !== nextHeight) markerCanvas.height = nextHeight
+  }
+
+  const getPaneCanvasSize = (paneKey) => {
+    const canvas = getPaneCanvas(paneKey)
+    if (!canvas) return { width: 1, height: 1 }
+    const rect = canvas.getBoundingClientRect?.()
+    return {
+      width: Math.max(1, Math.round(rect?.width || canvas.clientWidth || canvas.width || 1)),
+      height: Math.max(1, Math.round(rect?.height || canvas.clientHeight || canvas.height || 1))
+    }
+  }
+
+  const getPaneBounds = (paneKey) => {
+    const { width, height } = getPaneCanvasSize(paneKey)
+    if (!PANE_CONFIGS[paneKey]?.is2D) {
+      const renderInsetPx = clamp(Math.round(Math.min(width, height) * 0.04), 10, 28)
+      const insetX = clamp(renderInsetPx / width, 0.02, 0.12)
+      const insetY = clamp(renderInsetPx / height, 0.02, 0.12)
+      return [insetX, insetY, 1 - insetX, 1 - insetY]
+    }
+    const sideInsetPx = clamp(Math.round(width * 0.075), 24, 52)
+    const verticalInsetPx = clamp(Math.round(height * 0.1), 24, 60)
+    const insetX = clamp(sideInsetPx / width, 0.04, 0.18)
+    const insetY = clamp(verticalInsetPx / height, 0.05, 0.2)
+    return [insetX, insetY, 1 - insetX, 1 - insetY]
+  }
+
+  const applyPaneBounds = (paneKey) => {
+    const nv = getPaneNv(paneKey)
+    if (!nv || typeof nv.setBounds !== 'function') return false
+    const [x1, y1, x2, y2] = getPaneBounds(paneKey)
+    nv.setBounds([x1, y1, x2, y2])
+    if (nv.opts) nv.opts.showBoundsBorder = false
+    return true
   }
 
   const scheduleMarkerRedraw = (delayFrames = 0) => {
@@ -528,7 +652,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       nv.scene.crosshairPos[2] = Number(frac[2] || 0)
       if (redraw && typeof nv.drawScene === 'function') nv.drawScene()
     }
-    scheduleMarkerRedraw(1)
+    if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1)
     return true
   }
 
@@ -577,6 +701,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         }
       }
     }
+    if (changed) invalidateLabelAnalysis()
     return changed
   }
 
@@ -668,6 +793,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     }
   }
 
+  const hasVisibleMarkerWork = () => {
+    if (annotationDraftRef.current) return true
+    const annotations = getCurrentAnnotations()
+    return annotations.some((annotation) => annotation?.type === 'freehand' && annotation?.renderOnMarker !== false)
+  }
+
   const drawStrokeMarkers = (immediate = false) => {
     if (immediate) {
       if (markerDrawRafRef.current !== null) {
@@ -719,8 +850,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const refreshDrawingAcrossPanes = ({ reason = 'commit', sourcePaneKey = null, targetVox = null } = {}) => {
     const startedAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
     const runtime = runtimeEnvRef.current || {}
+    const perfProfile = getViewerPerfProfile()
     const refreshPolicy = runtime.refreshPolicy || {}
-    const configuredMaxTier = reason === 'stroke'
+    const configuredMaxTier = reason === 'stroke' || reason === 'load'
       ? 1
       : Math.max(1, Math.min(3, Number(refreshPolicy.maxTier || 1)))
     const budgetMs = Math.max(40, Math.min(100, Number(runtime.refreshBudgetMs || 100)))
@@ -730,7 +862,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     else if (Number(perfState.emaMs || 0) > 20) effectiveMaxTier = Math.min(effectiveMaxTier, 2)
     const tiers = []
     const visibleKeys = getVisiblePaneKeys()
-    for (const key of visibleKeys) redrawPaneDrawing(key)
+    let redrawKeys = visibleKeys
+    if (reason === 'stroke') {
+      if (perfProfile.strokeRefreshTarget === 'source-only' && sourcePaneKey) {
+        redrawKeys = visibleKeys.filter((key) => key === sourcePaneKey)
+      } else {
+        redrawKeys = visibleKeys.filter((key) => PANE_CONFIGS[key]?.is2D)
+      }
+    }
+    if (!redrawKeys.length && sourcePaneKey) redrawKeys = [sourcePaneKey]
+    for (const key of redrawKeys) redrawPaneDrawing(key)
     tiers.push('standard')
     const nowMs = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
     const withinBudget = () => {
@@ -774,7 +915,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         tiers.push('simulated-slice-switch')
       }
     }
-    scheduleMarkerRedraw(1)
+    if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1)
     const finishedAt = typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
     const durationMs = Math.round((finishedAt - startedAt) * 100) / 100
     const prevEma = Number(perfState.emaMs || 0)
@@ -961,6 +1102,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     }
 
     if (!changed) return false
+    invalidateLabelAnalysis()
     refreshDrawingAcrossPanes({ reason: 'commit', sourcePaneKey: paneKey, targetVox: voxPoints[voxPoints.length - 1] })
     const pushed = pushSnapshot(nv.drawBitmap)
     if (pushed && recordHistory) {
@@ -984,6 +1126,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   }
 
   const logViewerDiagnostics = (stage, extra = {}) => {
+    if (!isViewerDebugEnabled()) return
     const panes = {}
     for (const key of getVisiblePaneKeys()) {
       const nv = getPaneNv(key)
@@ -1092,14 +1235,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
   const configurePaneSync = () => {
     const keys = getVisiblePaneKeys()
-    for (const key of keys) {
+    for (const key of PANE_ORDER) {
       const nv = getPaneNv(key)
+      if (!nv) continue
       const others = keys.filter((otherKey) => otherKey !== key).map((otherKey) => getPaneNv(otherKey)).filter(Boolean)
-      if (!nv || !others.length) continue
-      nv.broadcastTo(others, key === 'R'
-        ? { crosshair: true, cal_min: true, cal_max: true }
-        : { crosshair: true, zoomPan: true, cal_min: true, cal_max: true }
-      )
+      nv.broadcastTo(others, { crosshair: true })
     }
   }
 
@@ -1110,12 +1250,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     await Promise.all(PANE_ORDER.map(async (key) => {
       const canvas = getPaneCanvas(key)
       if (!canvas) return
+      const perfProfile = getViewerPerfProfile()
       const nv = new Niivue({
         show3Dcrosshair: false,
         logLevel: 'error',
         fontColor: [...ORIENTATION_TEXT_COLOR],
         sagittalNoseLeft: SAGITTAL_NOSE_LEFT,
-        loadingText: ''
+        loadingText: '',
+        forceDevicePixelRatio: perfProfile.forceDevicePixelRatio
       })
       await nv.attachToCanvas(canvas)
       nv.setIsOrientationTextVisible?.(true)
@@ -1126,6 +1268,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       crosshairWidthRef.current = Math.max(THREE_D_CROSSHAIR_MIN_WIDTH, Number(nv?.opts?.crosshairWidth || THREE_D_CROSSHAIR_MIN_WIDTH))
       nv.setCrosshairWidth?.(crosshairWidthRef.current)
       nv.setSliceType(getPaneSliceType(nv, key))
+      applyPaneBounds(key)
       nv.onLocationChange = () => {
         if (
           curvePaneKeyRef.current &&
@@ -1137,13 +1280,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             clearFreehandDraft()
           }
         }
-        scheduleMarkerRedraw(1)
+        if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1)
       }
       paneNvsRef.current[key] = nv
       const markerCanvas = getPaneMarkerCanvas(key)
       if (markerCanvas) syncMarkerCanvasSize(key)
       const observer = new ResizeObserver(() => {
         syncMarkerCanvasSize(key)
+        applyPaneBounds(key)
         drawStrokeMarkers()
       })
       observer.observe(canvas)
@@ -1159,6 +1303,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const loadImageIntoPanes = async () => {
     const imageBuffer = toArrayBuffer(image?.data)
     if (!imageBuffer) return
+    for (const key of PANE_ORDER) {
+      const nv = getPaneNv(key)
+      nv?.broadcastTo?.([], {})
+    }
     const baseTemplate = await NVImage.loadFromUrl({
       url: image.name,
       name: image.name,
@@ -1202,6 +1350,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       nv.scene.crosshairPos[1] = 0.5
       nv.scene.crosshairPos[2] = 0.5
       if (!nextVisiblePaneKeys.includes(key)) {
+        applyPaneBounds(key)
         nv.drawScene?.()
         continue
       }
@@ -1214,6 +1363,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       nv.setRadiologicalConvention(isRasterImageName(sourceName) ? true : !!radiological2D)
       nv.setSliceType(getPaneSliceType(nv, key))
       nv.setSliceMM?.(false)
+      applyPaneBounds(key)
+      if (PANE_CONFIGS[key]?.is2D) {
+        nv.setPan2Dxyzmm?.([...DEFAULT_PAN2D_VIEW])
+      }
       if (key === 'R' && !image?.isMaskOnly) {
         nv.setOpacity?.(0, renderMaskOnly3DRef.current ? 0 : 1)
       } else {
@@ -1254,7 +1407,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     configurePaneSync()
     applyDrawColormap()
     applyToolSettings(toolRef.current)
-    refreshDrawingAcrossPanes({ reason: 'commit', sourcePaneKey: 'A' })
+    refreshDrawingAcrossPanes({ reason: 'load', sourcePaneKey: 'A' })
     logViewerDiagnostics('after-load', {
       windowSource: windowRange?.preset ? `preset:${windowRange.preset.id}` : windowRange ? 'volume:auto-range' : 'none'
     })
@@ -1281,7 +1434,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     zoomToFit: () => {
       for (const key of getVisiblePaneKeys()) {
         const nv = getPaneNv(key)
-        if (PANE_CONFIGS[key]?.is2D) nv?.setPan2Dxyzmm?.([0, 0, 0, 1])
+        if (PANE_CONFIGS[key]?.is2D) nv?.setPan2Dxyzmm?.([...DEFAULT_PAN2D_VIEW])
       }
       requestAnimationFrame(() => {
         for (const key of getVisiblePaneKeys()) redrawPaneDrawing(key)
@@ -1377,46 +1530,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     exportAnnotations: () => cloneAnnotations(getCurrentAnnotations()),
     getRefreshDiagnostics: () => ({ ...(refreshTelemetryRef.current || {}) }),
     getAnnotationCount: () => getCurrentAnnotations().length,
-    getLabelStats: () => {
-      const bitmap = getSharedBitmap()
-      if (!bitmap?.length) return {}
-      const stats = {}
-      for (let i = 0; i < bitmap.length; i += 1) {
-        const v = bitmap[i]
-        if (v <= 0) continue
-        stats[v] = (stats[v] || 0) + 1
-      }
-      return stats
-    },
+    getLabelStats: () => ({ ...(getLabelAnalysis().stats || {}) }),
     jumpToLabel: (labelValue) => {
-      const bitmap = getSharedBitmap()
-      const dims = getPrimaryNv()?.back?.dims
-      const nx = Number(dims?.[1] || 0)
-      const ny = Number(dims?.[2] || 0)
-      const nz = Math.max(1, Number(dims?.[3] || 1))
-      if (!bitmap?.length || nx < 1 || ny < 1 || nz < 1) return false
       const target = Math.max(0, Math.min(255, Number(labelValue || 0)))
-      const xy = nx * ny
-      let count = 0
-      let sx = 0
-      let sy = 0
-      let sz = 0
-      for (let z = 0; z < nz; z += 1) {
-        const zOff = z * xy
-        for (let y = 0; y < ny; y += 1) {
-          const yOff = zOff + y * nx
-          for (let x = 0; x < nx; x += 1) {
-            const idx = yOff + x
-            if (bitmap[idx] !== target) continue
-            count += 1
-            sx += x
-            sy += y
-            sz += z
-          }
-        }
-      }
-      if (count === 0) return false
-      const vox = [sx / count, sy / count, sz / count]
+      const analysis = getLabelAnalysis()
+      const vox = analysis?.centroids?.[target] || analysis?.centroids?.[String(target)] || null
+      if (!Array.isArray(vox) || vox.length < 3) return false
       setCrosshairFromVox(vox, { redraw: true })
       return true
     }
@@ -1515,6 +1634,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const norm = toStoredPoint(paneKey, pos, markerCanvas)
         if (currentTool === 'freehand') {
           event.preventDefault()
+          const perfProfile = getViewerPerfProfile()
           const currentSliceIndex = getPaneCurrentSliceIndex(paneKey)
           if (!Number.isInteger(currentSliceIndex)) return
           let nextSteps = [...annotationStepsRef.current]
@@ -1544,7 +1664,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             pointDistancePx(annotationStepsRef.current[0], annotationStepsRef.current[annotationStepsRef.current.length - 1], markerCanvas, paneKey) <= FREEHAND_CLOSE_PX
           annotationDraftRef.current = makeFreehandDraft(annotationStepsRef.current, { nearClosed })
           const vox = canvasPosToVox(paneKey, pos)
-          if (vox) setCrosshairFromVox(vox, { redraw: true })
+          if (vox) setCrosshairFromVox(vox, { redraw: perfProfile.liveCrosshairDuringAnnotation })
           freehandDrawingRef.current = true
           activePointerIdRef.current = event.pointerId
           activePointerPaneKeyRef.current = paneKey
@@ -1579,6 +1699,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const currentTool = toolRef.current
         if (currentTool === 'freehand') {
           if (!freehandDrawingRef.current) return
+          const perfProfile = getViewerPerfProfile()
           if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) return
           if (activePointerPaneKeyRef.current !== paneKey) return
           const markerCanvas = getPaneMarkerCanvas(paneKey)
@@ -1603,7 +1724,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             pointDistancePx(annotationStepsRef.current[0], annotationStepsRef.current[annotationStepsRef.current.length - 1], markerCanvas, paneKey) <= FREEHAND_CLOSE_PX
           annotationDraftRef.current = makeFreehandDraft(annotationStepsRef.current, { nearClosed })
           const vox = canvasPosToVox(paneKey, pos)
-          if (vox) setCrosshairFromVox(vox, { redraw: true })
+          if (vox) setCrosshairFromVox(vox, { redraw: perfProfile.liveCrosshairDuringAnnotation })
           drawStrokeMarkers()
           return
         }
@@ -1678,7 +1799,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       }
 
       const onWheel = () => {
-        scheduleMarkerRedraw(2)
+        if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2)
       }
 
       canvas.addEventListener('pointerdown', onPointerDown)
