@@ -280,6 +280,52 @@ const Viewer = forwardRef(function Viewer(
     }
   }
 
+  const affinesDiffer = (a, b, epsilon = 1e-4) => {
+    if (!Array.isArray(a) || !Array.isArray(b)) return false
+    for (let row = 0; row < 3; row += 1) {
+      for (let col = 0; col < 4; col += 1) {
+        const av = Number(a?.[row]?.[col] || 0)
+        const bv = Number(b?.[row]?.[col] || 0)
+        if (Math.abs(av - bv) > epsilon) return true
+      }
+    }
+    return false
+  }
+
+  const normalizeVolumeOrientationFromQform = (volume, context = 'base') => {
+    const hdr = volume?.hdr
+    if (!hdr || typeof volume?.setAffine !== 'function' || typeof hdr?.getQformMat !== 'function') return null
+    const qformCode = safeInt(hdr?.qform_code ?? hdr?.qformCode, 0)
+    const sformCode = safeInt(hdr?.sform_code ?? hdr?.sformCode, 0)
+    const shouldPreferQform = qformCode > 0 && (sformCode < 1 || sformCode < qformCode)
+    if (!shouldPreferQform) return null
+    let qAffine = null
+    try {
+      qAffine = hdr.getQformMat()
+    } catch {
+      qAffine = null
+    }
+    if (!Array.isArray(qAffine) || !affinesDiffer(hdr?.affine, qAffine)) return null
+    const beforeSignature = inferAxisSignature(hdr?.affine)
+    const afterSignature = inferAxisSignature(qAffine)
+    volume.setAffine(qAffine)
+    console.info('[ViewerFix] normalized-orientation', {
+      context,
+      imageName: image?.displayName || image?.name || '',
+      qformCode,
+      sformCode,
+      beforeSignature,
+      afterSignature
+    })
+    return {
+      context,
+      qformCode,
+      sformCode,
+      beforeSignature,
+      afterSignature
+    }
+  }
+
   const getWindowInfo = () => {
     const nv = nvRef.current
     const vol = nv?.volumes?.[0]
@@ -1464,14 +1510,41 @@ const Viewer = forwardRef(function Viewer(
     return FOCUS_PLANES.includes(key) ? key : null
   }
 
+  const buildQuadLayoutSpec = () => {
+    const nv = nvRef.current
+    const canvas = canvasRef.current
+    if (!nv || !canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    const cssWidth = Math.max(1, Number(rect?.width || canvas.clientWidth || 1))
+    const cssHeight = Math.max(1, Number(rect?.height || canvas.clientHeight || 1))
+    const fontPx = Math.max(11, Math.ceil(Number(nv?.fontPx || 12)))
+    const outerX = Math.max(14, Math.min(22, Math.round(fontPx * 1.15)))
+    const outerTop = Math.max(14, Math.min(24, Math.round(fontPx * 1.05)))
+    const outerBottom = Math.max(18, Math.min(28, Math.round(fontPx * 1.5)))
+    const gapX = Math.max(26, Math.min(42, Math.round(fontPx * 2.1)))
+    const gapY = Math.max(34, Math.min(54, Math.round(fontPx * 2.75)))
+    const tileWidth = Math.max(120, (cssWidth - outerX * 2 - gapX) / 2)
+    const tileHeight = Math.max(120, (cssHeight - outerTop - outerBottom - gapY) / 2)
+    const left = outerX / cssWidth
+    const top = outerTop / cssHeight
+    const width = tileWidth / cssWidth
+    const height = tileHeight / cssHeight
+    const gapWidth = gapX / cssWidth
+    const gapHeight = gapY / cssHeight
+    return [
+      { sliceType: nv.sliceTypeCoronal, position: [left, top, width, height] },
+      { sliceType: nv.sliceTypeSagittal, position: [left + width + gapWidth, top, width, height] },
+      { sliceType: nv.sliceTypeAxial, position: [left, top + height + gapHeight, width, height] },
+      { sliceType: nv.sliceTypeRender, position: [left + width + gapWidth, top + height + gapHeight, width, height] }
+    ]
+  }
+
   const configureMultiplanarGrid = () => {
     const nv = nvRef.current
     if (!nv) return
-    // 业务目标：固定四窗布局 + 影像自适应填充，不硬编码大留白。
-    // 间距按当前字体高度动态计算，既保证方向字母可见，也避免把影像压得过小。
+    // 固定四窗矩形，避免顶部 MPR 被挤扁，且让影像在各自视口内等比适配。
     const fontPx = Math.max(10, Math.ceil(Number(nv?.fontPx || 12)))
-    const dynamicPad = Math.max(12, Math.min(16, fontPx + 3))
-    const dynamicOuterMargin = Math.max(2, Math.min(4, Math.round(fontPx * 0.28)))
+    const dynamicPad = Math.max(14, Math.min(20, fontPx + 4))
     if (typeof nv.setHeroImage === 'function') {
       nv.setHeroImage(0)
     } else if (nv?.opts) {
@@ -1489,12 +1562,24 @@ const Viewer = forwardRef(function Viewer(
     }
     if (nv?.opts) {
       nv.opts.multiplanarShowRender = 1
-      // 关闭强制等大布局，避免非等方体素数据在四窗里产生“被挤压”的观感。
-      nv.opts.multiplanarEqualSize = false
-      // 小外边距：保证边界字母不贴边，同时让影像尽量充满各自视口。
-      nv.opts.tileMargin = dynamicOuterMargin
+      nv.opts.multiplanarEqualSize = true
+      nv.opts.tileMargin = 0
     }
-    if (typeof nv.clearCustomLayout === 'function') {
+    const customLayout = buildQuadLayoutSpec()
+    if (typeof nv.setCustomLayout === 'function' && Array.isArray(customLayout)) {
+      try {
+        nv.setCustomLayout(customLayout)
+      } catch (error) {
+        console.warn('自定义四窗布局应用失败，回退内置布局', error)
+        if (typeof nv.clearCustomLayout === 'function') {
+          try {
+            nv.clearCustomLayout()
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } else if (typeof nv.clearCustomLayout === 'function') {
       try {
         nv.clearCustomLayout()
       } catch {
@@ -1529,7 +1614,7 @@ const Viewer = forwardRef(function Viewer(
     const nv = nvRef.current
     if (!nv?.scene) return
     // 四窗统一 fit：中心对齐 + 轻微安全缩放，避免边界裁切和跨影像表现不一致。
-    const next = [0, 0, 0, 0.98]
+    const next = [0, 0, 0, 0.96]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
@@ -1571,6 +1656,13 @@ const Viewer = forwardRef(function Viewer(
     const nv = nvRef.current
     if (!nv || typeof nv.setSliceType !== 'function') return false
     const key = normalizeFocusPlane(planeKey)
+    if (key && typeof nv.clearCustomLayout === 'function') {
+      try {
+        nv.clearCustomLayout()
+      } catch {
+        // ignore
+      }
+    }
     if (key === 'A') {
       nv.setSliceType(nv.sliceTypeAxial)
       return true
@@ -2122,6 +2214,7 @@ const Viewer = forwardRef(function Viewer(
         buffer: imageBuffer
       })
       if (cancelled) return
+      normalizeVolumeOrientationFromQform(nextVolume, 'base')
 
       historyRef.current = { stack: [], index: -1 }
       actionHistoryRef.current = []
@@ -2231,6 +2324,7 @@ const Viewer = forwardRef(function Viewer(
             buffer: maskBuffer
           })
           if (cancelled) return
+          normalizeVolumeOrientationFromQform(maskVolume, 'mask')
           nv.loadDrawing(maskVolume)
           redrawDrawingOverlay()
         }
@@ -2275,6 +2369,9 @@ const Viewer = forwardRef(function Viewer(
       const rect = canvas.getBoundingClientRect()
       markerCanvas.width = Math.max(1, Math.round(rect.width))
       markerCanvas.height = Math.max(1, Math.round(rect.height))
+      if (canFocusPlanesRef.current && !focusedPlaneRef.current) {
+        configureMultiplanarGrid()
+      }
       drawStrokeMarkers()
       scheduleQuadRecenter()
     }
