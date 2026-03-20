@@ -1294,10 +1294,10 @@ const Viewer = forwardRef(function Viewer(
     }
     if (nv?.opts) {
       nv.opts.multiplanarShowRender = 1
-      nv.opts.multiplanarEqualSize = true
-      // 使用 niivue 的自适应安全边距，给 A/R/L/P/S/I 方向字母留出固定空间，
-      // 防止影像边缘在四窗模式压住方向标记或出现裁切观感。
-      nv.opts.tileMargin = -1
+      // 关闭强制等大布局，避免非等方体素数据在四窗里产生“被挤压”的观感。
+      nv.opts.multiplanarEqualSize = false
+      // 使用稳定小边距，避免贴边但不造成整体下沉。
+      nv.opts.tileMargin = 2
     }
     if (typeof nv.clearCustomLayout === 'function') {
       try {
@@ -1332,8 +1332,8 @@ const Viewer = forwardRef(function Viewer(
   const normalizePanForQuad = () => {
     const nv = nvRef.current
     if (!nv?.scene) return
-    // 四窗统一复位：中心对齐 + 轻微安全缩放，确保影像边界不越过方向字母。
-    const next = [0, 0, 0, 0.98]
+    // 四窗统一复位：中心对齐 + 默认缩放，避免人为缩放导致视口看起来“被压扁”。
+    const next = [0, 0, 0, 1]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
