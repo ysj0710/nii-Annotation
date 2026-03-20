@@ -19,7 +19,7 @@ const SAGITTAL_NOSE_LEFT = true
 const DEFAULT_PAN2D_VIEW = [0, 0, 0, 0.98]
 const FREEHAND_CLOSE_PX = 10
 const FREEHAND_RESUME_PX = 28
-const FREEHAND_SAMPLE_STEP_PX = 2.5
+const FREEHAND_SAMPLE_STEP_PX = 1.5
 const FREEHAND_OPEN_COLOR = '#db70db'
 const MAX_MARKER_POINTS = 24000
 
@@ -238,6 +238,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const paneMarkerCanvasRefs = useRef({})
   const paneNvsRef = useRef({})
   const paneResizeObserversRef = useRef({})
+  const volumeTemplateCacheRef = useRef(new Map())
   const initializedRef = useRef(false)
   const sharedDrawBitmapRef = useRef(null)
   const visiblePaneKeysRef = useRef([...PANE_ORDER])
@@ -377,6 +378,44 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       strokeRefreshTarget: profile.strokeRefreshTarget || (lowPowerMode || mediumPowerMode ? 'source-only' : 'all-2d'),
       liveCrosshairDuringAnnotation: !!profile.liveCrosshairDuringAnnotation
     }
+  }
+
+  const touchTemplateCacheEntry = (cacheKey) => {
+    const cache = volumeTemplateCacheRef.current
+    const entry = cache.get(cacheKey)
+    if (!entry) return null
+    cache.delete(cacheKey)
+    cache.set(cacheKey, entry)
+    return entry
+  }
+
+  const pruneTemplateCache = () => {
+    const cache = volumeTemplateCacheRef.current
+    const perfProfile = getViewerPerfProfile()
+    const maxEntries = perfProfile.lowPowerMode ? 4 : perfProfile.mediumPowerMode ? 6 : 10
+    while (cache.size > maxEntries) {
+      const firstKey = cache.keys().next().value
+      if (typeof firstKey === 'undefined') break
+      cache.delete(firstKey)
+    }
+  }
+
+  const loadVolumeTemplate = async ({ cacheKey, buffer, name, imageMeta, context = 'base', allowCache = true }) => {
+    if (allowCache) {
+      const cached = touchTemplateCacheEntry(cacheKey)
+      if (cached?.template) return cached.template.clone()
+    }
+    const loaded = await NVImage.loadFromUrl({
+      url: name,
+      name,
+      buffer
+    })
+    normalizeVolumeOrientationFromQform(loaded, imageMeta, context)
+    if (allowCache) {
+      volumeTemplateCacheRef.current.set(cacheKey, { template: loaded.clone(), updatedAt: Date.now() })
+      pruneTemplateCache()
+    }
+    return loaded
   }
 
   const invalidateLabelAnalysis = () => {
@@ -730,6 +769,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     ctx.lineWidth = 1.8
     ctx.lineJoin = 'round'
     ctx.lineCap = 'round'
+    if (points.length === 1) {
+      const pt = points[0]
+      ctx.beginPath()
+      ctx.arc(pt.x, pt.y, 3.2, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
+      return
+    }
     ctx.beginPath()
     ctx.moveTo(points[0].x, points[0].y)
     for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y)
@@ -1160,9 +1207,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     for (const key of PANE_ORDER) {
       const nv = getPaneNv(key)
       if (!nv) continue
-      const showCrosshair = currentTool === 'pan'
+      const showCrosshair = key === 'R' ? true : currentTool === 'pan'
       nv.setCrosshairVisible?.(showCrosshair)
-      if (nv.opts) nv.opts.show3Dcrosshair = showCrosshair
+      if (nv.opts) nv.opts.show3Dcrosshair = key === 'R'
       if (typeof nv.setCrosshairWidth === 'function' && Number.isFinite(crosshairWidthRef.current)) {
         nv.setCrosshairWidth(showCrosshair ? crosshairWidthRef.current : 0)
       }
@@ -1307,12 +1354,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const nv = getPaneNv(key)
       nv?.broadcastTo?.([], {})
     }
-    const baseTemplate = await NVImage.loadFromUrl({
-      url: image.name,
+    const imageCacheKey = `image:${String(image?.id || image?.name || '')}`
+    const baseTemplate = await loadVolumeTemplate({
+      cacheKey: imageCacheKey,
+      buffer: imageBuffer,
       name: image.name,
-      buffer: imageBuffer
+      imageMeta: image,
+      context: 'base',
+      allowCache: true
     })
-    normalizeVolumeOrientationFromQform(baseTemplate, image, 'base')
 
     const sourceName = image?.displayName || image?.sourceName || image?.name
     const windowRange = !image?.isMaskOnly
@@ -1382,12 +1432,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (!image?.isMaskOnly && image?.mask && image?.maskAttached !== false) {
       const maskBuffer = toArrayBuffer(image.mask)
       if (maskBuffer) {
-        const maskTemplate = await NVImage.loadFromUrl({
-          url: image.maskName || image.name,
+        const maskTemplate = await loadVolumeTemplate({
+          cacheKey: `mask:${String(image?.id || image?.name || '')}:${String(image?.maskVersion || 0)}`,
+          buffer: maskBuffer,
           name: image.maskName || image.name,
-          buffer: maskBuffer
+          imageMeta: image,
+          context: 'mask',
+          allowCache: true
         })
-        normalizeVolumeOrientationFromQform(maskTemplate, image, 'mask')
         primary.loadDrawing(maskTemplate)
       } else {
         primary.createEmptyDrawing?.()
@@ -1456,7 +1508,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           const current = getCurrentAnnotations()
           if (!current.length) continue
           setCurrentAnnotations(current.slice(0, -1))
-          drawStrokeMarkers()
+          drawStrokeMarkers(true)
           emitDrawingChange('undo')
           return true
         }
@@ -1712,7 +1764,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           if (!current.length) {
             annotationStepsRef.current = [norm]
             annotationDraftRef.current = makeFreehandDraft([norm], { nearClosed: false })
-            drawStrokeMarkers()
+            drawStrokeMarkers(true)
             return
           }
           const last = current[current.length - 1]
@@ -1725,7 +1777,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           annotationDraftRef.current = makeFreehandDraft(annotationStepsRef.current, { nearClosed })
           const vox = canvasPosToVox(paneKey, pos)
           if (vox) setCrosshairFromVox(vox, { redraw: perfProfile.liveCrosshairDuringAnnotation })
-          drawStrokeMarkers()
+          drawStrokeMarkers(true)
           return
         }
         if (currentTool === 'brush') {
@@ -1764,7 +1816,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           if (markerCanvas && annotationStepsRef.current.length > 0) {
             const nearClosed = annotationStepsRef.current.length > 2 && pointDistancePx(annotationStepsRef.current[0], annotationStepsRef.current[annotationStepsRef.current.length - 1], markerCanvas, paneKey) <= FREEHAND_CLOSE_PX
             annotationDraftRef.current = makeFreehandDraft(annotationStepsRef.current, { nearClosed })
-            drawStrokeMarkers()
+            drawStrokeMarkers(true)
           }
           return
         }
@@ -1795,7 +1847,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const onPointerCancel = () => {
         clearFreehandDraft()
         clearStrokeState()
-        drawStrokeMarkers()
+        drawStrokeMarkers(true)
       }
 
       const onWheel = () => {
@@ -1856,7 +1908,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         actionHistoryRef.current.push({ type: 'freehand-complete', imageKey, hasMask: maskChanged })
       }
       clearFreehandDraft()
-      drawStrokeMarkers()
+      drawStrokeMarkers(true)
       emitDrawingChange('curve-complete')
     }
 

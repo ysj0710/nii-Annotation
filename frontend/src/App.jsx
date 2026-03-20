@@ -153,8 +153,8 @@ const detectBrowserRuntimeEnv = () => {
   const forceDevicePixelRatio = lowPowerMode
     ? 1
     : mediumPowerMode
-      ? Math.min(1.25, currentDpr || 1)
-      : Math.min(1.5, currentDpr || 1)
+      ? (isWindows ? 1 : Math.min(1.2, currentDpr || 1))
+      : (isWindows ? Math.min(1.1, currentDpr || 1) : Math.min(1.5, currentDpr || 1))
   const refreshPolicy = {
     maxTier,
     locationRefreshMinIntervalMs: maxTier >= 3 ? 34 : maxTier >= 2 ? 48 : 72,
@@ -166,7 +166,7 @@ const detectBrowserRuntimeEnv = () => {
     forceDevicePixelRatio,
     strokeRefreshTarget: lowPowerMode || mediumPowerMode ? 'source-only' : 'all-2d',
     liveCrosshairDuringAnnotation: false,
-    labelStatsDelayMs: lowPowerMode ? 680 : mediumPowerMode ? 420 : 240
+    labelStatsDelayMs: lowPowerMode ? 720 : mediumPowerMode ? 460 : 240
   }
 
   const lose = gl.getExtension('WEBGL_lose_context')
