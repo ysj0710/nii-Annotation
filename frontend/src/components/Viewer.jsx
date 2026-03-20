@@ -1288,9 +1288,10 @@ const Viewer = forwardRef(function Viewer(
       nv.opts.multiplanarLayout = 2
     }
     if (typeof nv.setMultiplanarPadPixels === 'function') {
-      nv.setMultiplanarPadPixels(2)
+      // 四窗行列间距需要覆盖方向字母高度，避免上排下边界字母被下一排切片覆盖。
+      nv.setMultiplanarPadPixels(10)
     } else if (nv?.opts) {
-      nv.opts.multiplanarPadPixels = 2
+      nv.opts.multiplanarPadPixels = 10
     }
     if (nv?.opts) {
       nv.opts.multiplanarShowRender = 1
