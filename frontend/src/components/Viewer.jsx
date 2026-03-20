@@ -92,6 +92,7 @@ const Viewer = forwardRef(function Viewer(
   const refreshTelemetryRef = useRef({
     last: null
   })
+  const contentAwarePanRef = useRef([0, 0, 0])
   const brushStrokeDirtyRef = useRef(false)
   const drawRefreshPendingRef = useRef(false)
   const markerRedrawRafRef = useRef(null)
@@ -349,6 +350,91 @@ const Viewer = forwardRef(function Viewer(
     }
   }
 
+  const computeContentBounds = (volume) => {
+    const hdrDims = volume?.hdr?.dims
+    const nx = safeInt(hdrDims?.[1], 0)
+    const ny = safeInt(hdrDims?.[2], 0)
+    const nz = safeInt(hdrDims?.[3], 0)
+    const img = volume?.img
+    if (!img || nx < 1 || ny < 1 || nz < 1) return null
+
+    const slope = Number(volume?.hdr?.scl_slope || 0) === 0 ? 1 : Number(volume?.hdr?.scl_slope || 1)
+    const inter = Number(volume?.hdr?.scl_inter || 0)
+    const globalMin = Number(volume?.global_min)
+    const globalMax = Number(volume?.global_max)
+    const calMin = Number(volume?.cal_min)
+    const range = Number.isFinite(globalMax - globalMin) && globalMax > globalMin ? globalMax - globalMin : 0
+    const baseThreshold = Number.isFinite(calMin) ? Math.max(-350, calMin - 180) : Math.max(-350, globalMin + range * 0.12)
+    const threshold = Number.isFinite(baseThreshold) ? baseThreshold : -350
+
+    const stepX = nx > 384 ? 2 : 1
+    const stepY = ny > 384 ? 2 : 1
+    const stepZ = nz > 96 ? 2 : 1
+    const xy = nx * ny
+    let minX = nx
+    let minY = ny
+    let minZ = nz
+    let maxX = -1
+    let maxY = -1
+    let maxZ = -1
+
+    for (let z = 0; z < nz; z += stepZ) {
+      const zOffset = z * xy
+      for (let y = 0; y < ny; y += stepY) {
+        const rowOffset = zOffset + y * nx
+        for (let x = 0; x < nx; x += stepX) {
+          const raw = Number(img[rowOffset + x] || 0)
+          const value = raw * slope + inter
+          if (!Number.isFinite(value) || value < threshold) continue
+          if (x < minX) minX = x
+          if (y < minY) minY = y
+          if (z < minZ) minZ = z
+          if (x > maxX) maxX = x
+          if (y > maxY) maxY = y
+          if (z > maxZ) maxZ = z
+        }
+      }
+    }
+
+    if (maxX < minX || maxY < minY || maxZ < minZ) return null
+    return {
+      minX: Math.max(0, minX - stepX),
+      maxX: Math.min(nx - 1, maxX + stepX),
+      minY: Math.max(0, minY - stepY),
+      maxY: Math.min(ny - 1, maxY + stepY),
+      minZ: Math.max(0, minZ - stepZ),
+      maxZ: Math.min(nz - 1, maxZ + stepZ),
+      threshold: toFixedNum(threshold, 2)
+    }
+  }
+
+  const computeContentAwarePan = (volume) => {
+    const hdrDims = volume?.hdr?.dims
+    const nx = safeInt(hdrDims?.[1], 0)
+    const ny = safeInt(hdrDims?.[2], 0)
+    const nz = safeInt(hdrDims?.[3], 0)
+    if (nx < 1 || ny < 1 || nz < 1) return { pan: [0, 0, 0], bounds: null }
+    const bounds = computeContentBounds(volume)
+    if (!bounds) return { pan: [0, 0, 0], bounds: null }
+
+    const volumeCenter = [(nx - 1) * 0.5, (ny - 1) * 0.5, (nz - 1) * 0.5]
+    const contentCenter = [
+      (bounds.minX + bounds.maxX) * 0.5,
+      (bounds.minY + bounds.maxY) * 0.5,
+      (bounds.minZ + bounds.maxZ) * 0.5
+    ]
+    const maxShift = [nx * 0.12, ny * 0.12, nz * 0.2]
+    const pan = volumeCenter.map((center, index) => {
+      const delta = center - contentCenter[index]
+      const limit = maxShift[index]
+      return Math.max(-limit, Math.min(limit, delta))
+    })
+    return {
+      pan: [toFixedNum(pan[0], 3), toFixedNum(pan[1], 3), toFixedNum(pan[2], 3)],
+      bounds
+    }
+  }
+
   const collectViewportTiles = () => {
     const nv = nvRef.current
     if (!Array.isArray(nv?.screenSlices)) return []
@@ -394,6 +480,9 @@ const Viewer = forwardRef(function Viewer(
         tileMargin: nv?.opts?.tileMargin,
         fontPx: toFixedNum(nv?.fontPx, 2)
       },
+      contentAwarePan: Array.isArray(contentAwarePanRef.current)
+        ? contentAwarePanRef.current.map((v) => toFixedNum(v, 3))
+        : null,
       orientation: getOrientationInfo(),
       window: windowInfo,
       windowSource: extra?.windowSource || null,
@@ -1614,7 +1703,8 @@ const Viewer = forwardRef(function Viewer(
     const nv = nvRef.current
     if (!nv?.scene) return
     // 四窗统一 fit：中心对齐 + 轻微安全缩放，避免边界裁切和跨影像表现不一致。
-    const next = [0, 0, 0, 0.96]
+    const contentPan = Array.isArray(contentAwarePanRef.current) ? contentAwarePanRef.current : [0, 0, 0]
+    const next = [Number(contentPan[0] || 0), Number(contentPan[1] || 0), Number(contentPan[2] || 0), 0.96]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
@@ -2121,6 +2211,7 @@ const Viewer = forwardRef(function Viewer(
   useEffect(() => {
     // 切换影像时清空临时态，避免上一张的草稿/轨迹残留到下一张。
     imageKeyRef.current = image?.id ? String(image.id) : ''
+    contentAwarePanRef.current = [0, 0, 0]
     annotationDraftRef.current = null
     annotationStepsRef.current = []
     curvePlaneRef.current = null
@@ -2215,6 +2306,13 @@ const Viewer = forwardRef(function Viewer(
       })
       if (cancelled) return
       normalizeVolumeOrientationFromQform(nextVolume, 'base')
+      const contentAwareFit = computeContentAwarePan(nextVolume)
+      contentAwarePanRef.current = Array.isArray(contentAwareFit?.pan) ? contentAwareFit.pan : [0, 0, 0]
+      console.info('[ViewerFix] content-aware-fit', {
+        imageName: image?.displayName || image?.name || '',
+        pan: contentAwarePanRef.current,
+        bounds: contentAwareFit?.bounds || null
+      })
 
       historyRef.current = { stack: [], index: -1 }
       actionHistoryRef.current = []
