@@ -1203,6 +1203,8 @@ export default function App() {
   const viewerRef = useRef(null)
   const viewerHostRef = useRef(null)
   const processedFilesRef = useRef(new Set())
+  const imageRecordCacheRef = useRef(new Map())
+  const imageRecordPrefetchingRef = useRef(new Set())
   const saveTimerRef = useRef(null)
   const saveIdleRef = useRef(null)
   const saveQueueRef = useRef(Promise.resolve(false))
@@ -1360,7 +1362,8 @@ export default function App() {
 
   useEffect(() => {
     activeImageIdRef.current = String(activeImage?.id || '')
-  }, [activeImage?.id])
+    if (activeImage?.id) cacheImageRecord(activeImage)
+  }, [activeImage])
 
   const clearLabelStatsSchedule = () => {
     if (statsTimerRef.current !== null) {
@@ -1375,6 +1378,52 @@ export default function App() {
       }
       statsIdleRef.current = null
     }
+  }
+
+  const cacheImageRecord = (record) => {
+    if (!record?.id) return record
+    const cache = imageRecordCacheRef.current
+    const key = String(record.id)
+    cache.delete(key)
+    cache.set(key, record)
+    while (cache.size > 10) {
+      const firstKey = cache.keys().next().value
+      if (typeof firstKey === 'undefined') break
+      cache.delete(firstKey)
+    }
+    return record
+  }
+
+  const getCachedImageRecord = (id) => {
+    const key = String(id || '')
+    if (!key) return null
+    const cache = imageRecordCacheRef.current
+    const record = cache.get(key) || null
+    if (!record) return null
+    cache.delete(key)
+    cache.set(key, record)
+    return record
+  }
+
+  const getImageRecordFast = async (id) => {
+    const cached = getCachedImageRecord(id)
+    if (cached) return cached
+    const record = await getImageById(id)
+    return record ? cacheImageRecord(record) : null
+  }
+
+  const prefetchImageRecord = (id) => {
+    const key = String(id || '')
+    if (!key || getCachedImageRecord(key) || imageRecordPrefetchingRef.current.has(key)) return
+    imageRecordPrefetchingRef.current.add(key)
+    void getImageById(key)
+      .then((record) => {
+        if (record) cacheImageRecord(record)
+      })
+      .catch(() => {})
+      .finally(() => {
+        imageRecordPrefetchingRef.current.delete(key)
+      })
   }
 
   const scheduleLabelStatsRefresh = () => {
@@ -1481,6 +1530,7 @@ export default function App() {
       })
     }
     const sorted = records.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    for (const record of sorted) cacheImageRecord(record)
     setImages(sorted.map(toListItem))
     if (!thumbnailRefreshInFlightRef.current) {
       const candidates = sorted.filter((record) => {
@@ -1852,81 +1902,111 @@ export default function App() {
     scheduleLabelStatsRefresh()
   }, [activeImage?.id, activeImage?.maskVersion, labels.length])
 
-  const persistActiveDrawing = async () => {
-    if (!activeImage?.id) return false
+  const captureViewerPersistPayload = async (imageRecord, phase = 'persist') => {
+    if (!imageRecord?.id) return null
     const overlayAnnotations = viewerRef.current?.exportAnnotations?.() || []
     const exported = await viewerRef.current?.exportDrawing()
     const raw = arrayBufferFrom(exported)
-    const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer: activeImage?.data }) : null
+    const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer: imageRecord?.data }) : null
     const hasMask = buffer ? hasNonZeroMaskNifti(buffer) : false
     const hasOverlayAnnotations = overlayAnnotations.length > 0
-    const clientEnvReport = buildClientEnvReport('persist')
-    if (!buffer && !hasOverlayAnnotations) {
-      localPersistDirtyRef.current = false
+    const clientEnvReport = buildClientEnvReport(phase, { imageId: String(imageRecord.id || '') })
+    return {
+      imageId: imageRecord.id,
+      imageName: imageRecord.name,
+      sourceMask: imageRecord.sourceMask || null,
+      overlayAnnotations,
+      buffer,
+      hasMask,
+      hasOverlayAnnotations,
+      clientEnvReport
+    }
+  }
+
+  const persistDrawingPayload = async (payload) => {
+    if (!payload?.imageId) return false
+    const imageId = payload.imageId
+    const clearCurrentDirtyFlag = () => {
+      if (String(activeImageIdRef.current || '') === String(imageId)) {
+        localPersistDirtyRef.current = false
+      }
+    }
+    const hasMask = !!payload.hasMask
+    const hasOverlayAnnotations = Array.isArray(payload.overlayAnnotations) && payload.overlayAnnotations.length > 0
+    if (!payload.buffer && !hasOverlayAnnotations) {
+      clearCurrentDirtyFlag()
       return false
     }
     if (!hasMask) {
-      await updateImage(activeImage.id, {
+      const updated = await updateImage(imageId, {
         mask: null,
         maskName: null,
         maskAttached: false,
-        overlayAnnotations,
-        lastClientEnvReport: clientEnvReport,
+        overlayAnnotations: payload.overlayAnnotations,
+        lastClientEnvReport: payload.clientEnvReport,
         modifiedByUser: true,
         updatedAt: Date.now()
       })
-      const hasSourceMask = !!activeImage.sourceMask
+      if (updated) cacheImageRecord(updated)
+      const hasSourceMask = !!payload.sourceMask
       setImages((prev) =>
         prev.map((img) =>
-          img.id === activeImage.id
+          img.id === imageId
             ? { ...img, hasMask: hasSourceMask, maskAttached: false }
             : img
         )
       )
       setActiveImage((prev) =>
-        prev
+        prev && prev.id === imageId
           ? {
               ...prev,
               mask: null,
               maskName: null,
               maskAttached: false,
-              overlayAnnotations,
-              lastClientEnvReport: clientEnvReport,
+              overlayAnnotations: payload.overlayAnnotations,
+              lastClientEnvReport: payload.clientEnvReport,
               modifiedByUser: true
             }
           : prev
       )
-      localPersistDirtyRef.current = false
+      clearCurrentDirtyFlag()
       return true
     }
 
-    await updateImage(activeImage.id, {
-      mask: buffer,
-      maskName: `${fileStem(activeImage.name)}.nii.gz`,
+    const updated = await updateImage(imageId, {
+      mask: payload.buffer,
+      maskName: `${fileStem(payload.imageName)}.nii.gz`,
       maskAttached: true,
-      overlayAnnotations,
-      lastClientEnvReport: clientEnvReport,
+      overlayAnnotations: payload.overlayAnnotations,
+      lastClientEnvReport: payload.clientEnvReport,
       modifiedByUser: true,
       updatedAt: Date.now()
     })
+    if (updated) cacheImageRecord(updated)
 
     setImages((prev) =>
-      prev.map((img) => (img.id === activeImage.id ? { ...img, hasMask: true, maskAttached: true } : img))
+      prev.map((img) => (img.id === imageId ? { ...img, hasMask: true, maskAttached: true } : img))
     )
     setActiveImage((prev) =>
-      prev
+      prev && prev.id === imageId
         ? {
             ...prev,
-            mask: buffer,
+            mask: payload.buffer,
             maskAttached: true,
-            overlayAnnotations,
-            lastClientEnvReport: clientEnvReport,
+            overlayAnnotations: payload.overlayAnnotations,
+            lastClientEnvReport: payload.clientEnvReport,
             modifiedByUser: true
           }
         : prev
     )
-    localPersistDirtyRef.current = false
+    clearCurrentDirtyFlag()
     return true
+  }
+
+  const persistActiveDrawing = async () => {
+    if (!activeImage?.id) return false
+    const payload = await captureViewerPersistPayload(activeImage, 'persist')
+    return persistDrawingPayload(payload)
   }
 
   const clearAutoSaveSchedule = () => {
@@ -1944,14 +2024,21 @@ export default function App() {
     }
   }
 
-  const enqueuePersistActiveDrawing = async () => {
+  const enqueuePersistPayload = (payload) => {
     saveQueueRef.current = saveQueueRef.current
-      .then(() => persistActiveDrawing())
+      .then(() => persistDrawingPayload(payload))
       .catch((error) => {
         console.error('自动保存失败', error)
         return false
       })
     return saveQueueRef.current
+  }
+
+  const enqueuePersistActiveDrawing = async () => {
+    if (!activeImage?.id) return false
+    const payload = await captureViewerPersistPayload(activeImage, 'persist')
+    if (!payload) return false
+    return enqueuePersistPayload(payload)
   }
 
   const scheduleAutoPersist = (delay = 1200) => {
@@ -2206,17 +2293,24 @@ export default function App() {
     if (activeImage?.id === id) return
     // 取消待执行的自动保存，防止切换后的旧计时器用错误的影像数据写入 DB
     clearAutoSaveSchedule()
-    await saveQueueRef.current
-    if (localPersistDirtyRef.current) {
-      await persistActiveDrawing()
+    const currentRecord = activeImage
+    const nextRecordPromise = getImageRecordFast(id)
+    let pendingPayload = null
+    if (localPersistDirtyRef.current && currentRecord?.id) {
+      pendingPayload = await captureViewerPersistPayload(currentRecord, 'switch')
+      localPersistDirtyRef.current = false
     }
-    const record = await getImageById(id)
+    const record = await nextRecordPromise
     if (!record) return
+    cacheImageRecord(record)
     activeImageIdRef.current = String(record.id)
     setActiveImage({
       ...record,
       maskVersion: hasAttachedMask(record) ? 1 : 0
     })
+    if (pendingPayload) {
+      void enqueuePersistPayload(pendingPayload)
+    }
   }
 
   const switchQueueImage = async (direction = 1) => {
@@ -2260,6 +2354,19 @@ export default function App() {
     if (!target || !target.id || target._placeholder || String(target.id).startsWith('remote-')) return
     await selectImage(target.id)
   }
+
+  useEffect(() => {
+    if (isBatchMode || queueImages.length > 0) return
+    if (!activeImage?.id || displayImages.length <= 1) return
+    const currentIndex = displayImages.findIndex((item) => item.id === activeImage.id)
+    if (currentIndex < 0) return
+    const prev = displayImages[(currentIndex - 1 + displayImages.length) % displayImages.length]
+    const next = displayImages[(currentIndex + 1) % displayImages.length]
+    for (const item of [prev, next]) {
+      if (!item?.id || item._placeholder || String(item.id).startsWith('remote-')) continue
+      prefetchImageRecord(item.id)
+    }
+  }, [activeImage?.id, displayImages, isBatchMode, queueImages.length])
 
   useEffect(() => {
     const host = viewerHostRef.current
