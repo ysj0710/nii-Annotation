@@ -167,6 +167,95 @@ const Viewer = forwardRef(function Viewer(
     if (typeof notify === 'function') notify(reason)
   }
 
+  const planeLabelFromAxCorSag = (axCorSag) => {
+    if (Number(axCorSag) === 0) return 'A'
+    if (Number(axCorSag) === 1) return 'C'
+    if (Number(axCorSag) === 2) return 'S'
+    return String(axCorSag ?? '?')
+  }
+
+  const toFixedNum = (value, digits = 2) => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return null
+    return Number(n.toFixed(digits))
+  }
+
+  const getWindowInfo = () => {
+    const nv = nvRef.current
+    const vol = nv?.volumes?.[0]
+    const calMin = Number(vol?.cal_min)
+    const calMax = Number(vol?.cal_max)
+    if (!Number.isFinite(calMin) || !Number.isFinite(calMax) || calMax <= calMin) {
+      return {
+        calMin: null,
+        calMax: null,
+        ww: null,
+        wl: null
+      }
+    }
+    const ww = calMax - calMin
+    const wl = (calMax + calMin) * 0.5
+    return {
+      calMin: toFixedNum(calMin, 2),
+      calMax: toFixedNum(calMax, 2),
+      ww: toFixedNum(ww, 2),
+      wl: toFixedNum(wl, 2)
+    }
+  }
+
+  const collectViewportTiles = () => {
+    const nv = nvRef.current
+    if (!Array.isArray(nv?.screenSlices)) return []
+    return nv.screenSlices.map((tile, index) => {
+      const ltwh = Array.isArray(tile?.leftTopWidthHeight) ? tile.leftTopWidthHeight : []
+      return {
+        idx: index,
+        plane: planeLabelFromAxCorSag(tile?.axCorSag),
+        sliceFrac: toFixedNum(tile?.sliceFrac, 4),
+        x: toFixedNum(ltwh[0], 1),
+        y: toFixedNum(ltwh[1], 1),
+        w: toFixedNum(ltwh[2], 1),
+        h: toFixedNum(ltwh[3], 1)
+      }
+    })
+  }
+
+  const logViewerDiagnostics = (stage, extra = {}) => {
+    const nv = nvRef.current
+    if (!nv) return
+    const canvas = canvasRef.current
+    const pan = Array.isArray(nv?.scene?.pan2Dxyzmm) ? nv.scene.pan2Dxyzmm : []
+    const crosshair = Array.isArray(nv?.scene?.crosshairPos) ? nv.scene.crosshairPos : []
+    const dims = nv?.back?.dims
+    const windowInfo = getWindowInfo()
+    const tiles = collectViewportTiles()
+    const summary = {
+      stage,
+      imageId: String(image?.id || ''),
+      imageName: image?.displayName || image?.name || '',
+      canvas: {
+        width: Number(canvas?.width || 0),
+        height: Number(canvas?.height || 0)
+      },
+      dims: Array.isArray(dims) ? [dims[1], dims[2], dims[3]] : null,
+      pan2Dxyzmm: [toFixedNum(pan[0], 4), toFixedNum(pan[1], 4), toFixedNum(pan[2], 4), toFixedNum(pan[3], 4)],
+      crosshairPos: [toFixedNum(crosshair[0], 4), toFixedNum(crosshair[1], 4), toFixedNum(crosshair[2], 4)],
+      isSliceMM: !!nv?.opts?.isSliceMM,
+      radiological: !!nv?.opts?.isRadiologicalConvention,
+      layout: {
+        multiplanarLayout: nv?.opts?.multiplanarLayout,
+        multiplanarPadPixels: nv?.opts?.multiplanarPadPixels,
+        tileMargin: nv?.opts?.tileMargin,
+        fontPx: toFixedNum(nv?.fontPx, 2)
+      },
+      window: windowInfo,
+      windowSource: extra?.windowSource || null,
+      tiles
+    }
+    // 诊断日志：用于排查个别影像在固定视口中的错位/出框，以及 WW/WL 应用是否一致。
+    console.info('[ViewerDiag]', summary)
+  }
+
   const sync2DShaderDrawSliceByVox = (vox) => {
     const nv = nvRef.current
     if (!nv?.opts?.is2DSliceShader || !Array.isArray(nv.scene?.crosshairPos) || !Array.isArray(vox)) return
@@ -1277,6 +1366,11 @@ const Viewer = forwardRef(function Viewer(
   const configureMultiplanarGrid = () => {
     const nv = nvRef.current
     if (!nv) return
+    // 业务目标：固定四窗布局 + 影像自适应填充，不硬编码大留白。
+    // 间距按当前字体高度动态计算，既保证方向字母可见，也避免把影像压得过小。
+    const fontPx = Math.max(10, Math.ceil(Number(nv?.fontPx || 12)))
+    const dynamicPad = Math.max(12, Math.min(16, fontPx + 3))
+    const dynamicOuterMargin = Math.max(2, Math.min(4, Math.round(fontPx * 0.28)))
     if (typeof nv.setHeroImage === 'function') {
       nv.setHeroImage(0)
     } else if (nv?.opts) {
@@ -1288,17 +1382,16 @@ const Viewer = forwardRef(function Viewer(
       nv.opts.multiplanarLayout = 2
     }
     if (typeof nv.setMultiplanarPadPixels === 'function') {
-      // 四窗行列间距需要覆盖方向字母高度，避免上排下边界字母被下一排切片覆盖。
-      nv.setMultiplanarPadPixels(10)
+      nv.setMultiplanarPadPixels(dynamicPad)
     } else if (nv?.opts) {
-      nv.opts.multiplanarPadPixels = 10
+      nv.opts.multiplanarPadPixels = dynamicPad
     }
     if (nv?.opts) {
       nv.opts.multiplanarShowRender = 1
       // 关闭强制等大布局，避免非等方体素数据在四窗里产生“被挤压”的观感。
       nv.opts.multiplanarEqualSize = false
-      // 使用稳定小边距，避免贴边但不造成整体下沉。
-      nv.opts.tileMargin = 2
+      // 小外边距：保证边界字母不贴边，同时让影像尽量充满各自视口。
+      nv.opts.tileMargin = dynamicOuterMargin
     }
     if (typeof nv.clearCustomLayout === 'function') {
       try {
@@ -1323,18 +1416,19 @@ const Viewer = forwardRef(function Viewer(
       nv.opts.isCornerOrientationText = false
     }
     if (typeof nv.setSliceMM === 'function') {
-      // 与 ITK-SNAP 一致使用 world-space 切片，保证方向与空间显示一致性。
-      nv.setSliceMM(true)
+      // 四窗使用 voxel-space 可规避不同数据物理尺度差异带来的 fit 抖动/错位，
+      // 让不同序列都稳定“适配到固定视口”。
+      nv.setSliceMM(false)
     } else if (nv?.opts) {
-      nv.opts.isSliceMM = true
+      nv.opts.isSliceMM = false
     }
   }
 
   const normalizePanForQuad = () => {
     const nv = nvRef.current
     if (!nv?.scene) return
-    // 四窗统一复位：中心对齐 + 默认缩放，避免人为缩放导致视口看起来“被压扁”。
-    const next = [0, 0, 0, 1]
+    // 四窗统一 fit：中心对齐 + 轻微安全缩放，避免边界裁切和跨影像表现不一致。
+    const next = [0, 0, 0, 0.98]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
@@ -1343,6 +1437,20 @@ const Viewer = forwardRef(function Viewer(
         nv.drawScene()
       }
     }
+  }
+
+  const stabilizeQuadFit = () => {
+    let pass = 0
+    const run = () => {
+      if (!canFocusPlanesRef.current || focusedPlaneRef.current) return
+      normalizePanForQuad()
+      pass += 1
+      logViewerDiagnostics(`quad-fit-pass-${pass}`)
+      if (pass < 3) {
+        requestAnimationFrame(run)
+      }
+    }
+    requestAnimationFrame(run)
   }
 
   const scheduleQuadRecenter = () => {
@@ -1952,6 +2060,12 @@ const Viewer = forwardRef(function Viewer(
           nv.drawScene()
         }
       }
+      const windowSource = windowRange
+        ? windowRange?.preset
+          ? `preset:${windowRange.preset.id}`
+          : 'volume:auto-range'
+        : 'none'
+      logViewerDiagnostics('after-window-apply', { windowSource })
 
       const dims = nv.back?.dims
       const hdr = nv.volumes?.[0]?.hdr
@@ -1995,6 +2109,9 @@ const Viewer = forwardRef(function Viewer(
         focusedPlaneRef.current = preferredPlane
         setFocusedPlane(preferredPlane)
         setSliceTypeForPlane(preferredPlane, { normalizePan: preferredPlane === null })
+        if (preferredPlane === null) {
+          stabilizeQuadFit()
+        }
       }
 
       if (image.isMaskOnly) {
@@ -2028,6 +2145,8 @@ const Viewer = forwardRef(function Viewer(
       requestAnimationFrame(() => {
         redrawDrawingOverlay()
         drawStrokeMarkers()
+        stabilizeQuadFit()
+        logViewerDiagnostics('after-load-raf', { windowSource })
       })
       emitDrawingChange('load')
     }
