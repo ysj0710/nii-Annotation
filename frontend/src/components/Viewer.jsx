@@ -180,6 +180,106 @@ const Viewer = forwardRef(function Viewer(
     return Number(n.toFixed(digits))
   }
 
+  const safeInt = (value, fallback = 0) => {
+    const n = Number(value)
+    if (!Number.isFinite(n)) return fallback
+    return Math.trunc(n)
+  }
+
+  const safeOrientationText = (value) => {
+    if (!value) return null
+    const text = String(value).trim()
+    return text.length > 0 ? text : null
+  }
+
+  const calcDet3 = (m) => {
+    if (!Array.isArray(m) || m.length < 3) return null
+    const a00 = Number(m?.[0]?.[0] || 0)
+    const a01 = Number(m?.[0]?.[1] || 0)
+    const a02 = Number(m?.[0]?.[2] || 0)
+    const a10 = Number(m?.[1]?.[0] || 0)
+    const a11 = Number(m?.[1]?.[1] || 0)
+    const a12 = Number(m?.[1]?.[2] || 0)
+    const a20 = Number(m?.[2]?.[0] || 0)
+    const a21 = Number(m?.[2]?.[1] || 0)
+    const a22 = Number(m?.[2]?.[2] || 0)
+    const det =
+      a00 * (a11 * a22 - a12 * a21) -
+      a01 * (a10 * a22 - a12 * a20) +
+      a02 * (a10 * a21 - a11 * a20)
+    return Number.isFinite(det) ? det : null
+  }
+
+  const formatAffineRow = (row = []) => {
+    return [toFixedNum(row?.[0], 5), toFixedNum(row?.[1], 5), toFixedNum(row?.[2], 5), toFixedNum(row?.[3], 5)]
+  }
+
+  const inferAxisSignature = (affine) => {
+    if (!Array.isArray(affine) || affine.length < 3) return null
+    const rows = [affine[0] || [], affine[1] || [], affine[2] || []]
+    const axisName = ['X', 'Y', 'Z']
+    const parts = []
+    for (let col = 0; col < 3; col += 1) {
+      let bestRow = -1
+      let bestAbs = -1
+      let bestValue = 0
+      for (let row = 0; row < 3; row += 1) {
+        const value = Number(rows[row]?.[col] || 0)
+        const absValue = Math.abs(value)
+        if (absValue > bestAbs) {
+          bestAbs = absValue
+          bestRow = row
+          bestValue = value
+        }
+      }
+      if (bestRow < 0 || bestAbs <= 0) {
+        parts.push(`${axisName[col]}:?`)
+        continue
+      }
+      const sign = bestValue >= 0 ? '+' : '-'
+      parts.push(`${axisName[col]}:${axisName[bestRow]}${sign}`)
+    }
+    return parts.join(' ')
+  }
+
+  const getOrientationInfo = () => {
+    const nv = nvRef.current
+    const vol = nv?.volumes?.[0]
+    const hdr = vol?.hdr
+    const affine = hdr?.affine
+    const det = calcDet3(affine)
+    const pixDims = Array.isArray(hdr?.pixDims)
+      ? [toFixedNum(hdr.pixDims[0], 5), toFixedNum(hdr.pixDims[1], 5), toFixedNum(hdr.pixDims[2], 5), toFixedNum(hdr.pixDims[3], 5)]
+      : null
+    const orientationText = []
+    try {
+      if (typeof hdr?.getQformMat === 'function' && typeof hdr?.convertNiftiSFormToNEMA === 'function') {
+        const qAffine = hdr.getQformMat()
+        orientationText.push(`qform:${safeOrientationText(hdr.convertNiftiSFormToNEMA(qAffine)) || 'n/a'}`)
+      }
+      if (Array.isArray(affine) && typeof hdr?.convertNiftiSFormToNEMA === 'function') {
+        orientationText.push(`sform:${safeOrientationText(hdr.convertNiftiSFormToNEMA(affine)) || 'n/a'}`)
+      }
+    } catch {
+      // ignore diagnostic conversion errors
+    }
+    return {
+      qformCode: safeInt(hdr?.qform_code ?? hdr?.qformCode, 0),
+      sformCode: safeInt(hdr?.sform_code ?? hdr?.sformCode, 0),
+      pixDims,
+      qfac: toFixedNum(hdr?.pixDims?.[0], 5),
+      permRAS: Array.isArray(vol?.permRAS) ? vol.permRAS.map((v) => safeInt(v, 0)) : null,
+      dimsRAS: Array.isArray(vol?.dimsRAS) ? vol.dimsRAS.map((v) => safeInt(v, 0)) : null,
+      pixDimsRAS: Array.isArray(vol?.pixDimsRAS)
+        ? [toFixedNum(vol.pixDimsRAS[0], 5), toFixedNum(vol.pixDimsRAS[1], 5), toFixedNum(vol.pixDimsRAS[2], 5)]
+        : null,
+      affineDet: toFixedNum(det, 6),
+      axisSignature: inferAxisSignature(affine),
+      affineRows: Array.isArray(affine) ? [formatAffineRow(affine[0]), formatAffineRow(affine[1]), formatAffineRow(affine[2])] : null,
+      orientationText: orientationText.length ? orientationText.join(' | ') : null
+    }
+  }
+
   const getWindowInfo = () => {
     const nv = nvRef.current
     const vol = nv?.volumes?.[0]
@@ -248,6 +348,7 @@ const Viewer = forwardRef(function Viewer(
         tileMargin: nv?.opts?.tileMargin,
         fontPx: toFixedNum(nv?.fontPx, 2)
       },
+      orientation: getOrientationInfo(),
       window: windowInfo,
       windowSource: extra?.windowSource || null,
       tiles
