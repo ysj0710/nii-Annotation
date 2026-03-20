@@ -1299,8 +1299,10 @@ const Viewer = forwardRef(function Viewer(
     }
     if (nv?.opts) {
       nv.opts.multiplanarShowRender = 1
-      nv.opts.multiplanarEqualSize = true
-      nv.opts.tileMargin = 0
+      nv.opts.multiplanarEqualSize = false
+      // 使用 niivue 的自适应安全边距，给 A/R/L/P/S/I 方向字母留出固定空间，
+      // 防止影像边缘在四窗模式压住方向标记或出现裁切观感。
+      nv.opts.tileMargin = -1
     }
     if (typeof nv.clearCustomLayout === 'function') {
       try {
@@ -1324,13 +1326,19 @@ const Viewer = forwardRef(function Viewer(
     } else if (nv?.opts) {
       nv.opts.isCornerOrientationText = false
     }
+    if (typeof nv.setSliceMM === 'function') {
+      // 四窗显示优先保证几何居中与完整性，使用 voxel-space 可避免部分数据的 world-space 偏移。
+      nv.setSliceMM(false)
+    } else if (nv?.opts) {
+      nv.opts.isSliceMM = false
+    }
   }
 
   const normalizePanForQuad = () => {
     const nv = nvRef.current
     if (!nv?.scene) return
-    // 四窗模式使用轻微缩放回退，避免边缘被切掉，同时保持视口本身不缩小。
-    const next = [0, 0, 0, 0.93]
+    // 四窗统一复位：中心对齐 + 轻微安全缩放，确保影像边界不越过方向字母。
+    const next = [0, 0, 0, 0.98]
     if (typeof nv.setPan2Dxyzmm === 'function') {
       nv.setPan2Dxyzmm(next)
     } else {
@@ -1961,10 +1969,20 @@ const Viewer = forwardRef(function Viewer(
           }
         }
         nv.setRadiologicalConvention(isRaster2D ? true : !!radiological2D)
+        if (Array.isArray(nv.scene?.crosshairPos)) {
+          nv.scene.crosshairPos[0] = 0.5
+          nv.scene.crosshairPos[1] = 0.5
+          nv.scene.crosshairPos[2] = 0.5
+        }
         nv.setSliceType(nv.sliceTypeAxial)
       } else {
         if (cancelled) return
         setCanFocusPlanes(true)
+        if (Array.isArray(nv.scene?.crosshairPos)) {
+          nv.scene.crosshairPos[0] = 0.5
+          nv.scene.crosshairPos[1] = 0.5
+          nv.scene.crosshairPos[2] = 0.5
+        }
         const preferredPlane = normalizeFocusPlane(focusedPlaneRef.current)
         focusedPlaneRef.current = preferredPlane
         setFocusedPlane(preferredPlane)
