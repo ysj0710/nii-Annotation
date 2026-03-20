@@ -433,16 +433,16 @@ const encodeNiftiUInt8 = ({
   dv.setFloat32(116, 0, true) // scl_inter
   dv.setFloat32(124, 255, true) // cal_max
   dv.setFloat32(128, 0, true) // cal_min
-  dv.setInt16(254, Number(headerTemplate?.sform_code || 0), true)
-  dv.setInt16(252, Number(headerTemplate?.qform_code || 1), true)
-  dv.setInt8(123, Number(headerTemplate?.xyzt_units || 10))
+  dv.setInt16(254, Number(headerTemplate?.sform_code ?? 0), true)
+  dv.setInt16(252, Number(headerTemplate?.qform_code ?? 1), true)
+  dv.setInt8(123, Number(headerTemplate?.xyzt_units ?? 10))
   // 与 ITK-SNAP 常见 2D 影像约定对齐：X/Y 负方向，避免 JPG 与配对 NII 方向不一致。
-  dv.setFloat32(256, Number(headerTemplate?.quatern_b || 0), true)
-  dv.setFloat32(260, Number(headerTemplate?.quatern_c || 0), true)
-  dv.setFloat32(264, Number(headerTemplate?.quatern_d || 0), true)
-  dv.setFloat32(268, Number(headerTemplate?.qoffset_x || 0), true)
-  dv.setFloat32(272, Number(headerTemplate?.qoffset_y || 0), true)
-  dv.setFloat32(276, Number(headerTemplate?.qoffset_z || 0), true)
+  dv.setFloat32(256, Number(headerTemplate?.quatern_b ?? 0), true)
+  dv.setFloat32(260, Number(headerTemplate?.quatern_c ?? 0), true)
+  dv.setFloat32(264, Number(headerTemplate?.quatern_d ?? 0), true)
+  dv.setFloat32(268, Number(headerTemplate?.qoffset_x ?? 0), true)
+  dv.setFloat32(272, Number(headerTemplate?.qoffset_y ?? 0), true)
+  dv.setFloat32(276, Number(headerTemplate?.qoffset_z ?? 0), true)
 
   if (Array.isArray(headerTemplate?.affine) && headerTemplate.affine.length >= 3) {
     dv.setFloat32(280, Number(headerTemplate.affine[0]?.[0] || 0), true)
@@ -1920,6 +1920,7 @@ export default function App() {
         overlayAnnotations,
         bitmap: persistedState.bitmap,
         dims: persistedState.dims,
+        headerTemplate: persistedState.headerTemplate || null,
         buffer: null,
         hasMask: !!persistedState.hasMask,
         hasOverlayAnnotations,
@@ -1941,6 +1942,7 @@ export default function App() {
       buffer,
       bitmap: null,
       dims: null,
+      headerTemplate: null,
       hasMask,
       hasOverlayAnnotations,
       hadExistingContent,
@@ -1959,7 +1961,10 @@ export default function App() {
     }
     let buffer = payload.buffer || null
     if (!buffer && payload.hasMask && payload.bitmap && Array.isArray(payload.dims)) {
-      buffer = encodeMaskBitmapToNifti(payload.bitmap, payload.dims, { templateBuffer: payload.templateBuffer })
+      buffer = encodeMaskBitmapToNifti(payload.bitmap, payload.dims, {
+        templateBuffer: payload.templateBuffer,
+        headerTemplate: payload.headerTemplate
+      })
     }
     const hasMask = !!(payload.hasMask && buffer)
     const hasOverlayAnnotations = Array.isArray(payload.overlayAnnotations) && payload.overlayAnnotations.length > 0
@@ -2590,20 +2595,22 @@ const normalizeMaskNiftiToScalar = (buffer, { templateBuffer = null } = {}) => {
   })
 }
 
-const encodeMaskBitmapToNifti = (bitmap, dims, { templateBuffer = null } = {}) => {
+const encodeMaskBitmapToNifti = (bitmap, dims, { templateBuffer = null, headerTemplate = null } = {}) => {
   const width = Math.max(1, Number(dims?.[0] || 0))
   const height = Math.max(1, Number(dims?.[1] || 0))
   const depth = Math.max(1, Number(dims?.[2] || 1))
   const voxelCount = width * height * depth
   if (!bitmap || voxelCount < 1 || bitmap.length !== voxelCount) return null
 
-  let referenceHeader = null
-  const template = arrayBufferFrom(templateBuffer)
-  if (template && isNiftiBuffer(template)) {
-    try {
-      referenceHeader = decodeNifti(template).header
-    } catch {
-      referenceHeader = null
+  let referenceHeader = headerTemplate || null
+  if (!referenceHeader) {
+    const template = arrayBufferFrom(templateBuffer)
+    if (template && isNiftiBuffer(template)) {
+      try {
+        referenceHeader = decodeNifti(template).header
+      } catch {
+        referenceHeader = null
+      }
     }
   }
 

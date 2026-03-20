@@ -221,6 +221,29 @@ const getOrientationInfoFromVolume = (volume) => {
   }
 }
 
+const cloneHeaderTemplateFromVolume = (volume) => {
+  const hdr = volume?.hdr
+  if (!hdr) return null
+  const cloneAffine = (affine) => {
+    if (!Array.isArray(affine) || affine.length < 3) return null
+    return [0, 1, 2].map((row) => [0, 1, 2, 3].map((col) => Number(affine?.[row]?.[col] || 0)))
+  }
+  const pixDims = Array.isArray(hdr?.pixDims) ? Array.from(hdr.pixDims).map((value) => Number(value || 0)) : null
+  return {
+    pixDims,
+    affine: cloneAffine(hdr?.affine),
+    sform_code: Number(hdr?.sform_code ?? hdr?.sformCode ?? 1),
+    qform_code: 0,
+    xyzt_units: Number(hdr?.xyzt_units ?? 10),
+    quatern_b: 0,
+    quatern_c: 0,
+    quatern_d: 0,
+    qoffset_x: 0,
+    qoffset_y: 0,
+    qoffset_z: 0
+  }
+}
+
 const getPaneSliceType = (nv, paneKey) => {
   if (paneKey === 'A') return nv.sliceTypeAxial
   if (paneKey === 'C') return nv.sliceTypeCoronal
@@ -1684,11 +1707,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     exportPersistState: () => {
       const dimsInfo = getDrawingDimsInfo()
       const bitmap = getSharedBitmap()
+      const primaryVolume = getPrimaryNv()?.volumes?.[0] || null
+      const headerTemplate = cloneHeaderTemplateFromVolume(primaryVolume)
       if (!dimsInfo || !bitmap || bitmap.length !== dimsInfo.voxelCount) {
         return {
           bitmap: null,
           dims: dimsInfo ? [dimsInfo.nx, dimsInfo.ny, dimsInfo.nz] : null,
           hasMask: false,
+          headerTemplate,
           overlayAnnotations: cloneAnnotations(getCurrentAnnotations())
         }
       }
@@ -1703,6 +1729,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         bitmap: nextBitmap,
         dims: [dimsInfo.nx, dimsInfo.ny, dimsInfo.nz],
         hasMask,
+        headerTemplate,
         overlayAnnotations: cloneAnnotations(getCurrentAnnotations())
       }
     },
