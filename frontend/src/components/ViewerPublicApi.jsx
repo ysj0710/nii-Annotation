@@ -910,8 +910,13 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     run(Math.max(0, Number(delayFrames) || 0));
   };
 
-  const toStoredPoint = (paneKey, pt) => {
-    const paneSize = getPaneCanvasSize(paneKey);
+  const toStoredPoint = (paneKey, pt, canvas = null) => {
+    const paneSize = canvas
+      ? {
+          width: Math.max(1, Number(canvas.width || 1)),
+          height: Math.max(1, Number(canvas.height || 1)),
+        }
+      : getPaneCanvasSize(paneKey);
     const sx = clamp(
       Number(pt?.x || 0) / Math.max(1, Number(paneSize.width || 1)),
       0,
@@ -2492,7 +2497,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           syncPaneLayoutNow(paneKey);
         }
         const pos = getCanvasPos(event);
-        const norm = toStoredPoint(paneKey, pos);
+        const norm = toStoredPoint(paneKey, pos, markerCanvas);
         if (currentTool === "freehand") {
           if (!norm) return;
           event.preventDefault();
@@ -2611,7 +2616,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             curveSliceIndexRef.current !== currentSliceIndex
           )
             return;
-          const norm = toStoredPoint(paneKey, pos);
+          const norm = toStoredPoint(paneKey, pos, markerCanvas);
           if (!norm) return;
           const current = annotationStepsRef.current;
           if (!current.length) {
