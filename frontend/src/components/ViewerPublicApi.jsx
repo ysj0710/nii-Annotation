@@ -807,8 +807,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     run(Math.max(0, Number(delayFrames) || 0));
   };
 
-  const toStoredPoint = (paneKey, pt, canvas) => {
-    const sx = Math.max(
+  const toStoredPoint = (paneKey, pt, canvas = null) => {
+    const paneSize = canvas
+      ? {
+          width: Math.max(1, Number(canvas.width || 1)),
+          height: Math.max(1, Number(canvas.height || 1)),
+        }
+      : getPaneCanvasSize(paneKey);
+    const sx = clamp(
+      Number(pt?.x || 0) / Math.max(1, Number(paneSize.width || 1)),
       0,
       Math.min(1, Number(pt?.x || 0) / Math.max(1, canvas?.width || 1)),
     );
