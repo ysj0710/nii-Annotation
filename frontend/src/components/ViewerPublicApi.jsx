@@ -41,6 +41,9 @@ const isRasterImageName = (name) =>
   /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name || "");
 const isAnnotationTool = (tool) => ANNOTATION_TOOLS.has(tool);
 const isBrushLikeTool = (tool) => tool === "brush" || tool === "clearLabel";
+const isVec3Like = (value) =>
+  (Array.isArray(value) || ArrayBuffer.isView(value)) &&
+  Number(value?.length || 0) >= 3;
 
 const toArrayBuffer = (data) => {
   if (!data) return null;
@@ -110,7 +113,7 @@ const compactPoints = (points, maxPoints) => {
 };
 
 const normalizeFrac = (frac) => {
-  if (!Array.isArray(frac) || frac.length < 3) return null;
+  if (!isVec3Like(frac)) return null;
   const values = [0, 1, 2].map((axis) => Number(frac[axis]));
   if (!values.every((value) => Number.isFinite(value))) return null;
   if (
@@ -124,7 +127,7 @@ const normalizeFrac = (frac) => {
 };
 
 const normalizeFracSoft = (frac, margin = FRAC_SOFT_MARGIN) => {
-  if (!Array.isArray(frac) || frac.length < 3) return null;
+  if (!isVec3Like(frac)) return null;
   const values = [0, 1, 2].map((axis) => Number(frac[axis]));
   if (!values.every((value) => Number.isFinite(value))) return null;
   if (values.some((value) => value < -margin || value > 1 + margin)) return null;
@@ -136,7 +139,7 @@ const resolveFracForNv = (nv, frac, paneKey = null) => {
   if (normalized) return normalized;
   const soft = normalizeFracSoft(frac);
   if (soft) return soft;
-  if (!Array.isArray(frac) || frac.length < 3) return null;
+  if (!isVec3Like(frac)) return null;
   const cfg = paneKey ? PANE_CONFIGS[paneKey] : null;
   const fixedAxis =
     cfg?.is2D && Number.isInteger(cfg?.fixedAxis) ? Number(cfg.fixedAxis) : null;
@@ -171,7 +174,7 @@ const resolveFracForNv = (nv, frac, paneKey = null) => {
 };
 
 const resolveVoxForNv = (nv, vox, paneKey = null) => {
-  if (!Array.isArray(vox) || vox.length < 3) return null;
+  if (!isVec3Like(vox)) return null;
   const dims = nv?.back?.dims;
   const axisMax = [0, 1, 2].map((axis) =>
     Math.max(0, Number(dims?.[axis + 1] || 1) - 1),
@@ -961,8 +964,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
     if (
       nv &&
-      Array.isArray(pt?.vox) &&
-      pt.vox.length >= 3 &&
+      isVec3Like(pt?.vox) &&
       typeof nv.vox2frac === "function" &&
       typeof nv.frac2canvasPos === "function"
     ) {
@@ -1019,7 +1021,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   };
 
   const toVoxPoint = (pt, paneKey = null) => {
-    if (Array.isArray(pt?.vox) && pt.vox.length >= 3) {
+    if (isVec3Like(pt?.vox)) {
       return [
         Math.round(Number(pt.vox[0] || 0)),
         Math.round(Number(pt.vox[1] || 0)),
