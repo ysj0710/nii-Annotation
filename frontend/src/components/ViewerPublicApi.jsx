@@ -955,10 +955,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
   const toStoredPoint = (paneKey, pt, canvas = null) => {
     const paneSize = canvas
-      ? {
-          width: Math.max(1, Number(canvas.width || 1)),
-          height: Math.max(1, Number(canvas.height || 1)),
-        }
+      ? getCanvasCssSize(canvas)
       : getPaneCanvasSize(paneKey);
     const sx = clamp(
       Number(pt?.x || 0) / Math.max(1, Number(paneSize.width || 1)),
@@ -998,6 +995,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       paneKey,
       frac: [Number(frac[0]), Number(frac[1]), Number(frac[2])],
       vox: vox ? [Number(vox[0]), Number(vox[1]), Number(vox[2])] : undefined,
+      px: Number(pt?.x || 0),
+      py: Number(pt?.y || 0),
       sx,
       sy,
     };
@@ -1305,12 +1304,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       .map((p) => {
         if (
           annotation?.closed !== true &&
-          Number.isFinite(Number(p?.sx)) &&
-          Number.isFinite(Number(p?.sy))
+          Number.isFinite(Number(p?.px)) &&
+          Number.isFinite(Number(p?.py))
         ) {
           return {
-            x: Number(p.sx) * canvas.width,
-            y: Number(p.sy) * canvas.height,
+            x: Number(p.px),
+            y: Number(p.py),
           };
         }
         return toPxPoint(p, canvas, paneKey);
@@ -1717,7 +1716,27 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       // back through Niivue's canvas->frac->vox conversion. This stays faithful
       // for focused single-pane views and non-rectangular displayed slices.
       const pxPoints = normPoints
-        .map((pt) => toPxPoint(pt, markerCanvas, paneKey))
+        .map((pt) => {
+          if (
+            Number.isFinite(Number(pt?.px)) &&
+            Number.isFinite(Number(pt?.py))
+          ) {
+            return {
+              x: Number(pt.px),
+              y: Number(pt.py),
+            };
+          }
+          if (
+            Number.isFinite(Number(pt?.sx)) &&
+            Number.isFinite(Number(pt?.sy))
+          ) {
+            return {
+              x: Number(pt.sx) * markerCanvas.width,
+              y: Number(pt.sy) * markerCanvas.height,
+            };
+          }
+          return toPxPoint(pt, markerCanvas, paneKey);
+        })
         .filter(
           (pt) =>
             pt &&
