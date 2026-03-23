@@ -1103,11 +1103,23 @@ const toListItem = (record) => ({
   isMaskOnly: !!record.isMaskOnly,
   hasMask: !!(record.sourceMask || record.mask),
   maskAttached: record.maskAttached !== false,
+  maskVersion: Number(record.maskVersion || 0),
   thumbnail: record.thumbnail || ''
 })
 
 const hasAttachedMask = (record) =>
   record?.maskAttached !== false && !!(record?.mask || record?.sourceMask)
+
+const resolveMaskVersion = (record) => {
+  const explicit = Number(record?.maskVersion)
+  if (Number.isFinite(explicit) && explicit >= 0) return explicit
+  return hasAttachedMask(record) ? 1 : 0
+}
+
+const getNextMaskVersion = (record, { bump = false } = {}) => {
+  const current = resolveMaskVersion(record)
+  return bump ? current + 1 : current
+}
 
 const makeImportBatchId = () => `batch-${Date.now()}-${Math.random().toString(16).slice(2)}`
 
@@ -1577,7 +1589,7 @@ export default function App() {
           if (String(prev?.id || '') !== activeId) return prev
           return {
             ...matched,
-            maskVersion: prev?.maskVersion || (hasAttachedMask(matched) ? 1 : 0)
+            maskVersion: Math.max(Number(prev?.maskVersion || 0), resolveMaskVersion(matched))
           }
         })
         return
@@ -1593,7 +1605,7 @@ export default function App() {
       if (!first) return
       setActiveImage({
         ...first,
-        maskVersion: hasAttachedMask(first) ? 1 : 0
+        maskVersion: resolveMaskVersion(first)
       })
     }
   }
@@ -1603,7 +1615,7 @@ export default function App() {
     if (externalCtx.batchId) return false
     if (activeImageIdRef.current) return false
     activeImageIdRef.current = String(record.id)
-    setActiveImage({ ...record, maskVersion: hasAttachedMask(record) ? 1 : 0 })
+    setActiveImage({ ...record, maskVersion: resolveMaskVersion(record) })
     if (dicom) setViewerMode('dicom')
     return true
   }
@@ -1908,8 +1920,9 @@ export default function App() {
     const persistedState = viewerRef.current?.exportPersistState?.() || null
     const overlayAnnotations = persistedState?.overlayAnnotations || viewerRef.current?.exportAnnotations?.() || []
     const hasOverlayAnnotations = overlayAnnotations.length > 0
+    const hadExistingMask = !!(imageRecord?.maskAttached || imageRecord?.mask || imageRecord?.sourceMask)
     const hadExistingContent =
-      !!(imageRecord?.maskAttached || imageRecord?.mask || imageRecord?.sourceMask) ||
+      hadExistingMask ||
       (Array.isArray(imageRecord?.overlayAnnotations) && imageRecord.overlayAnnotations.length > 0)
     const clientEnvReport = buildClientEnvReport(phase, { imageId: String(imageRecord.id || '') })
     if (persistedState?.bitmap && Array.isArray(persistedState?.dims)) {
@@ -1924,7 +1937,9 @@ export default function App() {
         buffer: null,
         hasMask: !!persistedState.hasMask,
         hasOverlayAnnotations,
+        hadExistingMask,
         hadExistingContent,
+        currentMaskVersion: resolveMaskVersion(imageRecord),
         templateBuffer,
         clientEnvReport
       }
@@ -1945,9 +1960,48 @@ export default function App() {
       headerTemplate: null,
       hasMask,
       hasOverlayAnnotations,
+      hadExistingMask,
       hadExistingContent,
+      currentMaskVersion: resolveMaskVersion(imageRecord),
       templateBuffer,
       clientEnvReport
+    }
+  }
+
+  const materializePersistBuffer = (payload) => {
+    if (!payload) return null
+    if (payload.buffer) return payload.buffer
+    if (!payload.hasMask || !payload.bitmap || !Array.isArray(payload.dims)) return null
+    const encoded = encodeMaskBitmapToNifti(payload.bitmap, payload.dims, {
+      templateBuffer: payload.templateBuffer,
+      headerTemplate: payload.headerTemplate
+    })
+    if (encoded) payload.buffer = encoded
+    return encoded
+  }
+
+  const resolvePersistMaskVersion = (payload, hasMask) => {
+    const currentVersion = Math.max(0, Number(payload?.currentMaskVersion || 0))
+    if (hasMask) return currentVersion + 1
+    if (payload?.hadExistingMask) return currentVersion + 1
+    return currentVersion
+  }
+
+  const buildOptimisticPersistRecord = (record, payload) => {
+    if (!record?.id || !payload || String(record.id) !== String(payload.imageId || '')) return null
+    const buffer = materializePersistBuffer(payload)
+    const hasMask = !!(payload.hasMask && buffer)
+    const nextMaskVersion = resolvePersistMaskVersion(payload, hasMask)
+    return {
+      ...record,
+      mask: hasMask ? buffer : null,
+      maskName: hasMask ? `${fileStem(payload.imageName)}.nii.gz` : null,
+      maskAttached: hasMask,
+      overlayAnnotations: payload.overlayAnnotations,
+      lastClientEnvReport: payload.clientEnvReport,
+      modifiedByUser: true,
+      updatedAt: Date.now(),
+      maskVersion: nextMaskVersion
     }
   }
 
@@ -1959,15 +2013,10 @@ export default function App() {
         localPersistDirtyRef.current = false
       }
     }
-    let buffer = payload.buffer || null
-    if (!buffer && payload.hasMask && payload.bitmap && Array.isArray(payload.dims)) {
-      buffer = encodeMaskBitmapToNifti(payload.bitmap, payload.dims, {
-        templateBuffer: payload.templateBuffer,
-        headerTemplate: payload.headerTemplate
-      })
-    }
+    let buffer = materializePersistBuffer(payload)
     const hasMask = !!(payload.hasMask && buffer)
     const hasOverlayAnnotations = Array.isArray(payload.overlayAnnotations) && payload.overlayAnnotations.length > 0
+    const nextMaskVersion = resolvePersistMaskVersion(payload, hasMask)
     if (!buffer && !hasOverlayAnnotations && !payload.hadExistingContent) {
       clearCurrentDirtyFlag()
       return false
@@ -1977,6 +2026,7 @@ export default function App() {
         mask: null,
         maskName: null,
         maskAttached: false,
+        maskVersion: nextMaskVersion,
         overlayAnnotations: payload.overlayAnnotations,
         lastClientEnvReport: payload.clientEnvReport,
         modifiedByUser: true,
@@ -1987,7 +2037,7 @@ export default function App() {
       setImages((prev) =>
         prev.map((img) =>
           img.id === imageId
-            ? { ...img, hasMask: hasSourceMask, maskAttached: false }
+            ? { ...img, hasMask: hasSourceMask, maskAttached: false, maskVersion: nextMaskVersion }
             : img
         )
       )
@@ -1998,6 +2048,7 @@ export default function App() {
               mask: null,
               maskName: null,
               maskAttached: false,
+              maskVersion: nextMaskVersion,
               overlayAnnotations: payload.overlayAnnotations,
               lastClientEnvReport: payload.clientEnvReport,
               modifiedByUser: true
@@ -2012,6 +2063,7 @@ export default function App() {
       mask: buffer,
       maskName: `${fileStem(payload.imageName)}.nii.gz`,
       maskAttached: true,
+      maskVersion: nextMaskVersion,
       overlayAnnotations: payload.overlayAnnotations,
       lastClientEnvReport: payload.clientEnvReport,
       modifiedByUser: true,
@@ -2020,7 +2072,7 @@ export default function App() {
     if (updated) cacheImageRecord(updated)
 
     setImages((prev) =>
-      prev.map((img) => (img.id === imageId ? { ...img, hasMask: true, maskAttached: true } : img))
+      prev.map((img) => (img.id === imageId ? { ...img, hasMask: true, maskAttached: true, maskVersion: nextMaskVersion } : img))
     )
     setActiveImage((prev) =>
       prev && prev.id === imageId
@@ -2028,6 +2080,7 @@ export default function App() {
             ...prev,
             mask: buffer,
             maskAttached: true,
+            maskVersion: nextMaskVersion,
             overlayAnnotations: payload.overlayAnnotations,
             lastClientEnvReport: payload.clientEnvReport,
             modifiedByUser: true
@@ -2334,6 +2387,22 @@ export default function App() {
     if (localPersistDirtyRef.current && currentRecord?.id) {
       pendingPayload = await captureViewerPersistPayload(currentRecord, 'switch')
       localPersistDirtyRef.current = false
+      const optimisticRecord = buildOptimisticPersistRecord(currentRecord, pendingPayload)
+      if (optimisticRecord) {
+        cacheImageRecord(optimisticRecord)
+        setImages((prev) =>
+          prev.map((img) =>
+            img.id === optimisticRecord.id
+              ? {
+                  ...img,
+                  hasMask: !!(optimisticRecord.mask || optimisticRecord.sourceMask),
+                  maskAttached: optimisticRecord.maskAttached !== false,
+                  maskVersion: resolveMaskVersion(optimisticRecord)
+                }
+              : img
+          )
+        )
+      }
     }
     const record = await nextRecordPromise
     if (!record) return
@@ -2341,7 +2410,7 @@ export default function App() {
     activeImageIdRef.current = String(record.id)
     setActiveImage({
       ...record,
-      maskVersion: hasAttachedMask(record) ? 1 : 0
+      maskVersion: resolveMaskVersion(record)
     })
     if (pendingPayload) {
       void enqueuePersistPayload(pendingPayload)
@@ -2446,16 +2515,20 @@ export default function App() {
   const applyMaskToImage = async (imageId, maskBuffer, maskName) => {
     const normalizedMask = sanitizeMaskBuffer(maskBuffer)
     if (!normalizedMask) return
-    await updateImage(imageId, {
+    const currentRecord = await getImageById(imageId)
+    const nextMaskVersion = getNextMaskVersion(currentRecord, { bump: true })
+    const updated = await updateImage(imageId, {
       sourceMask: normalizedMask,
       sourceMaskName: maskName,
       mask: normalizedMask,
       maskName,
       maskAttached: true,
+      maskVersion: nextMaskVersion,
       updatedAt: Date.now()
     })
+    if (updated) cacheImageRecord(updated)
     setImages((prev) =>
-      prev.map((img) => (img.id === imageId ? { ...img, hasMask: true, maskAttached: true } : img))
+      prev.map((img) => (img.id === imageId ? { ...img, hasMask: true, maskAttached: true, maskVersion: nextMaskVersion } : img))
     )
     if (activeImage?.id === imageId) {
       setActiveImage((prev) => ({
@@ -2465,7 +2538,7 @@ export default function App() {
         mask: normalizedMask,
         maskName,
         maskAttached: true,
-        maskVersion: (prev?.maskVersion || 0) + 1
+        maskVersion: nextMaskVersion
       }))
     }
   }
@@ -2539,6 +2612,7 @@ export default function App() {
       mask: maskBuffer,
       maskName,
       maskAttached: finalMaskAttached,
+      maskVersion: finalSourceMask ? 1 : 0,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       hash,
@@ -3087,16 +3161,19 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
   const detachMaskFromImage = async (id, knownRecord = null) => {
     const record = knownRecord || (await getImageById(id))
     if (!record) return
+    const nextMaskVersion = getNextMaskVersion(record, { bump: true })
 
-    await updateImage(id, {
+    const updated = await updateImage(id, {
       maskAttached: false,
       mask: null,
+      maskVersion: nextMaskVersion,
       updatedAt: Date.now()
     })
+    if (updated) cacheImageRecord(updated)
 
     const hasMask = !!(record.sourceMask || record.mask)
     setImages((prev) =>
-      prev.map((img) => (img.id === id ? { ...img, hasMask, maskAttached: false } : img))
+      prev.map((img) => (img.id === id ? { ...img, hasMask, maskAttached: false, maskVersion: nextMaskVersion } : img))
     )
 
     if (activeImage?.id === id) {
@@ -3106,7 +3183,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
               ...prev,
               maskAttached: false,
               mask: null,
-              maskVersion: (prev.maskVersion || 0) + 1
+              maskVersion: nextMaskVersion
             }
           : prev
       )
@@ -3142,17 +3219,20 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
       return
     }
 
-    await updateImage(id, {
+    const nextMaskVersion = getNextMaskVersion(record, { bump: true })
+    const updated = await updateImage(id, {
       mask: null,
       maskName: null,
       maskAttached: false,
+      maskVersion: nextMaskVersion,
       overlayAnnotations: [],
       modifiedByUser: true,
       updatedAt: Date.now()
     })
+    if (updated) cacheImageRecord(updated)
 
     setImages((prev) =>
-      prev.map((img) => (img.id === id ? { ...img, hasMask: false, maskAttached: false } : img))
+      prev.map((img) => (img.id === id ? { ...img, hasMask: false, maskAttached: false, maskVersion: nextMaskVersion } : img))
     )
 
     setActiveImage((prev) =>
@@ -3164,8 +3244,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
             maskAttached: false,
             overlayAnnotations: [],
             modifiedByUser: true,
-            // Viewer 已在本地 clear，无需再次通过 maskVersion 触发整图重载。
-            maskVersion: prev.maskVersion || 0
+            maskVersion: nextMaskVersion
           }
         : prev
     )
