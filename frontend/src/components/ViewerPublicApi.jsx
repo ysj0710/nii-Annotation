@@ -849,10 +849,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     };
   };
 
-  const isSinglePane2DMode = (paneKey) =>
+  const isDisplayedAsSinglePane = (paneKey) =>
     PANE_CONFIGS[paneKey]?.is2D &&
-    visiblePaneKeysRef.current.length === 1 &&
-    visiblePaneKeysRef.current[0] === paneKey;
+    ((visiblePaneKeysRef.current.length === 1 &&
+      visiblePaneKeysRef.current[0] === paneKey) ||
+      focusedPlane === paneKey);
 
   const getPaneBounds = (paneKey) => {
     const { width, height } = getPaneCanvasSize(paneKey);
@@ -866,7 +867,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const insetY = clamp(renderInsetPx / height, 0.02, 0.12);
       return [insetX, insetY, 1 - insetX, 1 - insetY];
     }
-    if (isSinglePane2DMode(paneKey)) {
+    if (isDisplayedAsSinglePane(paneKey)) {
       const minSide = Math.max(1, Math.min(width, height));
       const sideInsetPx = clamp(Math.round(minSide * 0.07), 28, 72);
       const topInsetPx = clamp(Math.round(minSide * 0.08), 28, 76);
@@ -1125,11 +1126,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     );
   };
 
-  const canvasPosToVox = (paneKey, pt) => {
+  const canvasPosToVox = (paneKey, pt, canvas = null) => {
     const nv = getPaneNv(paneKey);
     if (!nv || !pt) return null;
     const dpr = nv.uiData?.dpr || 1;
-    const nvPos = mapOverlayPxToNvCanvasPos(paneKey, pt);
+    const nvPos = mapOverlayPxToNvCanvasPos(paneKey, pt, canvas);
     if (!nvPos) return null;
     const frac = resolveFracForNv(
       nv,
@@ -1795,10 +1796,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         for (let px = 0; px < tmpCanvas.width; px += 1) {
           const a = Number(alpha[rowOffset + px * 4 + 3] || 0);
           if (a < 8) continue;
-          const vox = canvasPosToVox(paneKey, {
+          const vox = canvasPosToVox(
+            paneKey,
+            {
             x: x0 + px + 0.5,
             y: y0 + py + 0.5,
-          });
+            },
+            markerCanvas,
+          );
           setVoxelAt(vox);
         }
       }
@@ -2431,8 +2436,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     for (const paneKey of ["A", "C", "S"]) {
       const canvas = getPaneCanvas(paneKey);
       if (!canvas) continue;
-      const getCanvasPos = (event) => {
-        const rect = canvas.getBoundingClientRect();
+      const getCanvasPos = (event, targetCanvas = canvas) => {
+        const rect =
+          targetCanvas?.getBoundingClientRect?.() ||
+          canvas.getBoundingClientRect();
         const xByRect = Number(event?.clientX) - rect.left;
         const yByRect = Number(event?.clientY) - rect.top;
         if (
@@ -2461,10 +2468,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const paneCfg = PANE_CONFIGS[paneKey];
         const markerCanvas = getPaneMarkerCanvas(paneKey);
         if (!markerCanvas) return;
-        if (isSinglePane2DMode(paneKey)) {
+        if (isDisplayedAsSinglePane(paneKey)) {
           syncPaneLayoutNow(paneKey);
         }
-        const pos = getCanvasPos(event);
+        syncMarkerCanvasSize(paneKey);
+        const pos = getCanvasPos(event, markerCanvas);
         const norm = toStoredPoint(paneKey, pos, markerCanvas);
         if (currentTool === "freehand") {
           if (!norm) return;
@@ -2520,7 +2528,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             annotationStepsRef.current,
             { nearClosed },
           );
-          const vox = canvasPosToVox(paneKey, pos);
+          const vox = canvasPosToVox(paneKey, pos, markerCanvas);
           if (vox)
             setCrosshairFromVox(vox, {
               redraw: perfProfile.liveCrosshairDuringAnnotation,
@@ -2580,7 +2588,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           if (activePointerPaneKeyRef.current !== paneKey) return;
           const markerCanvas = getPaneMarkerCanvas(paneKey);
           if (!markerCanvas) return;
-          const pos = getCanvasPos(event);
+          syncMarkerCanvasSize(paneKey);
+          const pos = getCanvasPos(event, markerCanvas);
           const currentSliceIndex = getPaneCurrentSliceIndex(paneKey);
           if (
             Number.isInteger(curveSliceIndexRef.current) &&
@@ -2618,7 +2627,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             annotationStepsRef.current,
             { nearClosed },
           );
-          const vox = canvasPosToVox(paneKey, pos);
+          const vox = canvasPosToVox(paneKey, pos, markerCanvas);
           if (vox)
             setCrosshairFromVox(vox, {
               redraw: perfProfile.liveCrosshairDuringAnnotation,
@@ -2770,7 +2779,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const paneKey = curvePaneKeyRef.current;
       const markerCanvas = paneKey ? getPaneMarkerCanvas(paneKey) : null;
       if (!paneKey || !markerCanvas) return;
-      if (isSinglePane2DMode(paneKey)) {
+      if (isDisplayedAsSinglePane(paneKey)) {
         syncPaneLayoutNow(paneKey);
       }
       const rawPoints = [...annotationStepsRef.current];

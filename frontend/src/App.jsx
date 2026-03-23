@@ -1925,6 +1925,34 @@ export default function App() {
       hadExistingMask ||
       (Array.isArray(imageRecord?.overlayAnnotations) && imageRecord.overlayAnnotations.length > 0)
     const clientEnvReport = buildClientEnvReport(phase, { imageId: String(imageRecord.id || '') })
+    const exported = await viewerRef.current?.exportDrawing?.()
+    const raw = arrayBufferFrom(exported)
+    const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer }) : null
+    const hasMask = buffer ? hasNonZeroMaskNifti(buffer) : false
+
+    // Prefer Niivue's native drawing export so the persisted mask uses the
+    // same spatial encoding path as the viewer. Keep the bitmap snapshot only
+    // as a fallback if native export is unavailable.
+    if (buffer) {
+      return {
+        imageId: imageRecord.id,
+        imageName: imageRecord.name,
+        sourceMask: imageRecord.sourceMask || null,
+        overlayAnnotations,
+        buffer,
+        bitmap: null,
+        dims: null,
+        headerTemplate: null,
+        hasMask,
+        hasOverlayAnnotations,
+        hadExistingMask,
+        hadExistingContent,
+        currentMaskVersion: resolveMaskVersion(imageRecord),
+        templateBuffer,
+        clientEnvReport
+      }
+    }
+
     if (persistedState?.bitmap && Array.isArray(persistedState?.dims)) {
       return {
         imageId: imageRecord.id,
@@ -1945,10 +1973,6 @@ export default function App() {
       }
     }
 
-    const exported = await viewerRef.current?.exportDrawing()
-    const raw = arrayBufferFrom(exported)
-    const buffer = raw ? sanitizeMaskBuffer(raw, { templateBuffer }) : null
-    const hasMask = buffer ? hasNonZeroMaskNifti(buffer) : false
     return {
       imageId: imageRecord.id,
       imageName: imageRecord.name,
