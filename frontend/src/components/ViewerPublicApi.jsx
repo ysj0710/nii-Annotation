@@ -1693,8 +1693,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       1,
       Math.min(255, Number(activeLabelValueRef.current || 1)),
     );
-    const axisMax = [nx, ny, nz].map((len) => Math.max(0, Number(len || 1) - 1));
-    const inPlaneAxes = [0, 1, 2].filter((axis) => axis !== paneCfg.fixedAxis);
     const xy = nx * ny;
     let changed = false;
     let changedCount = 0;
@@ -1723,130 +1721,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     };
 
     ensureBaseSnapshot(nv.drawBitmap);
-    const rasterizeByVoxelPolygon = () => {
-      if (inPlaneAxes.length !== 2) return false;
-      const voxelPoints = normPoints
-        .map((pt) => {
-          if (isVec3Like(pt?.vox)) {
-            return [0, 1, 2].map((axis) =>
-              clamp(Number(pt.vox[axis] || 0), 0, axisMax[axis]),
-            );
-          }
-          const resolvedFrac = resolveFracForNv(nv, pt?.frac, paneKey);
-          if (!resolvedFrac || typeof nv.frac2vox !== "function") return null;
-          const rawVox = nv.frac2vox([
-            Number(resolvedFrac[0] || 0),
-            Number(resolvedFrac[1] || 0),
-            Number(resolvedFrac[2] || 0),
-          ]);
-          if (!isVec3Like(rawVox)) return null;
-          const coords = [0, 1, 2].map((axis) =>
-            clamp(Number(rawVox[axis] || 0), 0, axisMax[axis]),
-          );
-          if (!coords.every((value) => Number.isFinite(value))) return null;
-          if (Number.isInteger(currentSliceIndex)) {
-            coords[paneCfg.fixedAxis] = currentSliceIndex;
-          }
-          return coords;
-        })
-        .filter(Boolean);
-      if (voxelPoints.length < 3) return false;
-
-      const poly = voxelPoints.map((coords) => ({
-        u: Number(coords[inPlaneAxes[0]]),
-        v: Number(coords[inPlaneAxes[1]]),
-      }));
-      if (
-        poly.some(
-          (pt) => !Number.isFinite(pt.u) || !Number.isFinite(pt.v),
-        )
-      ) {
-        return false;
-      }
-      const first = poly[0];
-      const last = poly[poly.length - 1];
-      if (Math.hypot(first.u - last.u, first.v - last.v) > 1e-3) {
-        poly.push({ ...first });
-      }
-
-      let minU = Number.POSITIVE_INFINITY;
-      let minV = Number.POSITIVE_INFINITY;
-      let maxU = Number.NEGATIVE_INFINITY;
-      let maxV = Number.NEGATIVE_INFINITY;
-      for (const pt of poly) {
-        minU = Math.min(minU, pt.u);
-        minV = Math.min(minV, pt.v);
-        maxU = Math.max(maxU, pt.u);
-        maxV = Math.max(maxV, pt.v);
-      }
-      if (
-        !Number.isFinite(minU) ||
-        !Number.isFinite(minV) ||
-        !Number.isFinite(maxU) ||
-        !Number.isFinite(maxV)
-      ) {
-        return false;
-      }
-
-      const u0 = clamp(Math.floor(minU) - 1, 0, axisMax[inPlaneAxes[0]]);
-      const v0 = clamp(Math.floor(minV) - 1, 0, axisMax[inPlaneAxes[1]]);
-      const u1 = clamp(Math.ceil(maxU) + 1, 0, axisMax[inPlaneAxes[0]]);
-      const v1 = clamp(Math.ceil(maxV) + 1, 0, axisMax[inPlaneAxes[1]]);
-      if (u1 < u0 || v1 < v0) return false;
-
-      const pointInPolygon = (u, v) => {
-        let inside = false;
-        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-          const pi = poly[i];
-          const pj = poly[j];
-          const intersects =
-            pi.v > v !== pj.v > v &&
-            u <
-              ((pj.u - pi.u) * (v - pi.v)) / Math.max(1e-6, pj.v - pi.v) +
-                pi.u;
-          if (intersects) inside = !inside;
-        }
-        return inside;
-      };
-
-      const setPlaneVoxel = (u, v) => {
-        const coords = [0, 0, 0];
-        coords[inPlaneAxes[0]] = u;
-        coords[inPlaneAxes[1]] = v;
-        coords[paneCfg.fixedAxis] = Number.isInteger(currentSliceIndex)
-          ? currentSliceIndex
-          : 0;
-        setVoxelAt(coords);
-      };
-
-      for (let v = v0; v <= v1; v += 1) {
-        for (let u = u0; u <= u1; u += 1) {
-          if (pointInPolygon(u + 0.5, v + 0.5)) {
-            setPlaneVoxel(u, v);
-          }
-        }
-      }
-
-      for (let i = 1; i < poly.length; i += 1) {
-        const a = poly[i - 1];
-        const b = poly[i];
-        const steps = Math.max(
-          1,
-          Math.ceil(Math.max(Math.abs(b.u - a.u), Math.abs(b.v - a.v)) * 2),
-        );
-        for (let step = 0; step <= steps; step += 1) {
-          const t = step / steps;
-          const u = Math.round(a.u + (b.u - a.u) * t);
-          const v = Math.round(a.v + (b.v - a.v) * t);
-          setPlaneVoxel(
-            clamp(u, 0, axisMax[inPlaneAxes[0]]),
-            clamp(v, 0, axisMax[inPlaneAxes[1]]),
-          );
-        }
-      }
-      return changed;
-    };
-
     const rasterizeByCanvas = () => {
       // Use the exact screen-space polygon the user drew, then map filled pixels
       // back through Niivue's canvas->frac->vox conversion. This stays faithful
@@ -1904,21 +1778,28 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const y1 = clamp(Math.ceil(maxY) + 1, 0, canvasH - 1);
       if (x1 < x0 || y1 < y0) return false;
       const tmpCanvas = document.createElement("canvas");
-      tmpCanvas.width = x1 - x0 + 1;
-      tmpCanvas.height = y1 - y0 + 1;
+      const supersample = 4;
+      tmpCanvas.width = (x1 - x0 + 1) * supersample;
+      tmpCanvas.height = (y1 - y0 + 1) * supersample;
       const tmpCtx = tmpCanvas.getContext("2d", { willReadFrequently: true });
       if (!tmpCtx) return false;
       tmpCtx.clearRect(0, 0, tmpCanvas.width, tmpCanvas.height);
       tmpCtx.beginPath();
-      tmpCtx.moveTo(pxPoints[0].x - x0, pxPoints[0].y - y0);
+      tmpCtx.moveTo(
+        (pxPoints[0].x - x0) * supersample,
+        (pxPoints[0].y - y0) * supersample,
+      );
       for (let i = 1; i < pxPoints.length; i += 1) {
-        tmpCtx.lineTo(pxPoints[i].x - x0, pxPoints[i].y - y0);
+        tmpCtx.lineTo(
+          (pxPoints[i].x - x0) * supersample,
+          (pxPoints[i].y - y0) * supersample,
+        );
       }
       tmpCtx.closePath();
       tmpCtx.fillStyle = "#ffffff";
       tmpCtx.fill();
       tmpCtx.strokeStyle = "#ffffff";
-      tmpCtx.lineWidth = 1.25;
+      tmpCtx.lineWidth = 1.25 * supersample;
       tmpCtx.stroke();
       const alpha = tmpCtx.getImageData(
         0,
@@ -1934,8 +1815,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           const vox = canvasPosToVox(
             paneKey,
             {
-            x: x0 + px + 0.5,
-            y: y0 + py + 0.5,
+              x: x0 + (px + 0.5) / supersample,
+              y: y0 + (py + 0.5) / supersample,
             },
             markerCanvas,
           );
@@ -1945,7 +1826,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       return true;
     };
 
-    if (!rasterizeByVoxelPolygon() && !rasterizeByCanvas()) return false;
+    if (!rasterizeByCanvas()) return false;
 
     if (!changed) return false;
     if (isViewerDebugEnabled()) {
