@@ -818,9 +818,28 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const dpr = nv.uiData?.dpr || 1;
       const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]);
       if (frac && frac[0] >= 0) {
+        const rawVox =
+          typeof nv.frac2vox === "function" ? nv.frac2vox(frac) : null;
+        const vox =
+          Array.isArray(rawVox) && rawVox.length >= 3
+            ? [
+                Math.round(Number(rawVox[0] || 0)),
+                Math.round(Number(rawVox[1] || 0)),
+                Math.round(Number(rawVox[2] || 0)),
+              ]
+            : null;
+        const snappedFrac =
+          vox && typeof nv.vox2frac === "function" ? nv.vox2frac(vox) : frac;
         return {
           paneKey,
-          frac: [Number(frac[0]), Number(frac[1]), Number(frac[2])],
+          frac: [
+            Number(snappedFrac?.[0] || frac[0]),
+            Number(snappedFrac?.[1] || frac[1]),
+            Number(snappedFrac?.[2] || frac[2]),
+          ],
+          vox: vox
+            ? [Number(vox[0]), Number(vox[1]), Number(vox[2])]
+            : undefined,
           sx,
           sy,
         };
@@ -863,6 +882,38 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       x: Number(pt?.x || 0) * canvas.width,
       y: Number(pt?.y || 0) * canvas.height,
     };
+  };
+
+  const toVoxPoint = (pt, paneKey = null) => {
+    if (Array.isArray(pt?.vox) && pt.vox.length >= 3) {
+      return [
+        Math.round(Number(pt.vox[0] || 0)),
+        Math.round(Number(pt.vox[1] || 0)),
+        Math.round(Number(pt.vox[2] || 0)),
+      ];
+    }
+    const resolvedPaneKey = paneKey || pt?.paneKey || null;
+    const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
+    if (
+      nv &&
+      Array.isArray(pt?.frac) &&
+      pt.frac.length >= 3 &&
+      typeof nv.frac2vox === "function"
+    ) {
+      const raw = nv.frac2vox([
+        Number(pt.frac[0] || 0),
+        Number(pt.frac[1] || 0),
+        Number(pt.frac[2] || 0),
+      ]);
+      if (Array.isArray(raw) && raw.length >= 3) {
+        return [
+          Math.round(Number(raw[0] || 0)),
+          Math.round(Number(raw[1] || 0)),
+          Math.round(Number(raw[2] || 0)),
+        ];
+      }
+    }
+    return null;
   };
 
   const pointDistancePx = (a, b, canvas, paneKey = null) => {
@@ -1402,54 +1453,18 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   };
 
   const rasterizeClosedAnnotationToMask = (normPoints, options = {}) => {
-    const {
-      recordHistory = true,
-      emitChange = true,
-      axCorSag = null,
-      sliceIndex = null,
-      sourcePaneKey = null,
-    } = options;
+    const { recordHistory = true, emitChange = true, sourcePaneKey = null } =
+      options;
     const sourceNv = sourcePaneKey ? getPaneNv(sourcePaneKey) : null;
     const nv = sourceNv || getPrimaryNv();
     if (!nv || !Array.isArray(normPoints) || normPoints.length < 3)
       return false;
     if (!ensureDrawingBitmap()) return false;
-    const paneKey =
-      sourcePaneKey ||
-      curvePaneKeyRef.current ||
-      AX_COR_SAG_TO_PANE[Number(axCorSag)];
+    const paneKey = sourcePaneKey || curvePaneKeyRef.current || null;
     const markerCanvas = paneKey ? getPaneMarkerCanvas(paneKey) : null;
-    const useScreenPointMappingOnly =
-      paneKey && isSinglePane2DMode(paneKey);
-    const voxPoints = normPoints
-      .map((pt) => {
-        const frac =
-          Array.isArray(pt?.frac) && pt.frac.length >= 3
-            ? [Number(pt.frac[0]), Number(pt.frac[1]), Number(pt.frac[2])]
-            : null;
-        if (
-          !useScreenPointMappingOnly &&
-          frac &&
-          frac.every((v) => Number.isFinite(v)) &&
-          sourceNv &&
-          typeof sourceNv.frac2vox === "function"
-        ) {
-          const vox = sourceNv.frac2vox(frac);
-          if (Array.isArray(vox) && vox.length >= 3) {
-            return [Number(vox[0]), Number(vox[1]), Number(vox[2])];
-          }
-        }
-        const px = markerCanvas ? toPxPoint(pt, markerCanvas, paneKey) : null;
-        if (!px || !paneKey) return null;
-        return canvasPosToVox(paneKey, px);
-      })
-      .filter(
-        (pt) =>
-          Array.isArray(pt) &&
-          pt.length >= 3 &&
-          pt.every((v) => Number.isFinite(v)),
-      );
-    if (voxPoints.length < 3) return false;
+    if (!paneKey || !markerCanvas) return false;
+    const paneCfg = PANE_CONFIGS[paneKey];
+    if (!paneCfg?.is2D || !Number.isInteger(paneCfg.fixedAxis)) return false;
 
     const dims = nv.back?.dims;
     const nx = Number(dims?.[1] || 0);
@@ -1457,147 +1472,121 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const nz = Math.max(1, Number(dims?.[3] || 1));
     if (nx < 1 || ny < 1 || nz < 1) return false;
 
-    const forcedPlane = Number.isInteger(axCorSag) ? Number(axCorSag) : null;
-    let fixedAxis = 0;
-    let hAxis = 0;
-    let vAxis = 1;
-    if (forcedPlane === 0) {
-      fixedAxis = 2;
-      hAxis = 0;
-      vAxis = 1;
-    } else if (forcedPlane === 1) {
-      fixedAxis = 1;
-      hAxis = 0;
-      vAxis = 2;
-    } else if (forcedPlane === 2) {
-      fixedAxis = 0;
-      hAxis = 1;
-      vAxis = 2;
-    } else {
-      const ranges = [0, 1, 2].map((axis) => {
-        let min = Number.POSITIVE_INFINITY;
-        let max = Number.NEGATIVE_INFINITY;
-        for (const p of voxPoints) {
-          const v = Number(p[axis] || 0);
-          min = Math.min(min, v);
-          max = Math.max(max, v);
-        }
-        return max - min;
-      });
-      fixedAxis = 0;
-      if (ranges[1] < ranges[fixedAxis]) fixedAxis = 1;
-      if (ranges[2] < ranges[fixedAxis]) fixedAxis = 2;
-      const axes = [0, 1, 2].filter((axis) => axis !== fixedAxis);
-      hAxis = axes[0];
-      vAxis = axes[1];
-    }
-
-    let fixed = 0;
-    const forcedSlice = Number.isInteger(sliceIndex)
-      ? Number(sliceIndex)
-      : null;
-    if (forcedSlice !== null && forcedPlane !== null) {
-      const fixedDimLen = Number(dims?.[fixedAxis + 1] || 0);
-      fixed = Math.max(0, Math.min(Math.max(0, fixedDimLen - 1), forcedSlice));
-    } else {
-      for (const p of voxPoints) fixed += Number(p[fixedAxis] || 0);
-      fixed = Math.round(fixed / voxPoints.length);
-    }
-
-    const toHV = (p) => [Number(p[hAxis] || 0), Number(p[vAxis] || 0)];
-    const poly = voxPoints.map(toHV);
-    const first = poly[0];
-    const last = poly[poly.length - 1];
-    if (first[0] !== last[0] || first[1] !== last[1])
-      poly.push([first[0], first[1]]);
-    const polyNoDup = [];
-    for (const [hh, vv] of poly) {
-      const prev = polyNoDup[polyNoDup.length - 1];
-      if (!prev || prev[0] !== hh || prev[1] !== vv) polyNoDup.push([hh, vv]);
-    }
-    if (polyNoDup.length < 4) return false;
-
-    let minH = Number.POSITIVE_INFINITY;
-    let maxH = Number.NEGATIVE_INFINITY;
-    let minV = Number.POSITIVE_INFINITY;
-    let maxV = Number.NEGATIVE_INFINITY;
-    for (const [hh, vv] of polyNoDup) {
-      minH = Math.min(minH, hh);
-      maxH = Math.max(maxH, hh);
-      minV = Math.min(minV, vv);
-      maxV = Math.max(maxV, vv);
-    }
-
-    const hStart = Math.floor(minH);
-    const hEnd = Math.ceil(maxH);
-    const vStart = Math.floor(minV);
-    const vEnd = Math.ceil(maxV);
     const fillLabel = Math.max(
       1,
       Math.min(255, Number(activeLabelValueRef.current || 1)),
     );
     const xy = nx * ny;
     let changed = false;
+    let lastTargetVox = null;
 
-    const pointInPolygon = (x, y, vertices) => {
-      let inside = false;
-      for (
-        let i = 0, j = vertices.length - 1;
-        i < vertices.length;
-        j = i, i += 1
-      ) {
-        const xi = vertices[i][0];
-        const yi = vertices[i][1];
-        const xj = vertices[j][0];
-        const yj = vertices[j][1];
-        const intersect =
-          yi > y !== yj > y &&
-          x < ((xj - xi) * (y - yi)) / (yj - yi + Number.EPSILON) + xi;
-        if (intersect) inside = !inside;
-      }
-      return inside;
-    };
-
-    const setVoxelByHV = (hh, vv) => {
-      const coords = [0, 0, 0];
-      coords[fixedAxis] = fixed;
-      coords[hAxis] = hh;
-      coords[vAxis] = vv;
-      const [x, y, z] = coords;
+    const setVoxelAt = (vox) => {
+      if (!Array.isArray(vox) || vox.length < 3) return;
+      const x = Math.round(Number(vox[0] || 0));
+      const y = Math.round(Number(vox[1] || 0));
+      const z = Math.round(Number(vox[2] || 0));
       if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return;
       const idx = z * xy + y * nx + x;
       if (nv.drawBitmap[idx] === fillLabel) return;
       nv.drawBitmap[idx] = fillLabel;
       changed = true;
+      lastTargetVox = [x, y, z];
     };
 
-    const drawSegmentHV = (h0, v0, h1, v1) => {
-      const steps = Math.max(
-        1,
-        Math.ceil(Math.max(Math.abs(h1 - h0), Math.abs(v1 - v0)) * 2),
-      );
-      for (let s = 0; s <= steps; s += 1) {
-        const t = s / steps;
-        setVoxelByHV(
-          Math.round(h0 + (h1 - h0) * t),
-          Math.round(v0 + (v1 - v0) * t),
-        );
+    const fixedAxis = paneCfg.fixedAxis;
+    const inPlaneAxes = [0, 1, 2].filter((axis) => axis !== fixedAxis);
+    const uAxis = inPlaneAxes[0];
+    const vAxis = inPlaneAxes[1];
+    const axisDims = [nx, ny, nz];
+    const maxU = Math.max(0, Number(axisDims[uAxis] || 1) - 1);
+    const maxV = Math.max(0, Number(axisDims[vAxis] || 1) - 1);
+    const maxFixed = Math.max(0, Number(axisDims[fixedAxis] || 1) - 1);
+
+    const voxPoints = normPoints
+      .map((pt) => toVoxPoint(pt, paneKey))
+      .filter((vox) => Array.isArray(vox) && vox.length >= 3)
+      .map((vox) => [
+        clamp(Math.round(Number(vox[0] || 0)), 0, nx - 1),
+        clamp(Math.round(Number(vox[1] || 0)), 0, ny - 1),
+        clamp(Math.round(Number(vox[2] || 0)), 0, nz - 1),
+      ]);
+    if (voxPoints.length < 3) return false;
+
+    const fixedSlice =
+      Number.isInteger(curveSliceIndexRef.current) &&
+      curvePaneKeyRef.current === paneKey
+        ? clamp(Number(curveSliceIndexRef.current || 0), 0, maxFixed)
+        : clamp(Math.round(Number(voxPoints[0]?.[fixedAxis] || 0)), 0, maxFixed);
+
+    const poly = voxPoints.map((vox) => ({
+      u: clamp(Number(vox[uAxis] || 0), 0, maxU),
+      v: clamp(Number(vox[vAxis] || 0), 0, maxV),
+    }));
+    if (poly.length < 3) return false;
+
+    const first = poly[0];
+    const last = poly[poly.length - 1];
+    if (Math.hypot(first.u - last.u, first.v - last.v) > 1e-3) {
+      poly.push({ u: first.u, v: first.v });
+    }
+
+    let minU = Number.POSITIVE_INFINITY;
+    let minV = Number.POSITIVE_INFINITY;
+    let maxUBound = Number.NEGATIVE_INFINITY;
+    let maxVBound = Number.NEGATIVE_INFINITY;
+    for (const pt of poly) {
+      minU = Math.min(minU, pt.u);
+      minV = Math.min(minV, pt.v);
+      maxUBound = Math.max(maxUBound, pt.u);
+      maxVBound = Math.max(maxVBound, pt.v);
+    }
+    if (!Number.isFinite(minU) || !Number.isFinite(minV)) return false;
+    const u0 = clamp(Math.floor(minU), 0, maxU);
+    const v0 = clamp(Math.floor(minV), 0, maxV);
+    const u1 = clamp(Math.ceil(maxUBound), 0, maxU);
+    const v1 = clamp(Math.ceil(maxVBound), 0, maxV);
+    if (u1 < u0 || v1 < v0) return false;
+
+    const setByUV = (u, v) => {
+      const coords = [0, 0, 0];
+      coords[fixedAxis] = fixedSlice;
+      coords[uAxis] = clamp(Math.round(Number(u || 0)), 0, maxU);
+      coords[vAxis] = clamp(Math.round(Number(v || 0)), 0, maxV);
+      setVoxelAt(coords);
+    };
+
+    const drawSegmentUV = (uStart, vStart, uEnd, vEnd) => {
+      const du = Number(uEnd || 0) - Number(uStart || 0);
+      const dv = Number(vEnd || 0) - Number(vStart || 0);
+      const steps = Math.max(1, Math.ceil(Math.max(Math.abs(du), Math.abs(dv))));
+      for (let i = 0; i <= steps; i += 1) {
+        const t = i / steps;
+        setByUV(uStart + du * t, vStart + dv * t);
       }
     };
 
+    const containsPoint = (u, v) => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+        const ui = Number(poly[i].u || 0);
+        const vi = Number(poly[i].v || 0);
+        const uj = Number(poly[j].u || 0);
+        const vj = Number(poly[j].v || 0);
+        const intersects =
+          vi > v !== vj > v &&
+          u < ((uj - ui) * (v - vi)) / ((vj - vi) || Number.EPSILON) + ui;
+        if (intersects) inside = !inside;
+      }
+      return inside;
+    };
+
     ensureBaseSnapshot(nv.drawBitmap);
-    for (let i = 1; i < polyNoDup.length; i += 1) {
-      drawSegmentHV(
-        polyNoDup[i - 1][0],
-        polyNoDup[i - 1][1],
-        polyNoDup[i][0],
-        polyNoDup[i][1],
-      );
+    for (let i = 1; i < poly.length; i += 1) {
+      drawSegmentUV(poly[i - 1].u, poly[i - 1].v, poly[i].u, poly[i].v);
     }
-    for (let vv = vStart; vv <= vEnd; vv += 1) {
-      for (let hh = hStart; hh <= hEnd; hh += 1) {
-        if (!pointInPolygon(hh + 0.5, vv + 0.5, polyNoDup)) continue;
-        setVoxelByHV(hh, vv);
+    for (let vv = v0; vv <= v1; vv += 1) {
+      for (let uu = u0; uu <= u1; uu += 1) {
+        if (containsPoint(uu + 0.5, vv + 0.5)) setByUV(uu, vv);
       }
     }
 
@@ -1608,7 +1597,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     refreshDrawingAcrossPanes({
       reason: refreshReason,
       sourcePaneKey: paneKey,
-      targetVox: voxPoints[voxPoints.length - 1],
+      targetVox: lastTargetVox,
     });
     const pushed = pushSnapshot(nv.drawBitmap);
     if (pushed && recordHistory) {
