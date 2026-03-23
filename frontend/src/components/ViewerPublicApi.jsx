@@ -780,6 +780,56 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return [insetX, insetY, 1 - insetX, 1 - insetY];
   };
 
+  const mapOverlayPxToNvCanvasPos = (paneKey, pt, canvas = null) => {
+    if (!pt) return null;
+    if (!PANE_CONFIGS[paneKey]?.is2D || !isSinglePane2DMode(paneKey)) {
+      return {
+        x: Number(pt.x || 0),
+        y: Number(pt.y || 0),
+      };
+    }
+    const size = canvas
+      ? {
+          width: Math.max(1, Number(canvas.width || 1)),
+          height: Math.max(1, Number(canvas.height || 1)),
+        }
+      : getPaneCanvasSize(paneKey);
+    const [x1, y1, x2, y2] = getPaneBounds(paneKey);
+    const left = x1 * size.width;
+    const top = y1 * size.height;
+    const width = Math.max(1, (x2 - x1) * size.width);
+    const height = Math.max(1, (y2 - y1) * size.height);
+    return {
+      x: clamp((Number(pt.x || 0) - left) / width, 0, 1) * size.width,
+      y: clamp((Number(pt.y || 0) - top) / height, 0, 1) * size.height,
+    };
+  };
+
+  const mapNvCanvasPosToOverlayPx = (paneKey, pt, canvas = null) => {
+    if (!pt) return null;
+    if (!PANE_CONFIGS[paneKey]?.is2D || !isSinglePane2DMode(paneKey)) {
+      return {
+        x: Number(pt.x || 0),
+        y: Number(pt.y || 0),
+      };
+    }
+    const size = canvas
+      ? {
+          width: Math.max(1, Number(canvas.width || 1)),
+          height: Math.max(1, Number(canvas.height || 1)),
+        }
+      : getPaneCanvasSize(paneKey);
+    const [x1, y1, x2, y2] = getPaneBounds(paneKey);
+    const left = x1 * size.width;
+    const top = y1 * size.height;
+    const width = Math.max(1, (x2 - x1) * size.width);
+    const height = Math.max(1, (y2 - y1) * size.height);
+    return {
+      x: left + (Number(pt.x || 0) / size.width) * width,
+      y: top + (Number(pt.y || 0) / size.height) * height,
+    };
+  };
+
   const applyPaneBounds = (paneKey) => {
     const nv = getPaneNv(paneKey);
     if (!nv || typeof nv.setBounds !== "function") return false;
@@ -828,9 +878,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const nv = getPaneNv(paneKey);
     if (!nv || !pt) return fallback;
     const dpr = nv.uiData?.dpr || 1;
+    const nvPos = mapOverlayPxToNvCanvasPos(paneKey, pt, canvas);
+    if (!nvPos) return fallback;
     const frac = nv.canvasPos2frac([
-      Number(pt.x || 0) * dpr,
-      Number(pt.y || 0) * dpr,
+      Number(nvPos.x || 0) * dpr,
+      Number(nvPos.y || 0) * dpr,
     ]);
     if (!isVec3Like(frac) || Number(frac[0]) < 0) return fallback;
     const resolvedFrac = [
@@ -869,8 +921,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       ]);
       if (!Array.isArray(pos) || pos.length < 2) return null;
       const dpr = nv.uiData?.dpr || 1;
-      const x = Number(pos[0] || 0) / dpr;
-      const y = Number(pos[1] || 0) / dpr;
+      const mapped = mapNvCanvasPosToOverlayPx(
+        resolvedPaneKey,
+        {
+          x: Number(pos[0] || 0) / dpr,
+          y: Number(pos[1] || 0) / dpr,
+        },
+        canvas,
+      );
+      const x = Number(mapped?.x);
+      const y = Number(mapped?.y);
       if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0)
         return null;
       return { x, y };
@@ -950,7 +1010,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const nv = getPaneNv(paneKey);
     if (!nv || !pt) return null;
     const dpr = nv.uiData?.dpr || 1;
-    const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]);
+    const nvPos = mapOverlayPxToNvCanvasPos(paneKey, pt);
+    if (!nvPos) return null;
+    const frac = nv.canvasPos2frac([nvPos.x * dpr, nvPos.y * dpr]);
     if (!isVec3Like(frac) || Number(frac[0]) < 0) return null;
     const vox = nv.frac2vox(frac);
     if (!isVec3Like(vox)) return null;
