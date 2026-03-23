@@ -817,91 +817,82 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const sx = clamp(
       Number(pt?.x || 0) / Math.max(1, Number(paneSize.width || 1)),
       0,
-      Math.min(1, Number(pt?.x || 0) / Math.max(1, canvas?.width || 1)),
+      1,
     );
-    const sy = Math.max(
+    const sy = clamp(
+      Number(pt?.y || 0) / Math.max(1, Number(paneSize.height || 1)),
       0,
-      Math.min(1, Number(pt?.y || 0) / Math.max(1, canvas?.height || 1)),
+      1,
     );
+    const fallback = { paneKey, sx, sy };
     const nv = getPaneNv(paneKey);
-    if (nv && canvas) {
-      const dpr = nv.uiData?.dpr || 1;
-      const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]);
-      if (isVec3Like(frac) && Number(frac[0]) >= 0) {
-        const rawVox =
-          typeof nv.frac2vox === "function" ? nv.frac2vox(frac) : null;
-        const vox =
-          isVec3Like(rawVox)
-            ? [
-                Math.round(Number(rawVox[0] || 0)),
-                Math.round(Number(rawVox[1] || 0)),
-                Math.round(Number(rawVox[2] || 0)),
-              ]
-            : null;
-        const snappedFrac =
-          vox && typeof nv.vox2frac === "function" ? nv.vox2frac(vox) : frac;
-        return {
-          paneKey,
-          frac: [
-            Number(snappedFrac?.[0] ?? frac[0]),
-            Number(snappedFrac?.[1] ?? frac[1]),
-            Number(snappedFrac?.[2] ?? frac[2]),
-          ],
-          vox: vox
-            ? [Number(vox[0]), Number(vox[1]), Number(vox[2])]
-            : undefined,
-          sx,
-          sy,
-        };
-      }
-    }
-    return { paneKey, sx, sy };
+    if (!nv || !pt) return fallback;
+    const dpr = nv.uiData?.dpr || 1;
+    const frac = nv.canvasPos2frac([
+      Number(pt.x || 0) * dpr,
+      Number(pt.y || 0) * dpr,
+    ]);
+    if (!isVec3Like(frac) || Number(frac[0]) < 0) return fallback;
+    const resolvedFrac = [
+      Number(frac[0] || 0),
+      Number(frac[1] || 0),
+      Number(frac[2] || 0),
+    ];
+    const rawVox =
+      typeof nv.frac2vox === "function" ? nv.frac2vox(resolvedFrac) : null;
+    const vox = isVec3Like(rawVox)
+      ? [
+          Math.round(Number(rawVox[0] || 0)),
+          Math.round(Number(rawVox[1] || 0)),
+          Math.round(Number(rawVox[2] || 0)),
+        ]
+      : null;
+    return {
+      paneKey,
+      frac: resolvedFrac,
+      vox: vox ? [Number(vox[0]), Number(vox[1]), Number(vox[2])] : undefined,
+      sx,
+      sy,
+    };
   };
 
   const toPxPoint = (pt, canvas, paneKey = null) => {
     const resolvedPaneKey = paneKey || pt?.paneKey || null;
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
-    
-    // Priority 1: Use vox coordinate (most reliable across view changes)
-    if (nv && isVec3Like(pt?.vox) && typeof nv.vox2frac === "function" && typeof nv.frac2canvasPos === "function") {
-      const vox = pt.vox;
-      const frac = nv.vox2frac([
-        Number(vox[0] || 0),
-        Number(vox[1] || 0),
-        Number(vox[2] || 0),
-      ]);
-      if (isVec3Like(frac)) {
-        const pos = nv.frac2canvasPos([
-          Number(frac[0] || 0),
-          Number(frac[1] || 0),
-          Number(frac[2] || 0),
-        ]);
-        if (Array.isArray(pos) && pos.length >= 2) {
-          const dpr = nv.uiData?.dpr || 1;
-          const x = Number(pos[0] || 0) / dpr;
-          const y = Number(pos[1] || 0) / dpr;
-          if (x < 0 || y < 0) return null;
-          return { x, y };
-        }
-      }
-    }
-    
-    // Priority 2: Use frac coordinate
-    const frac = pt?.frac;
-    if (nv && frac && typeof nv.frac2canvasPos === "function") {
+    const fracToPx = (frac) => {
+      if (!nv || !isVec3Like(frac) || typeof nv.frac2canvasPos !== "function")
+        return null;
       const pos = nv.frac2canvasPos([
         Number(frac[0] || 0),
         Number(frac[1] || 0),
         Number(frac[2] || 0),
       ]);
-      if (Array.isArray(pos) && pos.length >= 2) {
-        const dpr = nv.uiData?.dpr || 1;
-        const x = Number(pos[0] || 0) / dpr;
-        const y = Number(pos[1] || 0) / dpr;
-        if (x < 0 || y < 0) return null;
-        return { x, y };
-      }
-      return null;
+      if (!Array.isArray(pos) || pos.length < 2) return null;
+      const dpr = nv.uiData?.dpr || 1;
+      const x = Number(pos[0] || 0) / dpr;
+      const y = Number(pos[1] || 0) / dpr;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0)
+        return null;
+      return { x, y };
+    };
+
+    // Keep on-screen drawing consistent with where the user placed points.
+    const byFrac = fracToPx(pt?.frac);
+    if (byFrac) return byFrac;
+
+    if (
+      nv &&
+      isVec3Like(pt?.vox) &&
+      typeof nv.vox2frac === "function" &&
+      typeof nv.frac2canvasPos === "function"
+    ) {
+      const fracFromVox = nv.vox2frac([
+        Number(pt.vox[0] || 0),
+        Number(pt.vox[1] || 0),
+        Number(pt.vox[2] || 0),
+      ]);
+      const byVox = fracToPx(fracFromVox);
+      if (byVox) return byVox;
     }
     // Backward compatibility for older cached annotations
     if (Number.isFinite(Number(pt?.sx)) && Number.isFinite(Number(pt?.sy))) {
@@ -917,13 +908,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   };
 
   const toVoxPoint = (pt, paneKey = null) => {
-    if (isVec3Like(pt?.vox)) {
-      return [
-        Math.round(Number(pt.vox[0] || 0)),
-        Math.round(Number(pt.vox[1] || 0)),
-        Math.round(Number(pt.vox[2] || 0)),
-      ];
-    }
     const resolvedPaneKey = paneKey || pt?.paneKey || null;
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
     if (
@@ -943,6 +927,13 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           Math.round(Number(rawVox[2] || 0)),
         ];
       }
+    }
+    if (isVec3Like(pt?.vox)) {
+      return [
+        Math.round(Number(pt.vox[0] || 0)),
+        Math.round(Number(pt.vox[1] || 0)),
+        Math.round(Number(pt.vox[2] || 0)),
+      ];
     }
     return null;
   };
