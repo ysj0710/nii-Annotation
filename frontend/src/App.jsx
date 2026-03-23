@@ -2048,7 +2048,8 @@ export default function App() {
               mask: null,
               maskName: null,
               maskAttached: false,
-              maskVersion: nextMaskVersion,
+              // 当前影像内自动保存只更新数据，不触发 maskVersion 重载，避免 2D 视口瞬时错位。
+              maskVersion: Number(prev?.maskVersion || 0),
               overlayAnnotations: payload.overlayAnnotations,
               lastClientEnvReport: payload.clientEnvReport,
               modifiedByUser: true
@@ -2080,7 +2081,8 @@ export default function App() {
             ...prev,
             mask: buffer,
             maskAttached: true,
-            maskVersion: nextMaskVersion,
+            // 当前影像内自动保存只更新数据，不触发 maskVersion 重载，避免 2D 视口瞬时错位。
+            maskVersion: Number(prev?.maskVersion || 0),
             overlayAnnotations: payload.overlayAnnotations,
             lastClientEnvReport: payload.clientEnvReport,
             modifiedByUser: true
