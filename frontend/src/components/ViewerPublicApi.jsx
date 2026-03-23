@@ -1409,7 +1409,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       sliceIndex = null,
       sourcePaneKey = null,
     } = options;
-    const nv = getPrimaryNv();
+    const sourceNv = sourcePaneKey ? getPaneNv(sourcePaneKey) : null;
+    const nv = sourceNv || getPrimaryNv();
     if (!nv || !Array.isArray(normPoints) || normPoints.length < 3)
       return false;
     if (!ensureDrawingBitmap()) return false;
@@ -1427,9 +1428,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         if (
           frac &&
           frac.every((v) => Number.isFinite(v)) &&
-          typeof nv.frac2vox === "function"
+          sourceNv &&
+          typeof sourceNv.frac2vox === "function"
         ) {
-          const vox = nv.frac2vox(frac);
+          const vox = sourceNv.frac2vox(frac);
           if (Array.isArray(vox) && vox.length >= 3) {
             return [Number(vox[0]), Number(vox[1]), Number(vox[2])];
           }
@@ -1598,8 +1600,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
     if (!changed) return false;
     invalidateLabelAnalysis();
+    const refreshReason =
+      paneKey && isSinglePane2DMode(paneKey) ? "stroke" : "commit";
     refreshDrawingAcrossPanes({
-      reason: "commit",
+      reason: refreshReason,
       sourcePaneKey: paneKey,
       targetVox: voxPoints[voxPoints.length - 1],
     });
@@ -2527,6 +2531,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const paneKey = curvePaneKeyRef.current;
       const markerCanvas = paneKey ? getPaneMarkerCanvas(paneKey) : null;
       if (!paneKey || !markerCanvas) return;
+      if (isSinglePane2DMode(paneKey)) {
+        syncPaneLayoutNow(paneKey);
+      }
       const rawPoints = [...annotationStepsRef.current];
       const first = rawPoints[0];
       const last = rawPoints[rawPoints.length - 1];
