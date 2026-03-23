@@ -961,6 +961,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const toPxPoint = (pt, canvas, paneKey = null) => {
     const resolvedPaneKey = paneKey || pt?.paneKey || null;
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
+
+    // Freehand marker preview should stay anchored to the actual pointer path.
+    if (Number.isFinite(Number(pt?.sx)) && Number.isFinite(Number(pt?.sy))) {
+      return {
+        x: Number(pt.sx) * canvas.width,
+        y: Number(pt.sy) * canvas.height,
+      };
+    }
+
     const fracToPx = (frac) => {
       const resolvedFrac = resolveFracForNv(nv, frac, resolvedPaneKey);
       if (!nv || !resolvedFrac || typeof nv.frac2canvasPos !== "function")
@@ -999,13 +1008,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const byVox = fracToPx(fracFromVox);
       if (byVox) return byVox;
     }
-    // Backward compatibility for older cached annotations
-    if (Number.isFinite(Number(pt?.sx)) && Number.isFinite(Number(pt?.sy))) {
-      return {
-        x: Number(pt.sx) * canvas.width,
-        y: Number(pt.sy) * canvas.height,
-      };
-    }
     return {
       x: Number(pt?.x || 0) * canvas.width,
       y: Number(pt?.y || 0) * canvas.height,
@@ -1013,6 +1015,13 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   };
 
   const toVoxPoint = (pt, paneKey = null) => {
+    if (isVec3Like(pt?.vox)) {
+      return [
+        Math.round(Number(pt.vox[0] || 0)),
+        Math.round(Number(pt.vox[1] || 0)),
+        Math.round(Number(pt.vox[2] || 0)),
+      ];
+    }
     const resolvedPaneKey = paneKey || pt?.paneKey || null;
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
     const frac = resolveFracForNv(nv, pt?.frac, resolvedPaneKey);
@@ -1030,13 +1039,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           Math.round(Number(resolved[2] || 0)),
         ];
       }
-    }
-    if (isVec3Like(pt?.vox)) {
-      return [
-        Math.round(Number(pt.vox[0] || 0)),
-        Math.round(Number(pt.vox[1] || 0)),
-        Math.round(Number(pt.vox[2] || 0)),
-      ];
     }
     return null;
   };
