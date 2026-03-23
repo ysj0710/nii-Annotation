@@ -3252,44 +3252,8 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     )
   }
 
-  const exportAll = async () => {
-    await persistActiveDrawing()
-    const records = await getAllImages()
-    const activeRecord = activeImage?.id ? records.find((record) => record.id === activeImage.id) : null
-    const exportScope =
-      activeRecord?.importBatchId
-        ? records.filter((record) => record.importBatchId === activeRecord.importBatchId)
-        : records
-    const annotatedRecords = exportScope.filter((record) => record.mask && hasNonZeroMaskNifti(record.mask))
-    if (annotatedRecords.length === 0) {
-      Message.warning('当前没有可导出的标注结果')
-      return
-    }
-
-    const zip = new JSZip()
-    const imgFolder = zip.folder('img')
-    const maskFolder = zip.folder('mask')
-
-    for (const record of annotatedRecords) {
-      const imgName = record.sourceName || record.displayName || record.name
-      const imgData = record.sourceData || record.data
-      const maskData = sanitizeMaskBuffer(record.mask, { templateBuffer: record.data })
-      if (imgData && imgFolder) {
-        imgFolder.file(imgName, imgData)
-      }
-      if (maskData && maskFolder) {
-        const maskName = `${fileStem(imgName)}.nii.gz`
-        maskFolder.file(maskName, maskData)
-      }
-    }
-
-    const blob = await zip.generateAsync({ type: 'blob' })
-    const url = URL.createObjectURL(blob)
-    const defaultZipName =
-      annotatedRecords.length === 1
-        ? `${fileStem(annotatedRecords[0].sourceName || annotatedRecords[0].displayName || annotatedRecords[0].name)}.zip`
-        : 'nii_annotations.zip'
-    const userInput = await new Promise((resolve) => {
+  const promptExportZipName = async (defaultZipName) =>
+    new Promise((resolve) => {
       let nextName = defaultZipName
       Modal.confirm({
         title: '导出文件名',
@@ -3308,10 +3272,70 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
         onCancel: () => resolve(null)
       })
     })
+
+  const buildExportEntries = (records = []) => {
+    const entries = []
+    for (const record of records) {
+      if (!record || record.isMaskOnly) continue
+      const imgName = getLeafName(record.sourceName || record.displayName || record.name)
+      const imgData = arrayBufferFrom(record.sourceData || record.data)
+      const rawMask = record.mask || record.sourceMask
+      if (!imgName || !imgData || !rawMask) continue
+      const maskData = sanitizeMaskBuffer(rawMask, { templateBuffer: record.sourceData || record.data })
+      if (!maskData || !hasNonZeroMaskNifti(maskData)) continue
+      entries.push({
+        imageName: imgName,
+        imageData: imgData,
+        maskName: inferMaskFileName(imgName),
+        maskData
+      })
+    }
+    return entries
+  }
+
+  const writeExportEntriesToFolder = async (entries = []) => {
+    if (!exportDirHandle || entries.length === 0) return
+    try {
+      const imgDir = await exportDirHandle.getDirectoryHandle('img', { create: true })
+      const maskDir = await exportDirHandle.getDirectoryHandle('mask', { create: true })
+      for (const entry of entries) {
+        const imgHandle = await imgDir.getFileHandle(entry.imageName, { create: true })
+        const imgWritable = await imgHandle.createWritable()
+        await imgWritable.write(entry.imageData)
+        await imgWritable.close()
+
+        const maskHandle = await maskDir.getFileHandle(entry.maskName, { create: true })
+        const maskWritable = await maskHandle.createWritable()
+        await maskWritable.write(entry.maskData)
+        await maskWritable.close()
+      }
+    } catch (error) {
+      console.warn('导出到文件夹失败', error)
+    }
+  }
+
+  const exportEntriesAsZip = async (entries = [], defaultZipName = 'nii_annotations.zip') => {
+    if (!entries.length) {
+      Message.warning('当前没有可导出的标注结果')
+      return
+    }
+
+    const zip = new JSZip()
+    const imgFolder = zip.folder('img')
+    const maskFolder = zip.folder('mask')
+    for (const entry of entries) {
+      imgFolder?.file(entry.imageName, entry.imageData)
+      maskFolder?.file(entry.maskName, entry.maskData)
+    }
+
+    const blob = await zip.generateAsync({ type: 'blob' })
+    const url = URL.createObjectURL(blob)
+    const userInput = await promptExportZipName(defaultZipName)
     if (userInput === null) {
       URL.revokeObjectURL(url)
       return
     }
+
     const normalizedName = String(userInput || '')
       .trim()
       .replace(/[\\/:*?"<>|]/g, '_')
@@ -3325,31 +3349,59 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     document.body.removeChild(link)
     setTimeout(() => URL.revokeObjectURL(url), 200)
 
-    if (exportDirHandle) {
-      try {
-        const imgDir = await exportDirHandle.getDirectoryHandle('img', { create: true })
-        const maskDir = await exportDirHandle.getDirectoryHandle('mask', { create: true })
-        for (const record of annotatedRecords) {
-          const imgName = record.sourceName || record.displayName || record.name
-          const imgData = record.sourceData || record.data
-          if (imgData) {
-            const imgHandle = await imgDir.getFileHandle(imgName, { create: true })
-            const imgWritable = await imgHandle.createWritable()
-            await imgWritable.write(imgData)
-            await imgWritable.close()
-          }
-          const maskData = sanitizeMaskBuffer(record.mask, { templateBuffer: record.data })
-          if (!maskData) continue
-          const maskName = `${fileStem(imgName)}.nii.gz`
-          const fileHandle = await maskDir.getFileHandle(maskName, { create: true })
-          const writable = await fileHandle.createWritable()
-          await writable.write(maskData)
-          await writable.close()
-        }
-      } catch (error) {
-        console.warn('导出到文件夹失败', error)
-      }
+    await writeExportEntriesToFolder(entries)
+  }
+
+  const resolveBulkExportScope = (records = []) => {
+    const imageRecords = records.filter((record) => !record?.isMaskOnly)
+    const queueIdSet = new Set(queueImages.map((item) => String(item?.imageId || '')).filter(Boolean))
+
+    if (queueIdSet.size > 0 || currentBatchId) {
+      return imageRecords.filter((record) => {
+        const remoteImageId = String(record?.remoteImageId || '')
+        const remoteBatchId = String(record?.remoteBatchId || '')
+        if (queueIdSet.size > 0 && queueIdSet.has(remoteImageId)) return true
+        if (currentBatchId && remoteBatchId === currentBatchId) return true
+        return false
+      })
     }
+
+    const activeRecord = activeImage?.id ? imageRecords.find((record) => record.id === activeImage.id) : null
+    if (activeRecord?.importBatchId) {
+      return imageRecords.filter((record) => record.importBatchId === activeRecord.importBatchId)
+    }
+    return imageRecords
+  }
+
+  const exportCurrent = async () => {
+    if (!activeImage?.id) {
+      Message.warning('当前没有可导出的影像')
+      return
+    }
+    await persistActiveDrawing()
+    const record = await getImageById(activeImage.id)
+    const entries = buildExportEntries(record ? [record] : [])
+    const sourceName = record?.sourceName || record?.displayName || record?.name || 'annotation'
+    const defaultZipName = `${fileStem(sourceName) || 'annotation'}.zip`
+    await exportEntriesAsZip(entries, defaultZipName)
+  }
+
+  const exportBatch = async () => {
+    await persistActiveDrawing()
+    if (queueImages.length > 0) {
+      await prefetchQueueImages(queueImages)
+    }
+    const records = await getAllImages()
+    const exportScope = resolveBulkExportScope(records)
+    const entries = buildExportEntries(exportScope)
+    const sanitizedBatchId = String(currentBatchId || '').replace(/[\\/:*?"<>|]/g, '_')
+    const defaultZipName =
+      entries.length === 1
+        ? `${fileStem(entries[0].imageName) || 'annotation'}.zip`
+        : sanitizedBatchId
+          ? `batch_${sanitizedBatchId}_annotations.zip`
+          : 'nii_annotations.zip'
+    await exportEntriesAsZip(entries, defaultZipName)
   }
 
   const toggleAnnotationTool = (nextTool) => {
@@ -3474,8 +3526,11 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
 
   const exportMenuContent = (
     <div className="export-menu">
-      <Button type="text" className="export-menu-item" onClick={exportAll}>
+      <Button type="text" className="export-menu-item" onClick={exportCurrent}>
         导出当前标注
+      </Button>
+      <Button type="text" className="export-menu-item" onClick={exportBatch}>
+        批量导出本批
       </Button>
     </div>
   )

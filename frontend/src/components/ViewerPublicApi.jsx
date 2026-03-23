@@ -107,6 +107,14 @@ const compactPoints = (points, maxPoints) => {
   return compacted;
 };
 
+const isValidFrac = (frac) =>
+  Array.isArray(frac) &&
+  frac.length >= 3 &&
+  [0, 1, 2].every((axis) => {
+    const value = Number(frac[axis]);
+    return Number.isFinite(value) && value >= 0 && value <= 1;
+  });
+
 const calcDet3 = (m) => {
   if (!Array.isArray(m) || m.length < 3) return null;
   const a00 = Number(m?.[0]?.[0] || 0);
@@ -804,24 +812,18 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     run(Math.max(0, Number(delayFrames) || 0));
   };
 
-  const toStoredPoint = (paneKey, pt, canvas) => {
-    const sx = Math.max(
-      0,
-      Math.min(1, Number(pt?.x || 0) / Math.max(1, canvas?.width || 1)),
-    );
-    const sy = Math.max(
-      0,
-      Math.min(1, Number(pt?.y || 0) / Math.max(1, canvas?.height || 1)),
-    );
+  const toStoredPoint = (paneKey, pt) => {
     const nv = getPaneNv(paneKey);
-    if (nv && canvas) {
+    if (nv && pt) {
       const dpr = nv.uiData?.dpr || 1;
       const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]);
-      if (frac && frac[0] >= 0) {
+      if (isValidFrac(frac)) {
         const rawVox =
           typeof nv.frac2vox === "function" ? nv.frac2vox(frac) : null;
         const vox =
-          Array.isArray(rawVox) && rawVox.length >= 3
+          Array.isArray(rawVox) &&
+          rawVox.length >= 3 &&
+          [0, 1, 2].every((axis) => Number.isFinite(Number(rawVox[axis])))
             ? [
                 Math.round(Number(rawVox[0] || 0)),
                 Math.round(Number(rawVox[1] || 0)),
@@ -840,22 +842,47 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           vox: vox
             ? [Number(vox[0]), Number(vox[1]), Number(vox[2])]
             : undefined,
-          sx,
-          sy,
         };
       }
     }
-    return { paneKey, sx, sy };
+    return null;
   };
 
   const toPxPoint = (pt, canvas, paneKey = null) => {
     const resolvedPaneKey = paneKey || pt?.paneKey || null;
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
+    if (
+      nv &&
+      Array.isArray(pt?.vox) &&
+      pt.vox.length >= 3 &&
+      typeof nv.vox2frac === "function" &&
+      typeof nv.frac2canvasPos === "function"
+    ) {
+      const fracFromVox = nv.vox2frac([
+        Number(pt.vox[0] || 0),
+        Number(pt.vox[1] || 0),
+        Number(pt.vox[2] || 0),
+      ]);
+      if (isValidFrac(fracFromVox)) {
+        const pos = nv.frac2canvasPos([
+          Number(fracFromVox[0]),
+          Number(fracFromVox[1]),
+          Number(fracFromVox[2]),
+        ]);
+        if (Array.isArray(pos) && pos.length >= 2) {
+          const dpr = nv.uiData?.dpr || 1;
+          const x = Number(pos[0] || 0) / dpr;
+          const y = Number(pos[1] || 0) / dpr;
+          if (x >= 0 && y >= 0 && Number.isFinite(x) && Number.isFinite(y)) {
+            return { x, y };
+          }
+        }
+      }
+    }
     const frac = pt?.frac;
     if (
       nv &&
-      Array.isArray(frac) &&
-      frac.length >= 3 &&
+      isValidFrac(frac) &&
       typeof nv.frac2canvasPos === "function"
     ) {
       const pos = nv.frac2canvasPos([
@@ -867,11 +894,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const dpr = nv.uiData?.dpr || 1;
         const x = Number(pos[0] || 0) / dpr;
         const y = Number(pos[1] || 0) / dpr;
-        if (x < 0 || y < 0) return null;
-        return { x, y };
+        if (x >= 0 && y >= 0 && Number.isFinite(x) && Number.isFinite(y)) {
+          return { x, y };
+        }
       }
-      return null;
     }
+    // Backward compatibility for older cached annotations
     if (Number.isFinite(Number(pt?.sx)) && Number.isFinite(Number(pt?.sy))) {
       return {
         x: Number(pt.sx) * canvas.width,
@@ -896,8 +924,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
     if (
       nv &&
-      Array.isArray(pt?.frac) &&
-      pt.frac.length >= 3 &&
+      isValidFrac(pt?.frac) &&
       typeof nv.frac2vox === "function"
     ) {
       const raw = nv.frac2vox([
@@ -905,7 +932,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         Number(pt.frac[1] || 0),
         Number(pt.frac[2] || 0),
       ]);
-      if (Array.isArray(raw) && raw.length >= 3) {
+      if (
+        Array.isArray(raw) &&
+        raw.length >= 3 &&
+        [0, 1, 2].every((axis) => Number.isFinite(Number(raw[axis])))
+      ) {
         return [
           Math.round(Number(raw[0] || 0)),
           Math.round(Number(raw[1] || 0)),
@@ -929,13 +960,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (!nv || !pt) return null;
     const dpr = nv.uiData?.dpr || 1;
     const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]);
-    if (!frac || frac[0] < 0) return null;
+    if (!isValidFrac(frac)) return null;
     const vox = nv.frac2vox(frac);
-    return [
-      Number(vox?.[0] || 0),
-      Number(vox?.[1] || 0),
-      Number(vox?.[2] || 0),
-    ];
+    if (
+      !Array.isArray(vox) ||
+      vox.length < 3 ||
+      ![0, 1, 2].every((axis) => Number.isFinite(Number(vox[axis])))
+    ) {
+      return null;
+    }
+    return [Number(vox[0]), Number(vox[1]), Number(vox[2])];
   };
 
   const setCrosshairFromVox = (vox, { redraw = true } = {}) => {
@@ -1465,6 +1499,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (!paneKey || !markerCanvas) return false;
     const paneCfg = PANE_CONFIGS[paneKey];
     if (!paneCfg?.is2D || !Number.isInteger(paneCfg.fixedAxis)) return false;
+    const isDedicated2DMode = isSinglePane2DMode(paneKey);
 
     const dims = nv.back?.dims;
     const nx = Number(dims?.[1] || 0);
@@ -1478,6 +1513,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     );
     const xy = nx * ny;
     let changed = false;
+    let changedCount = 0;
     let lastTargetVox = null;
 
     const setVoxelAt = (vox) => {
@@ -1490,6 +1526,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       if (nv.drawBitmap[idx] === fillLabel) return;
       nv.drawBitmap[idx] = fillLabel;
       changed = true;
+      changedCount += 1;
       lastTargetVox = [x, y, z];
     };
 
@@ -1502,100 +1539,189 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const maxV = Math.max(0, Number(axisDims[vAxis] || 1) - 1);
     const maxFixed = Math.max(0, Number(axisDims[fixedAxis] || 1) - 1);
 
-    const voxPoints = normPoints
-      .map((pt) => toVoxPoint(pt, paneKey))
-      .filter((vox) => Array.isArray(vox) && vox.length >= 3)
-      .map((vox) => [
-        clamp(Math.round(Number(vox[0] || 0)), 0, nx - 1),
-        clamp(Math.round(Number(vox[1] || 0)), 0, ny - 1),
-        clamp(Math.round(Number(vox[2] || 0)), 0, nz - 1),
-      ]);
-    if (voxPoints.length < 3) return false;
-
-    const fixedSlice =
-      Number.isInteger(curveSliceIndexRef.current) &&
-      curvePaneKeyRef.current === paneKey
-        ? clamp(Number(curveSliceIndexRef.current || 0), 0, maxFixed)
-        : clamp(Math.round(Number(voxPoints[0]?.[fixedAxis] || 0)), 0, maxFixed);
-
-    const poly = voxPoints.map((vox) => ({
-      u: clamp(Number(vox[uAxis] || 0), 0, maxU),
-      v: clamp(Number(vox[vAxis] || 0), 0, maxV),
-    }));
-    if (poly.length < 3) return false;
-
-    const first = poly[0];
-    const last = poly[poly.length - 1];
-    if (Math.hypot(first.u - last.u, first.v - last.v) > 1e-3) {
-      poly.push({ u: first.u, v: first.v });
-    }
-
-    let minU = Number.POSITIVE_INFINITY;
-    let minV = Number.POSITIVE_INFINITY;
-    let maxUBound = Number.NEGATIVE_INFINITY;
-    let maxVBound = Number.NEGATIVE_INFINITY;
-    for (const pt of poly) {
-      minU = Math.min(minU, pt.u);
-      minV = Math.min(minV, pt.v);
-      maxUBound = Math.max(maxUBound, pt.u);
-      maxVBound = Math.max(maxVBound, pt.v);
-    }
-    if (!Number.isFinite(minU) || !Number.isFinite(minV)) return false;
-    const u0 = clamp(Math.floor(minU), 0, maxU);
-    const v0 = clamp(Math.floor(minV), 0, maxV);
-    const u1 = clamp(Math.ceil(maxUBound), 0, maxU);
-    const v1 = clamp(Math.ceil(maxVBound), 0, maxV);
-    if (u1 < u0 || v1 < v0) return false;
-
-    const setByUV = (u, v) => {
-      const coords = [0, 0, 0];
-      coords[fixedAxis] = fixedSlice;
-      coords[uAxis] = clamp(Math.round(Number(u || 0)), 0, maxU);
-      coords[vAxis] = clamp(Math.round(Number(v || 0)), 0, maxV);
-      setVoxelAt(coords);
-    };
-
-    const drawSegmentUV = (uStart, vStart, uEnd, vEnd) => {
-      const du = Number(uEnd || 0) - Number(uStart || 0);
-      const dv = Number(vEnd || 0) - Number(vStart || 0);
-      const steps = Math.max(1, Math.ceil(Math.max(Math.abs(du), Math.abs(dv))));
-      for (let i = 0; i <= steps; i += 1) {
-        const t = i / steps;
-        setByUV(uStart + du * t, vStart + dv * t);
-      }
-    };
-
-    const containsPoint = (u, v) => {
-      let inside = false;
-      for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
-        const ui = Number(poly[i].u || 0);
-        const vi = Number(poly[i].v || 0);
-        const uj = Number(poly[j].u || 0);
-        const vj = Number(poly[j].v || 0);
-        const intersects =
-          vi > v !== vj > v &&
-          u < ((uj - ui) * (v - vi)) / ((vj - vi) || Number.EPSILON) + ui;
-        if (intersects) inside = !inside;
-      }
-      return inside;
-    };
-
     ensureBaseSnapshot(nv.drawBitmap);
-    for (let i = 1; i < poly.length; i += 1) {
-      drawSegmentUV(poly[i - 1].u, poly[i - 1].v, poly[i].u, poly[i].v);
-    }
-    for (let vv = v0; vv <= v1; vv += 1) {
-      for (let uu = u0; uu <= u1; uu += 1) {
-        if (containsPoint(uu + 0.5, vv + 0.5)) setByUV(uu, vv);
+    if (!isDedicated2DMode) {
+      // For 3D workflows (quad-view), keep screen-space rasterization so oblique/oriented
+      // volumes are handled by Niivue's canvas->voxel mapping without axis assumptions.
+      const pxPoints = normPoints
+        .map((pt) => toPxPoint(pt, markerCanvas, paneKey))
+        .filter(
+          (pt) =>
+            pt &&
+            Number.isFinite(Number(pt.x)) &&
+            Number.isFinite(Number(pt.y)),
+        );
+      if (pxPoints.length < 3) return false;
+      const first = pxPoints[0];
+      const last = pxPoints[pxPoints.length - 1];
+      if (Math.hypot(first.x - last.x, first.y - last.y) > 0.5) {
+        pxPoints.push({ x: first.x, y: first.y });
+      }
+      let minX = Number.POSITIVE_INFINITY;
+      let minY = Number.POSITIVE_INFINITY;
+      let maxX = Number.NEGATIVE_INFINITY;
+      let maxY = Number.NEGATIVE_INFINITY;
+      for (const pt of pxPoints) {
+        minX = Math.min(minX, Number(pt.x));
+        minY = Math.min(minY, Number(pt.y));
+        maxX = Math.max(maxX, Number(pt.x));
+        maxY = Math.max(maxY, Number(pt.y));
+      }
+      if (!Number.isFinite(minX) || !Number.isFinite(minY)) return false;
+      const canvasW = Math.max(1, Math.round(Number(markerCanvas.width || 1)));
+      const canvasH = Math.max(1, Math.round(Number(markerCanvas.height || 1)));
+      const x0 = clamp(Math.floor(minX) - 1, 0, canvasW - 1);
+      const y0 = clamp(Math.floor(minY) - 1, 0, canvasH - 1);
+      const x1 = clamp(Math.ceil(maxX) + 1, 0, canvasW - 1);
+      const y1 = clamp(Math.ceil(maxY) + 1, 0, canvasH - 1);
+      if (x1 < x0 || y1 < y0) return false;
+      const tmpCanvas = document.createElement("canvas");
+      tmpCanvas.width = x1 - x0 + 1;
+      tmpCanvas.height = y1 - y0 + 1;
+      const tmpCtx = tmpCanvas.getContext("2d", { willReadFrequently: true });
+      if (!tmpCtx) return false;
+      tmpCtx.clearRect(0, 0, tmpCanvas.width, tmpCanvas.height);
+      tmpCtx.beginPath();
+      tmpCtx.moveTo(pxPoints[0].x - x0, pxPoints[0].y - y0);
+      for (let i = 1; i < pxPoints.length; i += 1) {
+        tmpCtx.lineTo(pxPoints[i].x - x0, pxPoints[i].y - y0);
+      }
+      tmpCtx.closePath();
+      tmpCtx.fillStyle = "#ffffff";
+      tmpCtx.fill();
+      tmpCtx.strokeStyle = "#ffffff";
+      tmpCtx.lineWidth = 1.25;
+      tmpCtx.stroke();
+      const alpha = tmpCtx.getImageData(0, 0, tmpCanvas.width, tmpCanvas.height).data;
+      for (let py = 0; py < tmpCanvas.height; py += 1) {
+        const rowOffset = py * tmpCanvas.width * 4;
+        for (let px = 0; px < tmpCanvas.width; px += 1) {
+          const a = Number(alpha[rowOffset + px * 4 + 3] || 0);
+          if (a < 8) continue;
+          const vox = canvasPosToVox(paneKey, {
+            x: x0 + px + 0.5,
+            y: y0 + py + 0.5,
+          });
+          setVoxelAt(vox);
+        }
+      }
+    } else {
+      // In dedicated 2D mode, rasterize directly in voxel plane to keep stable
+      // coordinates across resize/reload.
+      const voxPoints = normPoints
+        .map((pt) => {
+          let vox = toVoxPoint(pt, paneKey);
+          if (!vox && markerCanvas) {
+            const px = toPxPoint(pt, markerCanvas, paneKey);
+            if (px) vox = canvasPosToVox(paneKey, px);
+          }
+          return vox;
+        })
+        .filter((vox) => Array.isArray(vox) && vox.length >= 3)
+        .map((vox) => [
+          clamp(Math.round(Number(vox[0] || 0)), 0, nx - 1),
+          clamp(Math.round(Number(vox[1] || 0)), 0, ny - 1),
+          clamp(Math.round(Number(vox[2] || 0)), 0, nz - 1),
+        ]);
+      if (isViewerDebugEnabled()) {
+        console.info("[Viewer2D] freehand-rasterize", {
+          paneKey,
+          normPoints: normPoints.length,
+          voxPoints: voxPoints.length,
+          dims: [nx, ny, nz],
+        });
+      }
+      if (voxPoints.length < 3) return false;
+
+      const fixedSlice =
+        Number.isInteger(curveSliceIndexRef.current) &&
+        curvePaneKeyRef.current === paneKey
+          ? clamp(Number(curveSliceIndexRef.current || 0), 0, maxFixed)
+          : clamp(Math.round(Number(voxPoints[0]?.[fixedAxis] || 0)), 0, maxFixed);
+
+      const poly = voxPoints.map((vox) => ({
+        u: clamp(Number(vox[uAxis] || 0), 0, maxU),
+        v: clamp(Number(vox[vAxis] || 0), 0, maxV),
+      }));
+      if (poly.length < 3) return false;
+
+      const first = poly[0];
+      const last = poly[poly.length - 1];
+      if (Math.hypot(first.u - last.u, first.v - last.v) > 1e-3) {
+        poly.push({ u: first.u, v: first.v });
+      }
+
+      let minU = Number.POSITIVE_INFINITY;
+      let minV = Number.POSITIVE_INFINITY;
+      let maxUBound = Number.NEGATIVE_INFINITY;
+      let maxVBound = Number.NEGATIVE_INFINITY;
+      for (const pt of poly) {
+        minU = Math.min(minU, pt.u);
+        minV = Math.min(minV, pt.v);
+        maxUBound = Math.max(maxUBound, pt.u);
+        maxVBound = Math.max(maxVBound, pt.v);
+      }
+      if (!Number.isFinite(minU) || !Number.isFinite(minV)) return false;
+      const u0 = clamp(Math.floor(minU), 0, maxU);
+      const v0 = clamp(Math.floor(minV), 0, maxV);
+      const u1 = clamp(Math.ceil(maxUBound), 0, maxU);
+      const v1 = clamp(Math.ceil(maxVBound), 0, maxV);
+      if (u1 < u0 || v1 < v0) return false;
+
+      const setByUV = (u, v) => {
+        const coords = [0, 0, 0];
+        coords[fixedAxis] = fixedSlice;
+        coords[uAxis] = clamp(Math.round(Number(u || 0)), 0, maxU);
+        coords[vAxis] = clamp(Math.round(Number(v || 0)), 0, maxV);
+        setVoxelAt(coords);
+      };
+
+      const drawSegmentUV = (uStart, vStart, uEnd, vEnd) => {
+        const du = Number(uEnd || 0) - Number(uStart || 0);
+        const dv = Number(vEnd || 0) - Number(vStart || 0);
+        const steps = Math.max(1, Math.ceil(Math.max(Math.abs(du), Math.abs(dv))));
+        for (let i = 0; i <= steps; i += 1) {
+          const t = i / steps;
+          setByUV(uStart + du * t, vStart + dv * t);
+        }
+      };
+
+      const containsPoint = (u, v) => {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+          const ui = Number(poly[i].u || 0);
+          const vi = Number(poly[i].v || 0);
+          const uj = Number(poly[j].u || 0);
+          const vj = Number(poly[j].v || 0);
+          const intersects =
+            vi > v !== vj > v &&
+            u < ((uj - ui) * (v - vi)) / ((vj - vi) || Number.EPSILON) + ui;
+          if (intersects) inside = !inside;
+        }
+        return inside;
+      };
+
+      for (let i = 1; i < poly.length; i += 1) {
+        drawSegmentUV(poly[i - 1].u, poly[i - 1].v, poly[i].u, poly[i].v);
+      }
+      for (let vv = v0; vv <= v1; vv += 1) {
+        for (let uu = u0; uu <= u1; uu += 1) {
+          if (containsPoint(uu + 0.5, vv + 0.5)) setByUV(uu, vv);
+        }
       }
     }
 
     if (!changed) return false;
+    if (isViewerDebugEnabled()) {
+      console.info("[Viewer2D] freehand-rasterize-result", {
+        paneKey,
+        changedCount,
+        lastTargetVox,
+      });
+    }
     invalidateLabelAnalysis();
-    const refreshReason =
-      paneKey && isSinglePane2DMode(paneKey) ? "stroke" : "commit";
     refreshDrawingAcrossPanes({
-      reason: refreshReason,
+      reason: "commit",
       sourcePaneKey: paneKey,
       targetVox: lastTargetVox,
     });
@@ -2151,11 +2277,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   }, [tool]);
 
   useEffect(() => {
-    if (!panesReady) return;
-    schedulePaneLayoutSync(getVisiblePaneKeys(), { redrawMarkers: true });
-  }, [panesReady, visiblePaneKeys, focusedPlane]);
-
-  useEffect(() => {
     brushSizeRef.current = brushSize;
   }, [brushSize]);
 
@@ -2216,7 +2337,25 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       if (!canvas) continue;
       const getCanvasPos = (event) => {
         const rect = canvas.getBoundingClientRect();
-        return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+        const xByRect = Number(event?.clientX) - rect.left;
+        const yByRect = Number(event?.clientY) - rect.top;
+        if (
+          Number.isFinite(xByRect) &&
+          Number.isFinite(yByRect) &&
+          Number.isFinite(rect?.width) &&
+          Number.isFinite(rect?.height) &&
+          rect.width > 0 &&
+          rect.height > 0
+        ) {
+          return { x: xByRect, y: yByRect };
+        }
+        if (
+          Number.isFinite(Number(event?.offsetX)) &&
+          Number.isFinite(Number(event?.offsetY))
+        ) {
+          return { x: Number(event.offsetX), y: Number(event.offsetY) };
+        }
+        return { x: 0, y: 0 };
       };
 
       const onPointerDown = (event) => {
@@ -2230,8 +2369,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           syncPaneLayoutNow(paneKey);
         }
         const pos = getCanvasPos(event);
-        const norm = toStoredPoint(paneKey, pos, markerCanvas);
+        const norm = toStoredPoint(paneKey, pos);
         if (currentTool === "freehand") {
+          if (!norm) return;
           event.preventDefault();
           const perfProfile = getViewerPerfProfile();
           const currentSliceIndex = getPaneCurrentSliceIndex(paneKey);
@@ -2345,7 +2485,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             curveSliceIndexRef.current !== currentSliceIndex
           )
             return;
-          const norm = toStoredPoint(paneKey, pos, markerCanvas);
+          const norm = toStoredPoint(paneKey, pos);
+          if (!norm) return;
           const current = annotationStepsRef.current;
           if (!current.length) {
             annotationStepsRef.current = [norm];
@@ -2548,6 +2689,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         sliceIndex: curveSliceIndexRef.current,
         sourcePaneKey: paneKey,
       });
+      if (!maskChanged) {
+        drawStrokeMarkers(true);
+        return;
+      }
       addAnnotation(
         {
           type: "freehand",
@@ -2582,6 +2727,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       for (const cleanup of cleanups) cleanup();
     };
   }, [panesReady]);
+
+  useEffect(() => {
+    if (!panesReady) return;
+    schedulePaneLayoutSync(getVisiblePaneKeys(), { redrawMarkers: true });
+  }, [panesReady, focusedPlane, visiblePaneKeys]);
 
   const canShowPlaneSwitch = !!image && canFocusPlanes;
   const showPlaneButtonsByPane = canShowPlaneSwitch && !focusedPlane;
