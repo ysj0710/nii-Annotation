@@ -34,6 +34,7 @@ const FREEHAND_RESUME_PX = 28;
 const FREEHAND_SAMPLE_STEP_PX = 1.5;
 const FREEHAND_OPEN_COLOR = "#db70db";
 const MAX_MARKER_POINTS = 24000;
+const FRAC_EPSILON = 1e-3;
 
 const isRasterImageName = (name) =>
   /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name || "");
@@ -107,13 +108,70 @@ const compactPoints = (points, maxPoints) => {
   return compacted;
 };
 
-const isValidFrac = (frac) =>
-  Array.isArray(frac) &&
-  frac.length >= 3 &&
-  [0, 1, 2].every((axis) => {
+const normalizeFrac = (frac) => {
+  if (!Array.isArray(frac) || frac.length < 3) return null;
+  const values = [0, 1, 2].map((axis) => Number(frac[axis]));
+  if (!values.every((value) => Number.isFinite(value))) return null;
+  if (
+    values.some(
+      (value) => value < -FRAC_EPSILON || value > 1 + FRAC_EPSILON,
+    )
+  ) {
+    return null;
+  }
+  return values.map((value) => clamp(value, 0, 1));
+};
+
+const resolveFracForNv = (nv, frac) => {
+  const normalized = normalizeFrac(frac);
+  if (normalized) return normalized;
+  if (!Array.isArray(frac) || frac.length < 3) return null;
+  const crosshair = normalizeFrac(nv?.scene?.crosshairPos);
+  const resolved = [0, 1, 2].map((axis) => {
     const value = Number(frac[axis]);
-    return Number.isFinite(value) && value >= 0 && value <= 1;
+    if (
+      Number.isFinite(value) &&
+      value >= -FRAC_EPSILON &&
+      value <= 1 + FRAC_EPSILON
+    ) {
+      return clamp(value, 0, 1);
+    }
+    const crosshairValue = Number(crosshair?.[axis]);
+    if (Number.isFinite(crosshairValue)) return clamp(crosshairValue, 0, 1);
+    return 0.5;
   });
+  const hasFiniteInput = [0, 1, 2].some((axis) =>
+    Number.isFinite(Number(frac[axis])),
+  );
+  return hasFiniteInput ? resolved : null;
+};
+
+const resolveVoxForNv = (nv, vox) => {
+  if (!Array.isArray(vox) || vox.length < 3) return null;
+  const dims = nv?.back?.dims;
+  const axisMax = [0, 1, 2].map((axis) =>
+    Math.max(0, Number(dims?.[axis + 1] || 1) - 1),
+  );
+  let crosshairVox = null;
+  const crosshairFrac = normalizeFrac(nv?.scene?.crosshairPos);
+  if (crosshairFrac && typeof nv?.frac2vox === "function") {
+    const rawCrosshairVox = nv.frac2vox(crosshairFrac);
+    if (Array.isArray(rawCrosshairVox) && rawCrosshairVox.length >= 3) {
+      crosshairVox = rawCrosshairVox;
+    }
+  }
+  const resolved = [0, 1, 2].map((axis) => {
+    const value = Number(vox[axis]);
+    const fallback = Number(crosshairVox?.[axis]);
+    const picked = Number.isFinite(value)
+      ? value
+      : Number.isFinite(fallback)
+        ? fallback
+        : 0;
+    return clamp(picked, 0, axisMax[axis]);
+  });
+  return resolved.every((value) => Number.isFinite(value)) ? resolved : null;
+};
 
 const calcDet3 = (m) => {
   if (!Array.isArray(m) || m.length < 3) return null;
@@ -813,39 +871,51 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   };
 
   const toStoredPoint = (paneKey, pt) => {
+    const paneSize = getPaneCanvasSize(paneKey);
+    const sx = clamp(
+      Number(pt?.x || 0) / Math.max(1, Number(paneSize.width || 1)),
+      0,
+      1,
+    );
+    const sy = clamp(
+      Number(pt?.y || 0) / Math.max(1, Number(paneSize.height || 1)),
+      0,
+      1,
+    );
+    const fallback = { paneKey, sx, sy };
     const nv = getPaneNv(paneKey);
-    if (nv && pt) {
-      const dpr = nv.uiData?.dpr || 1;
-      const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]);
-      if (isValidFrac(frac)) {
-        const rawVox =
-          typeof nv.frac2vox === "function" ? nv.frac2vox(frac) : null;
-        const vox =
-          Array.isArray(rawVox) &&
-          rawVox.length >= 3 &&
-          [0, 1, 2].every((axis) => Number.isFinite(Number(rawVox[axis])))
-            ? [
-                Math.round(Number(rawVox[0] || 0)),
-                Math.round(Number(rawVox[1] || 0)),
-                Math.round(Number(rawVox[2] || 0)),
-              ]
-            : null;
-        const snappedFrac =
-          vox && typeof nv.vox2frac === "function" ? nv.vox2frac(vox) : frac;
-        return {
-          paneKey,
-          frac: [
-            Number(snappedFrac?.[0] || frac[0]),
-            Number(snappedFrac?.[1] || frac[1]),
-            Number(snappedFrac?.[2] || frac[2]),
-          ],
-          vox: vox
-            ? [Number(vox[0]), Number(vox[1]), Number(vox[2])]
-            : undefined,
-        };
-      }
-    }
-    return null;
+    if (!nv || !pt) return fallback;
+    const dpr = nv.uiData?.dpr || 1;
+    const frac = resolveFracForNv(
+      nv,
+      nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]),
+    );
+    if (!frac) return fallback;
+    const rawVox = typeof nv.frac2vox === "function" ? nv.frac2vox(frac) : null;
+    const resolvedVox = resolveVoxForNv(nv, rawVox);
+    const vox = resolvedVox
+      ? [
+          Math.round(Number(resolvedVox[0] || 0)),
+          Math.round(Number(resolvedVox[1] || 0)),
+          Math.round(Number(resolvedVox[2] || 0)),
+        ]
+      : null;
+    const snappedFrac =
+      vox && typeof nv.vox2frac === "function"
+        ? normalizeFrac(nv.vox2frac(vox))
+        : null;
+    const resolvedFrac = snappedFrac || frac;
+    return {
+      paneKey,
+      frac: [
+        Number(resolvedFrac[0]),
+        Number(resolvedFrac[1]),
+        Number(resolvedFrac[2]),
+      ],
+      vox: vox ? [Number(vox[0]), Number(vox[1]), Number(vox[2])] : undefined,
+      sx,
+      sy,
+    };
   };
 
   const toPxPoint = (pt, canvas, paneKey = null) => {
@@ -858,12 +928,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       typeof nv.vox2frac === "function" &&
       typeof nv.frac2canvasPos === "function"
     ) {
-      const fracFromVox = nv.vox2frac([
-        Number(pt.vox[0] || 0),
-        Number(pt.vox[1] || 0),
-        Number(pt.vox[2] || 0),
-      ]);
-      if (isValidFrac(fracFromVox)) {
+      const fracFromVox = normalizeFrac(
+        nv.vox2frac([
+          Number(pt.vox[0] || 0),
+          Number(pt.vox[1] || 0),
+          Number(pt.vox[2] || 0),
+        ]),
+      );
+      if (fracFromVox) {
         const pos = nv.frac2canvasPos([
           Number(fracFromVox[0]),
           Number(fracFromVox[1]),
@@ -879,12 +951,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         }
       }
     }
-    const frac = pt?.frac;
-    if (
-      nv &&
-      isValidFrac(frac) &&
-      typeof nv.frac2canvasPos === "function"
-    ) {
+    const frac = resolveFracForNv(nv, pt?.frac);
+    if (nv && frac && typeof nv.frac2canvasPos === "function") {
       const pos = nv.frac2canvasPos([
         Number(frac[0]),
         Number(frac[1]),
@@ -922,25 +990,19 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     }
     const resolvedPaneKey = paneKey || pt?.paneKey || null;
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
-    if (
-      nv &&
-      isValidFrac(pt?.frac) &&
-      typeof nv.frac2vox === "function"
-    ) {
-      const raw = nv.frac2vox([
-        Number(pt.frac[0] || 0),
-        Number(pt.frac[1] || 0),
-        Number(pt.frac[2] || 0),
+    const frac = resolveFracForNv(nv, pt?.frac);
+    if (nv && frac && typeof nv.frac2vox === "function") {
+      const rawVox = nv.frac2vox([
+        Number(frac[0] || 0),
+        Number(frac[1] || 0),
+        Number(frac[2] || 0),
       ]);
-      if (
-        Array.isArray(raw) &&
-        raw.length >= 3 &&
-        [0, 1, 2].every((axis) => Number.isFinite(Number(raw[axis])))
-      ) {
+      const resolved = resolveVoxForNv(nv, rawVox);
+      if (resolved) {
         return [
-          Math.round(Number(raw[0] || 0)),
-          Math.round(Number(raw[1] || 0)),
-          Math.round(Number(raw[2] || 0)),
+          Math.round(Number(resolved[0] || 0)),
+          Math.round(Number(resolved[1] || 0)),
+          Math.round(Number(resolved[2] || 0)),
         ];
       }
     }
@@ -959,16 +1021,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const nv = getPaneNv(paneKey);
     if (!nv || !pt) return null;
     const dpr = nv.uiData?.dpr || 1;
-    const frac = nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]);
-    if (!isValidFrac(frac)) return null;
-    const vox = nv.frac2vox(frac);
-    if (
-      !Array.isArray(vox) ||
-      vox.length < 3 ||
-      ![0, 1, 2].every((axis) => Number.isFinite(Number(vox[axis])))
-    ) {
-      return null;
-    }
+    const frac = resolveFracForNv(nv, nv.canvasPos2frac([pt.x * dpr, pt.y * dpr]));
+    if (!frac) return null;
+    const vox = resolveVoxForNv(nv, nv.frac2vox(frac));
+    if (!vox) return null;
     return [Number(vox[0]), Number(vox[1]), Number(vox[2])];
   };
 
