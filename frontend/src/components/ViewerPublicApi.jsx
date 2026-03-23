@@ -831,12 +831,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
   const toPxPoint = (pt, canvas, paneKey = null) => {
     const resolvedPaneKey = paneKey || pt?.paneKey || null;
-    if (Number.isFinite(Number(pt?.sx)) && Number.isFinite(Number(pt?.sy))) {
-      return {
-        x: Number(pt.sx) * canvas.width,
-        y: Number(pt.sy) * canvas.height,
-      };
-    }
     const nv = resolvedPaneKey ? getPaneNv(resolvedPaneKey) : null;
     const frac = pt?.frac;
     if (
@@ -858,6 +852,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         return { x, y };
       }
       return null;
+    }
+    if (Number.isFinite(Number(pt?.sx)) && Number.isFinite(Number(pt?.sy))) {
+      return {
+        x: Number(pt.sx) * canvas.width,
+        y: Number(pt.sy) * canvas.height,
+      };
     }
     return {
       x: Number(pt?.x || 0) * canvas.width,
@@ -1419,6 +1419,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       curvePaneKeyRef.current ||
       AX_COR_SAG_TO_PANE[Number(axCorSag)];
     const markerCanvas = paneKey ? getPaneMarkerCanvas(paneKey) : null;
+    const useScreenPointMappingOnly =
+      paneKey && isSinglePane2DMode(paneKey);
     const voxPoints = normPoints
       .map((pt) => {
         const frac =
@@ -1426,6 +1428,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             ? [Number(pt.frac[0]), Number(pt.frac[1]), Number(pt.frac[2])]
             : null;
         if (
+          !useScreenPointMappingOnly &&
           frac &&
           frac.every((v) => Number.isFinite(v)) &&
           sourceNv &&
