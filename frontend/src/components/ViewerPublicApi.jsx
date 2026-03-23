@@ -1682,6 +1682,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (!paneKey || !markerCanvas) return false;
     const paneCfg = PANE_CONFIGS[paneKey];
     if (!paneCfg?.is2D || !Number.isInteger(paneCfg.fixedAxis)) return false;
+    const currentSliceIndex = getPaneCurrentSliceIndex(paneKey);
     const dims = nv.back?.dims;
     const nx = Number(dims?.[1] || 0);
     const ny = Number(dims?.[2] || 0);
@@ -1699,9 +1700,17 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
     const setVoxelAt = (vox) => {
       if (!Array.isArray(vox) || vox.length < 3) return;
-      const x = Math.round(Number(vox[0] || 0));
-      const y = Math.round(Number(vox[1] || 0));
-      const z = Math.round(Number(vox[2] || 0));
+      const resolved = [
+        Math.round(Number(vox[0] || 0)),
+        Math.round(Number(vox[1] || 0)),
+        Math.round(Number(vox[2] || 0)),
+      ];
+      if (Number.isInteger(currentSliceIndex)) {
+        resolved[paneCfg.fixedAxis] = currentSliceIndex;
+      }
+      const x = resolved[0];
+      const y = resolved[1];
+      const z = resolved[2];
       if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return;
       const idx = z * xy + y * nx + x;
       if (nv.drawBitmap[idx] === fillLabel) return;
