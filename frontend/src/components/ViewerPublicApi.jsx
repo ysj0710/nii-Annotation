@@ -2989,13 +2989,13 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const showPlaneButtonsByPane = canShowPlaneSwitch && !focusedPlane;
   const showPlaneButtonsStack = canShowPlaneSwitch && !!focusedPlane;
   const planeButtonStyles = {
-    S: { left: "50%", top: "25%", transform: "translate(-50%, -50%)" },
-    A: { left: "50%", top: "75%", transform: "translate(-50%, -50%)" },
-    C: {
+    S: {
       left: "calc(100% - 18px)",
       top: "25%",
       transform: "translate(-50%, -50%)",
     },
+    A: { left: "50%", top: "75%", transform: "translate(-50%, -50%)" },
+    C: { left: "50%", top: "25%", transform: "translate(-50%, -50%)" },
   };
 
   const containerClassNames = [
