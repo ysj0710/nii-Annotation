@@ -4,6 +4,7 @@ import {
   Button,
   Space,
   Input,
+  Select,
   Popover,
   Message,
   Modal
@@ -33,6 +34,7 @@ const loadNiivueDicomLoader = async () => {
 }
 
 const { Header, Sider, Content } = Layout
+const Option = Select.Option
 
 const FIXED_LABELS = [
   { id: 1, name: 'label1', color: '#FF6B6B', value: 1 },
@@ -3601,23 +3603,22 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
               <div className="brush-settings-panel compact">
                 <div className="brush-settings-title">Label 选择</div>
                 <div className="label-select-row">
-                  <span
-                    className="label-select-dot"
-                    style={{ background: activeLabel?.color || '#FF6B6B' }}
-                    aria-hidden="true"
-                  />
-                  <select
+                  <Select
+                    size="small"
                     className="label-select-input"
-                    value={String(activeLabelId)}
-                    onChange={(e) => setActiveLabelId(Number(e.target.value) || 1)}
+                    value={activeLabelId}
+                    onChange={(value) => setActiveLabelId(Number(value) || 1)}
                     aria-label="选择当前标注 Label"
                   >
                     {labels.map((label) => (
-                      <option key={label.id} value={String(label.id)}>
-                        {label.name}
-                      </option>
+                      <Option key={label.id} value={label.id}>
+                        <span className="label-option-content">
+                          <span className="label-option-dot" style={{ background: label.color }} />
+                          <span>{label.name}</span>
+                        </span>
+                      </Option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
               </div>
             )}

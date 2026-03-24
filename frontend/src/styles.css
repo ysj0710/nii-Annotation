@@ -750,34 +750,42 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 }
 
 .label-select-row {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: 8px;
-}
-
-.label-select-dot {
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.32);
+  display: block;
 }
 
 .label-select-input {
   width: 100%;
+}
+
+.label-select-input .arco-select-view {
   height: 30px;
   border: 1px solid #3a4a63;
   border-radius: 6px;
   background: #1a2231;
-  color: #dbe7f5;
-  font-size: 12px;
-  padding: 0 8px;
 }
 
-.label-select-input:focus {
-  outline: none;
+.label-select-input .arco-select-view-value {
+  color: #dbe7f5;
+  font-size: 12px;
+}
+
+.label-select-input.arco-select-focused .arco-select-view {
   border-color: #7cb7ff;
   box-shadow: 0 0 0 2px rgba(124, 183, 255, 0.25);
+}
+
+.label-option-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.label-option-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  display: inline-block;
 }
 
 .itk-info-list {
