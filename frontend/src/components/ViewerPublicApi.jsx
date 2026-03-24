@@ -1181,6 +1181,50 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return true;
   };
 
+  const getAnnotationFocusVox = (annotation) => {
+    if (!annotation || typeof annotation !== "object") return null;
+    const paneKey =
+      String(annotation?.paneKey || "").trim().toUpperCase() ||
+      AX_COR_SAG_TO_PANE[Number(annotation?.axCorSag)] ||
+      null;
+    const points = Array.isArray(annotation?.points) ? annotation.points : [];
+    const voxPoints = points
+      .map((pt) => toVoxPoint(pt, paneKey))
+      .filter((pt) => Array.isArray(pt) && pt.length >= 3);
+    if (voxPoints.length > 0) {
+      const center = [0, 0, 0];
+      for (const pt of voxPoints) {
+        center[0] += Number(pt[0] || 0);
+        center[1] += Number(pt[1] || 0);
+        center[2] += Number(pt[2] || 0);
+      }
+      return [
+        Math.round(center[0] / voxPoints.length),
+        Math.round(center[1] / voxPoints.length),
+        Math.round(center[2] / voxPoints.length),
+      ];
+    }
+    const axCorSag = Number(annotation?.axCorSag);
+    const sliceIndex = Number(annotation?.sliceIndex);
+    if (!Number.isInteger(axCorSag) || !Number.isInteger(sliceIndex)) return null;
+    const axis = axCorSag === 0 ? 2 : axCorSag === 1 ? 1 : 0;
+    const primary = getPrimaryNv();
+    const currentFrac = primary?.scene?.crosshairPos;
+    const currentVox =
+      primary &&
+      Array.isArray(currentFrac) &&
+      typeof primary.frac2vox === "function"
+        ? resolveVoxForNv(primary, primary.frac2vox(currentFrac))
+        : null;
+    const base = Array.isArray(currentVox) && currentVox.length >= 3 ? [...currentVox] : [0, 0, 0];
+    base[axis] = Number(sliceIndex);
+    return [
+      Math.round(Number(base[0] || 0)),
+      Math.round(Number(base[1] || 0)),
+      Math.round(Number(base[2] || 0)),
+    ];
+  };
+
   const crosshairEquals = (a, b, epsilon = 1e-6) => {
     if (!Array.isArray(a) || !Array.isArray(b) || a.length < 3 || b.length < 3)
       return false;
@@ -2385,6 +2429,27 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       if (!Array.isArray(vox) || vox.length < 3) return false;
       setCrosshairFromVox(vox, { redraw: true });
       return true;
+    },
+    jumpToAnnotation: (indexOrAnnotation) => {
+      const annotations = getCurrentAnnotations();
+      let annotation = null;
+      if (
+        Number.isInteger(Number(indexOrAnnotation)) &&
+        Number(indexOrAnnotation) >= 0 &&
+        Number(indexOrAnnotation) < annotations.length
+      ) {
+        annotation = annotations[Number(indexOrAnnotation)];
+      } else if (indexOrAnnotation && typeof indexOrAnnotation === "object") {
+        annotation = indexOrAnnotation;
+      }
+      if (!annotation) return false;
+      const paneKey = AX_COR_SAG_TO_PANE[Number(annotation?.axCorSag)] || null;
+      if (paneKey && canFocusPlanes) {
+        setFocusedPlane(paneKey);
+      }
+      const vox = getAnnotationFocusVox(annotation);
+      if (!Array.isArray(vox) || vox.length < 3) return false;
+      return setCrosshairFromVox(vox, { redraw: true });
     },
   }));
 
