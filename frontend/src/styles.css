@@ -744,114 +744,56 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 .tool-actions-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .tool-hints { margin-top: 12px; font-size: 12px; color: #6b7280; line-height: 1.6; }
 
-.label-sidebar {
+.label-sidebar-placeholder {
   border-left: 1px solid #2e3442;
   background: #12161f;
-  color: #f3f4f6;
-  padding: 10px;
-  overflow: auto;
 }
 
-.label-side-head {
-  border: 1px solid #323a4c;
-  border-radius: 8px;
-  background: #181d28;
-  padding: 10px 12px;
-  margin-bottom: 10px;
-}
-
-.label-side-title {
-  font-size: 16px;
-  font-weight: 700;
-  margin-bottom: 6px;
-}
-
-.label-side-stat {
-  font-size: 12px;
-  color: #cbd5e1;
-}
-
-.label-side-create {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.label-side-list {
+.freehand-label-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
-.label-side-item {
-  position: relative;
-  border: 1px solid #323a4c;
-  border-radius: 8px;
-  background: #252c3b;
-  padding: 10px;
-}
-
-.label-side-item.active {
-  border-color: #7cb7ff;
-  box-shadow: 0 0 0 1px rgba(124, 183, 255, 0.25);
-}
-
-.label-side-row {
+.freehand-label-item {
   display: grid;
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 8px;
-}
-
-.label-name-input input {
-  color: #f8fafc;
-  background: #1a2130;
-}
-
-.label-side-count {
-  font-size: 12px;
-  min-width: 28px;
-  text-align: right;
-  color: #cbd5e1;
-}
-
-.label-side-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 6px;
-}
-
-.label-color-palette {
-  display: flex;
-  gap: 8px;
-  flex-wrap: nowrap;
-  padding: 6px;
-  width: max-content;
-}
-
-.label-color-flyout {
-  position: absolute;
-  left: 12px;
-  top: 42px;
-  z-index: 50;
-  background: #111827;
-  border: 1px solid #2f3f57;
+  width: 100%;
+  border: 1px solid #2e3a4f;
   border-radius: 8px;
-  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.4);
-  padding: 2px;
-}
-
-.label-color-option {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: #1a2231;
+  color: #dbe7f5;
+  padding: 7px 8px;
   cursor: pointer;
 }
 
-.label-color-option.active {
-  box-shadow: 0 0 0 2px rgba(191, 219, 254, 0.75);
+.freehand-label-item:hover {
+  border-color: #4e678a;
+}
+
+.freehand-label-item.active {
+  border-color: #7cb7ff;
+  box-shadow: 0 0 0 1px rgba(124, 183, 255, 0.3);
+}
+
+.freehand-label-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+}
+
+.freehand-label-name {
+  text-align: left;
+  font-size: 12px;
+}
+
+.freehand-label-count {
+  font-size: 11px;
+  color: #9fb4cc;
+  min-width: 18px;
+  text-align: right;
 }
 
 .itk-info-list {
@@ -880,7 +822,7 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 }
 
 @media (max-width: 1500px) {
-  .label-sidebar {
+  .label-sidebar-placeholder {
     display: none !important;
   }
 }

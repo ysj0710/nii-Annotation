@@ -4,16 +4,10 @@ import {
   Button,
   Space,
   Input,
-  Tooltip,
   Popover,
   Message,
   Modal
 } from '@arco-design/web-react'
-import {
-  IconPlus,
-  IconDelete,
-  IconSearch
-} from '@arco-design/web-react/icon'
 import JSZip from 'jszip'
 import * as nifti from 'nifti-reader-js'
 import dicomParser from 'dicom-parser'
@@ -40,8 +34,14 @@ const loadNiivueDicomLoader = async () => {
 
 const { Header, Sider, Content } = Layout
 
-const labelPalette = ['#FF6B6B', '#4D96FF', '#6BCB77', '#FFD93D', '#845EC2', '#FF9671']
-const DEFAULT_LABEL_COLOR = '#FF4D4F'
+const FIXED_LABELS = [
+  { id: 1, name: 'label1', color: '#FF6B6B', value: 1 },
+  { id: 2, name: 'label2', color: '#4D96FF', value: 2 },
+  { id: 3, name: 'label3', color: '#6BCB77', value: 3 },
+  { id: 4, name: 'label4', color: '#FFD93D', value: 4 },
+  { id: 5, name: 'label5', color: '#845EC2', value: 5 },
+  { id: 6, name: 'label6', color: '#FF9671', value: 6 }
+]
 const THUMBNAIL_SIZE = 240
 const THUMBNAIL_RENDER_VERSION = 2
 const RASTER_CONVERSION_VERSION = 8
@@ -1193,18 +1193,14 @@ const queueItemIsAnnotated = (item) => {
 }
 
 export default function App() {
-  const [labels, setLabels] = useState([
-    { id: 1, name: 'Label 1', color: DEFAULT_LABEL_COLOR, value: 1 }
-  ])
+  const [labels] = useState(FIXED_LABELS)
   const [activeLabelId, setActiveLabelId] = useState(1)
-  const [newLabelName, setNewLabelName] = useState('')
   const [tool, setTool] = useState('pan')
   const [brushSize, setBrushSize] = useState(15)
   const [brushShape, setBrushShape] = useState('circle') // 'circle' | 'square'
   const [radiological2D, setRadiological2D] = useState(true)
   const [labelStats, setLabelStats] = useState({})
   const [viewerMode, setViewerMode] = useState('default')
-  const [colorPickerLabelId, setColorPickerLabelId] = useState(null)
   const [runtimeEnv, setRuntimeEnv] = useState(null)
 
   const [images, setImages] = useState([])
@@ -1465,37 +1461,6 @@ export default function App() {
       refresh: refreshState?.last || null,
       ...extra
     }
-  }
-
-  const addLabel = () => {
-    const nextId = labels.length ? Math.max(...labels.map((l) => l.id)) + 1 : 1
-    const nextValue = labels.length ? Math.max(...labels.map((l) => l.value)) + 1 : 1
-    const name = newLabelName.trim() || `Label ${nextId}`
-    setLabels((prev) => [...prev, { id: nextId, name, color: DEFAULT_LABEL_COLOR, value: nextValue }])
-    setActiveLabelId(nextId)
-    setColorPickerLabelId(nextId)
-    setNewLabelName('')
-  }
-
-  const removeLabel = (id) => {
-    setLabels((prev) => {
-      if (prev.length <= 1) return prev
-      const next = prev.filter((label) => label.id !== id)
-      if (activeLabelId === id) {
-        setActiveLabelId(next[0]?.id || prev[0].id)
-      }
-      return next
-    })
-  }
-
-  const renameLabel = (id, name) => {
-    setLabels((prev) =>
-      prev.map((label) => (label.id === id ? { ...label, name: String(name || '').slice(0, 40) || '未命名标签' } : label))
-    )
-  }
-
-  const setLabelColor = (id, color) => {
-    setLabels((prev) => prev.map((label) => (label.id === id ? { ...label, color } : label)))
   }
 
   const refreshImageList = async () => {
@@ -2392,16 +2357,6 @@ export default function App() {
     },
     []
   )
-
-  const locateLabel = (labelValue) => {
-    const ok = viewerRef.current?.jumpToLabel?.(labelValue)
-    if (!ok) {
-      Message.warning('当前影像未找到该 label 的标注区域')
-      return
-    }
-    const target = labels.find((label) => label.value === labelValue)
-    if (target) setActiveLabelId(target.id)
-  }
 
   const selectImage = async (id) => {
     if (activeImage?.id === id) return
@@ -3642,6 +3597,25 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
                 </div>
               </div>
             )}
+            {(tool === 'brush' || tool === 'freehand') && (
+              <div className="brush-settings-panel compact">
+                <div className="brush-settings-title">Label 选择</div>
+                <div className="freehand-label-list">
+                  {labels.map((label) => (
+                    <button
+                      key={label.id}
+                      type="button"
+                      className={`freehand-label-item${activeLabelId === label.id ? ' active' : ''}`}
+                      onClick={() => setActiveLabelId(label.id)}
+                    >
+                      <span className="freehand-label-dot" style={{ background: label.color }} />
+                      <span className="freehand-label-name">{label.name}</span>
+                      <span className="freehand-label-count">{labelStats[label.value] || 0}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </Sider>
 
@@ -3682,98 +3656,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
           </Suspense>
         </Content>
 
-        <Sider className="label-sidebar" width={360}>
-          <div className="label-side-head">
-            <div className="label-side-title">标注项</div>
-          </div>
-          <div className="label-side-create">
-            <Input
-              size="small"
-              placeholder="输入标签名（如：病灶1）"
-              value={newLabelName}
-              onChange={setNewLabelName}
-              onPressEnter={addLabel}
-            />
-            <Button size="small" icon={<IconPlus />} onClick={addLabel}>
-              新建
-            </Button>
-          </div>
-          <div className="label-side-list">
-            {labels.map((label) => (
-              <div
-                key={label.id}
-                className={`label-side-item${activeLabelId === label.id ? ' active' : ''}`}
-                onClick={() => setActiveLabelId(label.id)}
-                role="button"
-                tabIndex={0}
-              >
-                <div className="label-side-row">
-                  <button
-                    type="button"
-                    className="label-color label-color-trigger"
-                    style={{ background: label.color }}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      setColorPickerLabelId((prev) => (prev === label.id ? null : label.id))
-                    }}
-                    aria-label="选择标签颜色"
-                  />
-                  <Input
-                    size="small"
-                    className="label-name-input"
-                    value={label.name}
-                    onChange={(value) => renameLabel(label.id, value)}
-                    onClick={(event) => event.stopPropagation()}
-                  />
-                  <span className="label-side-count">{labelStats[label.value] || 0}</span>
-                </div>
-                {colorPickerLabelId === label.id && (
-                  <div className="label-color-flyout" onClick={(event) => event.stopPropagation()}>
-                    <div className="label-color-palette">
-                      {labelPalette.map((color) => (
-                        <button
-                          key={color}
-                          type="button"
-                          className={`label-color-option${label.color === color ? ' active' : ''}`}
-                          style={{ background: color }}
-                          onClick={() => {
-                            setLabelColor(label.id, color)
-                            setColorPickerLabelId(null)
-                          }}
-                          aria-label={`设置颜色 ${color}`}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <div className="label-side-actions">
-                  <Tooltip content="定位到该 Label 标注区域">
-                    <Button
-                      size="mini"
-                      type="text"
-                      icon={<IconSearch />}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        locateLabel(label.value)
-                      }}
-                    />
-                  </Tooltip>
-                  <Button
-                    size="mini"
-                    type="text"
-                    className="label-delete"
-                    icon={<IconDelete />}
-                    disabled={labels.length <= 1}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      removeLabel(label.id)
-                    }}
-                  />
-                </div>
-              </div>
-            ))}
-          </div>
-        </Sider>
+        <Sider className="label-sidebar-placeholder" width={360} />
       </Layout>
     </Layout>
   )
