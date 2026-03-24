@@ -451,6 +451,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const paneNvsRef = useRef({});
   const paneResizeObserversRef = useRef({});
   const volumeTemplateCacheRef = useRef(new Map());
+  const imageLoadGenerationRef = useRef(0);
   const initializedRef = useRef(false);
   const sharedDrawBitmapRef = useRef(null);
   const visiblePaneKeysRef = useRef([...PANE_ORDER]);
@@ -631,6 +632,20 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       : perfProfile.mediumPowerMode
         ? 6
         : 10;
+    const now = Date.now();
+    const maxAgeMs = perfProfile.lowPowerMode
+      ? 90 * 1000
+      : perfProfile.mediumPowerMode
+        ? 3 * 60 * 1000
+        : 6 * 60 * 1000;
+    const currentGeneration = Number(imageLoadGenerationRef.current || 0);
+    for (const [key, entry] of cache.entries()) {
+      const updatedAt = Number(entry?.updatedAt || 0);
+      const generation = Number(entry?.generation || 0);
+      const expired = !updatedAt || now - updatedAt > maxAgeMs;
+      const staleGeneration = currentGeneration - generation > 2;
+      if (expired || staleGeneration) cache.delete(key);
+    }
     while (cache.size > maxEntries) {
       const firstKey = cache.keys().next().value;
       if (typeof firstKey === "undefined") break;
@@ -645,6 +660,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     imageMeta,
     context = "base",
     allowCache = true,
+    generation = 0,
   }) => {
     if (allowCache) {
       const cached = touchTemplateCacheEntry(cacheKey);
@@ -660,6 +676,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       volumeTemplateCacheRef.current.set(cacheKey, {
         template: loaded.clone(),
         updatedAt: Date.now(),
+        generation: Number(generation || 0),
       });
       pruneTemplateCache();
     }
@@ -2077,6 +2094,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   };
 
   const loadImageIntoPanes = async () => {
+    imageLoadGenerationRef.current += 1;
+    const generation = Number(imageLoadGenerationRef.current || 0);
+    pruneTemplateCache();
     const imageBuffer = toArrayBuffer(image?.data);
     if (!imageBuffer) return;
     for (const key of PANE_ORDER) {
@@ -2091,6 +2111,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       imageMeta: image,
       context: "base",
       allowCache: true,
+      generation,
     });
 
     const sourceName = image?.displayName || image?.sourceName || image?.name;
@@ -2167,6 +2188,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           imageMeta: image,
           context: "mask",
           allowCache: true,
+          generation,
         });
         primary.loadDrawing(maskTemplate);
       } else {
@@ -2382,6 +2404,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       for (const observer of Object.values(paneResizeObserversRef.current)) {
         observer?.disconnect?.();
       }
+      volumeTemplateCacheRef.current.clear();
     };
   }, []);
 

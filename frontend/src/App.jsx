@@ -5,6 +5,9 @@ import {
   Space,
   Input,
   Select,
+  Radio,
+  Checkbox,
+  InputNumber,
   Popover,
   Message,
   Modal
@@ -47,6 +50,9 @@ const FIXED_LABELS = [
 const THUMBNAIL_SIZE = 240
 const THUMBNAIL_RENDER_VERSION = 2
 const RASTER_CONVERSION_VERSION = 8
+const PLATFORM_SYNC_CHANNEL = 'nii-annotation-sync'
+const PLATFORM_SYNC_STORAGE_KEY = 'nii-annotation:sync'
+const QUEUE_PREFETCH_RADIUS = 2
 
 const detectBrowserRuntimeEnv = () => {
   const nav = typeof navigator !== 'undefined' ? navigator : {}
@@ -1194,6 +1200,82 @@ const queueItemIsAnnotated = (item) => {
   return s === '1' || s === 'ANNOTATED' || s === 'TRUE'
 }
 
+const parseJsonSafe = (raw, fallback = null) => {
+  if (raw == null || raw === '') return fallback
+  if (typeof raw === 'object') return raw
+  try {
+    return JSON.parse(String(raw))
+  } catch {
+    return fallback
+  }
+}
+
+const normalizeCustomFieldSchema = (raw) => {
+  const source = parseJsonSafe(raw, raw)
+  const list = Array.isArray(source)
+    ? source
+    : Array.isArray(source?.fields)
+      ? source.fields
+      : []
+  return list
+    .map((item, index) => {
+      const id = String(item?.id || item?.key || `field_${index + 1}`).trim()
+      if (!id) return null
+      const typeRaw = String(item?.type || 'text').trim().toLowerCase()
+      const type = ['text', 'textarea', 'number', 'select', 'radio', 'checkbox', 'switch'].includes(typeRaw)
+        ? typeRaw
+        : 'text'
+      const options = Array.isArray(item?.options)
+        ? item.options
+            .map((opt, i) => {
+              if (opt == null) return null
+              if (typeof opt === 'object') {
+                const value = String(opt.value ?? opt.id ?? opt.key ?? i)
+                const label = String(opt.label ?? opt.name ?? value)
+                return { label, value }
+              }
+              const value = String(opt)
+              return { label: value, value }
+            })
+            .filter(Boolean)
+        : []
+      return {
+        id,
+        label: String(item?.label || item?.name || id),
+        type,
+        required: !!item?.required,
+        placeholder: String(item?.placeholder || ''),
+        min: Number.isFinite(Number(item?.min)) ? Number(item.min) : undefined,
+        max: Number.isFinite(Number(item?.max)) ? Number(item.max) : undefined,
+        rows: Number.isFinite(Number(item?.rows)) ? Math.max(2, Number(item.rows)) : 3,
+        defaultValue: item?.defaultValue,
+        options
+      }
+    })
+    .filter(Boolean)
+}
+
+const deriveDefaultCustomFieldValues = (schema = []) => {
+  const values = {}
+  for (const field of schema) {
+    if (!field?.id) continue
+    if (field.defaultValue != null) {
+      values[field.id] = field.defaultValue
+      continue
+    }
+    if (field.type === 'checkbox') {
+      values[field.id] = []
+      continue
+    }
+    if (field.type === 'switch') {
+      values[field.id] = false
+      continue
+    }
+    values[field.id] = ''
+  }
+  return values
+}
+
 export default function App() {
   const [labels] = useState(FIXED_LABELS)
   const [activeLabelId, setActiveLabelId] = useState(1)
@@ -1209,6 +1291,7 @@ export default function App() {
   const [activeImage, setActiveImage] = useState(null)
   const [exportDirHandle, setExportDirHandle] = useState(null)
   const [batchQueue, setBatchQueue] = useState(null)
+  const [customFieldSchema, setCustomFieldSchema] = useState([])
 
   const viewerRef = useRef(null)
   const viewerHostRef = useRef(null)
@@ -1230,6 +1313,7 @@ export default function App() {
   const localPersistDirtyRef = useRef(false)
   const activeImageIdRef = useRef('')
   const queueSwitchingRef = useRef(false)
+  const platformBroadcastRef = useRef(null)
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {}
@@ -1247,7 +1331,9 @@ export default function App() {
         '',
       originalName: p.get('originalName') || p.get('imageName') || globalCtx.originalName || globalCtx.imageName || '',
       batchId: p.get('batchId') || globalCtx.batchId || '',
-      topicId: p.get('topicId') || globalCtx.topicId || ''
+      topicId: p.get('topicId') || globalCtx.topicId || '',
+      customSchema: p.get('customSchema') || p.get('customFields') || globalCtx.customSchema || globalCtx.customFields || '',
+      customSchemaUrl: p.get('customSchemaUrl') || globalCtx.customSchemaUrl || ''
     }
   }, [])
   const localBackendOrigin = useMemo(() => {
@@ -1345,11 +1431,89 @@ export default function App() {
     if (queueImages.length > 0) return activeQueueIndex
     return displayImages.findIndex((item) => item.id === activeImage?.id)
   }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
+  const activeCustomFieldValues = useMemo(() => {
+    const base = deriveDefaultCustomFieldValues(customFieldSchema)
+    const existing = parseJsonSafe(activeImage?.customFields, {}) || {}
+    return { ...base, ...existing }
+  }, [activeImage?.id, activeImage?.customFields, customFieldSchema])
   useEffect(() => {
     const detected = detectBrowserRuntimeEnv()
     runtimeEnvRef.current = detected
     setRuntimeEnv(detected)
   }, [])
+
+  useEffect(() => {
+    const localSchema = normalizeCustomFieldSchema(externalCtx.customSchema)
+    if (localSchema.length > 0) {
+      setCustomFieldSchema(localSchema)
+      return
+    }
+    const url = String(externalCtx.customSchemaUrl || '').trim()
+    if (!url) return
+    void (async () => {
+      try {
+        const resp = await fetch(resolveRemoteUrl(url, externalCtx.platformOrigin), {
+          headers: buildAuthHeaders(externalCtx.token)
+        })
+        if (!resp.ok) return
+        const json = await resp.json().catch(() => null)
+        const remoteSchema = normalizeCustomFieldSchema(json)
+        if (remoteSchema.length > 0) setCustomFieldSchema(remoteSchema)
+      } catch {
+        // ignore custom schema bootstrap failures
+      }
+    })()
+  }, [externalCtx.customSchema, externalCtx.customSchemaUrl, externalCtx.platformOrigin, externalCtx.token])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.BroadcastChannel !== 'function') return
+    const channel = new window.BroadcastChannel(PLATFORM_SYNC_CHANNEL)
+    platformBroadcastRef.current = channel
+    return () => {
+      channel.close()
+      platformBroadcastRef.current = null
+    }
+  }, [])
+
+  const notifyPlatformSaveSuccess = (payload = {}) => {
+    const messagePayload = {
+      type: 'NII_ANNOTATION_SAVED',
+      source: 'nii-annotation',
+      at: Date.now(),
+      ...payload
+    }
+    try {
+      window.opener?.postMessage?.(messagePayload, '*')
+    } catch {
+      // ignore
+    }
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage(messagePayload, '*')
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      platformBroadcastRef.current?.postMessage?.(messagePayload)
+    } catch {
+      // ignore
+    }
+    try {
+      window.localStorage?.setItem(PLATFORM_SYNC_STORAGE_KEY, JSON.stringify(messagePayload))
+      window.localStorage?.removeItem(PLATFORM_SYNC_STORAGE_KEY)
+    } catch {
+      // ignore
+    }
+    try {
+      const opener = window.opener
+      if (opener && typeof opener.__NII_ANNOTATION_ON_SAVE__ === 'function') {
+        opener.__NII_ANNOTATION_ON_SAVE__(messagePayload)
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   useEffect(() => {
     if (activeImage?.sourceFormat !== 'dicom' && viewerMode !== 'default') {
@@ -1390,13 +1554,21 @@ export default function App() {
     }
   }
 
+  const getMaxImageRecordCacheSize = () => {
+    const profile = runtimeEnvRef.current?.viewerProfile || {}
+    if (profile.lowPowerMode) return 4
+    if (profile.mediumPowerMode) return 6
+    return 10
+  }
+
   const cacheImageRecord = (record) => {
     if (!record?.id) return record
     const cache = imageRecordCacheRef.current
     const key = String(record.id)
     cache.delete(key)
     cache.set(key, record)
-    while (cache.size > 10) {
+    const maxEntries = getMaxImageRecordCacheSize()
+    while (cache.size > maxEntries) {
       const firstKey = cache.keys().next().value
       if (typeof firstKey === 'undefined') break
       cache.delete(firstKey)
@@ -1463,6 +1635,38 @@ export default function App() {
       refresh: refreshState?.last || null,
       ...extra
     }
+  }
+
+  const getEffectiveCustomFieldValues = (record = null) => {
+    const base = deriveDefaultCustomFieldValues(customFieldSchema)
+    const existing = parseJsonSafe(record?.customFields, {}) || {}
+    return { ...base, ...existing }
+  }
+
+  const updateActiveCustomField = (fieldId, value) => {
+    const id = String(activeImage?.id || '')
+    const key = String(fieldId || '')
+    if (!id || !key) return
+    const base = getEffectiveCustomFieldValues(activeImage)
+    const nextCustomFields = {
+      ...base,
+      [key]: value
+    }
+    const optimistic = {
+      ...(activeImage || {}),
+      customFields: nextCustomFields
+    }
+    cacheImageRecord(optimistic)
+    setActiveImage((prev) => {
+      if (!prev || String(prev.id || '') !== id) return prev
+      return { ...prev, customFields: nextCustomFields }
+    })
+    void updateImage(id, {
+      customFields: nextCustomFields,
+      updatedAt: Date.now()
+    }).then((updated) => {
+      if (updated) cacheImageRecord(updated)
+    })
   }
 
   const refreshImageList = async () => {
@@ -1736,6 +1940,7 @@ export default function App() {
               dicomSeriesNumber: Number(candidate.dicomSeriesNumber || 0),
               dicomSeriesOrder: Number(candidate.dicomSeriesOrder || 0),
               dicomAccessionNumber: candidate.dicomAccessionNumber || '',
+              customFields: parseJsonSafe(candidate.customFields, {}) || {},
               remoteImageId: String(imageId),
               remoteBatchId: String(remoteBatchId || '')
             })
@@ -1794,9 +1999,34 @@ export default function App() {
     return true
   }
 
-  const prefetchQueueImages = async (items = [], { skipImageId = '' } = {}) => {
+  const pickQueuePrefetchCandidates = (items = [], { aroundIndex = -1, radius = QUEUE_PREFETCH_RADIUS, skipImageId = '', scope = 'window' } = {}) => {
+    if (!Array.isArray(items) || items.length === 0) return []
+    if (scope === 'all') {
+      return items.filter((item) => String(item?.imageId || '') !== String(skipImageId || ''))
+    }
+    const idx = Number.isInteger(aroundIndex) && aroundIndex >= 0 ? aroundIndex : 0
+    const resolvedRadius = Math.max(0, Number(radius || 0))
+    const picked = []
+    for (let offset = -resolvedRadius; offset <= resolvedRadius; offset += 1) {
+      if (offset === 0) continue
+      const targetIndex = idx + offset
+      if (targetIndex < 0 || targetIndex >= items.length) continue
+      const item = items[targetIndex]
+      if (!item) continue
+      if (String(item?.imageId || '') === String(skipImageId || '')) continue
+      picked.push(item)
+    }
+    return picked
+  }
+
+  const prefetchQueueImages = async (
+    items = [],
+    { skipImageId = '', aroundIndex = -1, radius = QUEUE_PREFETCH_RADIUS, scope = 'window' } = {}
+  ) => {
+    const targets = pickQueuePrefetchCandidates(items, { aroundIndex, radius, skipImageId, scope })
+    if (!targets.length) return
     let changed = false
-    for (const item of items) {
+    for (const item of targets) {
       const remoteImageId = String(item?.imageId || '')
       if (!remoteImageId || (skipImageId && String(skipImageId) === remoteImageId)) continue
       const existing = await findLocalByRemoteImageId(remoteImageId)
@@ -1861,7 +2091,11 @@ export default function App() {
           }
           if (targetItem) {
             await ensureQueueImageLoaded(targetItem)
-            void prefetchQueueImages(queue?.images || [], { skipImageId: targetItem?.imageId })
+            void prefetchQueueImages(queue?.images || [], {
+              skipImageId: targetItem?.imageId,
+              aroundIndex: queueNavIndexRef.current,
+              scope: 'window'
+            })
           }
         } catch (error) {
           console.error(error)
@@ -2150,12 +2384,14 @@ export default function App() {
     const imageName = String(record?.sourceName || record?.name || 'image.nii.gz')
     const maskName = `${fileStem(imageName) || 'mask'}.nii.gz`
     const overlayAnnotations = Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : []
+    const customFields = getEffectiveCustomFieldValues(record)
     const clientEnvReport = buildClientEnvReport('local-backend', {
       imageId: String(record?.remoteImageId || record?.id || activeImage.id || '')
     })
     const annotationsJson = JSON.stringify({
       labels,
       annotations: overlayAnnotations,
+      customFields,
       imageId: String(record?.remoteImageId || record?.id || activeImage.id || ''),
       clientEnv: clientEnvReport
     })
@@ -2190,6 +2426,7 @@ export default function App() {
 
     const sourceName = String(record?.sourceName || record?.name || '')
     const sourceNameStem = fileStem(sourceName) || sourceName || `image-${remoteImageId}`
+    const customFields = getEffectiveCustomFieldValues(record)
     const clientEnvReport = buildClientEnvReport('platform-single', { imageId: remoteImageId })
     const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationByImageId`
@@ -2209,6 +2446,7 @@ export default function App() {
       JSON.stringify({
         labels,
         annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : [],
+        customFields,
         clientEnv: clientEnvReport
       })
     )
@@ -2248,12 +2486,14 @@ export default function App() {
       if (!maskBuffer) continue
       const sourceName = String(record?.sourceName || item?.sourceImageName || item?.fileName || `image-${remoteImageId}`)
       const sourceNameStem = fileStem(sourceName) || sourceName || `image-${remoteImageId}`
+      const customFields = getEffectiveCustomFieldValues(record)
       items.push({
         imageId: Number.isFinite(Number(remoteImageId)) ? Number(remoteImageId) : remoteImageId,
         sourceImageName: sourceNameStem,
         annotations: JSON.stringify({
           labels,
           annotations: Array.isArray(record?.overlayAnnotations) ? record.overlayAnnotations : [],
+          customFields,
           clientEnv: clientEnvReport
         }),
         maskBase64: bufferToBase64(maskBuffer),
@@ -2327,6 +2567,12 @@ export default function App() {
           })
         }
         hasUnsavedChangesRef.current = false
+        notifyPlatformSaveSuccess({
+          imageId: String(activeImage?.remoteImageId || externalCtx.imageId || activeImage?.id || ''),
+          batchId: String(externalCtx.batchId || ''),
+          topicId: String(externalCtx.topicId || ''),
+          annotationStatus: 1
+        })
         Message.success(externalCtx.batchId ? '批次标注已保存并同步科研平台' : '当前标注已保存并同步科研平台')
       } else {
         hasUnsavedChangesRef.current = false
@@ -2423,6 +2669,13 @@ export default function App() {
     try {
       const ok = await ensureQueueImageLoaded(target)
       if (!ok) Message.error('切换影像失败，请检查批次数据与下载接口')
+      if (ok) {
+        void prefetchQueueImages(queueImages, {
+          skipImageId: target?.imageId,
+          aroundIndex: targetIndex,
+          scope: 'window'
+        })
+      }
     } finally {
       queueSwitchingRef.current = false
     }
@@ -2557,7 +2810,8 @@ export default function App() {
       dicomSeriesOrder = 0,
       dicomAccessionNumber = '',
       remoteImageId = '',
-      remoteBatchId = ''
+      remoteBatchId = '',
+      customFields = {}
     } = {}
   ) => {
     const baseName = normalizeBaseName(name)
@@ -2590,6 +2844,7 @@ export default function App() {
       dicomAccessionNumber,
       remoteImageId: remoteImageId ? String(remoteImageId) : '',
       remoteBatchId: remoteBatchId ? String(remoteBatchId) : '',
+      customFields: parseJsonSafe(customFields, {}) || {},
       sourceMask: finalSourceMask,
       sourceMaskName: finalSourceMaskName,
       mask: maskBuffer,
@@ -3370,7 +3625,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
   const exportBatch = async () => {
     await persistActiveDrawing()
     if (queueImages.length > 0) {
-      await prefetchQueueImages(queueImages)
+      await prefetchQueueImages(queueImages, { scope: 'all' })
     }
     const records = await getAllImages()
     const exportScope = resolveBulkExportScope(records)
@@ -3515,6 +3770,83 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
       </Button>
     </div>
   )
+
+  const renderCustomFieldInput = (field) => {
+    const value = activeCustomFieldValues[field.id]
+    const onChange = (next) => updateActiveCustomField(field.id, next)
+    if (field.type === 'textarea') {
+      return (
+        <Input.TextArea
+          value={String(value ?? '')}
+          rows={field.rows || 3}
+          placeholder={field.placeholder || ''}
+          onChange={onChange}
+        />
+      )
+    }
+    if (field.type === 'number') {
+      return (
+        <InputNumber
+          value={Number.isFinite(Number(value)) ? Number(value) : undefined}
+          min={field.min}
+          max={field.max}
+          hideControl
+          style={{ width: '100%' }}
+          placeholder={field.placeholder || ''}
+          onChange={(next) => onChange(next == null ? '' : Number(next))}
+        />
+      )
+    }
+    if (field.type === 'select') {
+      return (
+        <Select
+          value={value == null || value === '' ? undefined : String(value)}
+          placeholder={field.placeholder || '请选择'}
+          onChange={(next) => onChange(String(next || ''))}
+        >
+          {field.options.map((opt) => (
+            <Option key={`${field.id}-${opt.value}`} value={String(opt.value)}>
+              {opt.label}
+            </Option>
+          ))}
+        </Select>
+      )
+    }
+    if (field.type === 'radio') {
+      return (
+        <Radio.Group value={String(value ?? '')} onChange={(next) => onChange(String(next || ''))}>
+          {field.options.map((opt) => (
+            <Radio key={`${field.id}-${opt.value}`} value={String(opt.value)}>
+              {opt.label}
+            </Radio>
+          ))}
+        </Radio.Group>
+      )
+    }
+    if (field.type === 'checkbox') {
+      const checkedValues = Array.isArray(value) ? value.map((item) => String(item)) : []
+      return (
+        <Checkbox.Group value={checkedValues} onChange={(next) => onChange(Array.isArray(next) ? next : [])}>
+          {field.options.map((opt) => (
+            <Checkbox key={`${field.id}-${opt.value}`} value={String(opt.value)}>
+              {opt.label}
+            </Checkbox>
+          ))}
+        </Checkbox.Group>
+      )
+    }
+    if (field.type === 'switch') {
+      return (
+        <Radio.Group value={value ? 'true' : 'false'} onChange={(next) => onChange(String(next) === 'true')}>
+          <Radio value="true">是</Radio>
+          <Radio value="false">否</Radio>
+        </Radio.Group>
+      )
+    }
+    return (
+      <Input value={String(value ?? '')} placeholder={field.placeholder || ''} onChange={onChange} />
+    )
+  }
 
   return (
     <Layout className="app">
@@ -3667,7 +3999,31 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
           </Suspense>
         </Content>
 
-        <Sider className="label-sidebar-placeholder" width={360} />
+        <Sider className="label-sidebar-placeholder" width={360}>
+          <div className="custom-field-panel">
+            <div className="custom-field-panel-head">
+              <div className="custom-field-panel-title">自定义标注项</div>
+              <div className="custom-field-panel-subtitle">
+                {activeImage?.displayName || activeImage?.name || '未选择影像'}
+              </div>
+            </div>
+            {customFieldSchema.length === 0 ? (
+              <div className="custom-field-empty">当前任务未配置自定义标注项</div>
+            ) : (
+              <div className="custom-field-list">
+                {customFieldSchema.map((field) => (
+                  <div key={field.id} className="custom-field-item">
+                    <div className="custom-field-label">
+                      {field.label}
+                      {field.required ? <span className="custom-field-required">*</span> : null}
+                    </div>
+                    {renderCustomFieldInput(field)}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Sider>
       </Layout>
     </Layout>
   )
