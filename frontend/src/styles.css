@@ -749,51 +749,35 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   background: #12161f;
 }
 
-.freehand-label-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.freehand-label-item {
+.label-select-row {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  border: 1px solid #2e3a4f;
-  border-radius: 8px;
-  background: #1a2231;
-  color: #dbe7f5;
-  padding: 7px 8px;
-  cursor: pointer;
 }
 
-.freehand-label-item:hover {
-  border-color: #4e678a;
-}
-
-.freehand-label-item.active {
-  border-color: #7cb7ff;
-  box-shadow: 0 0 0 1px rgba(124, 183, 255, 0.3);
-}
-
-.freehand-label-dot {
+.label-select-dot {
   width: 14px;
   height: 14px;
   border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.32);
 }
 
-.freehand-label-name {
-  text-align: left;
+.label-select-input {
+  width: 100%;
+  height: 30px;
+  border: 1px solid #3a4a63;
+  border-radius: 6px;
+  background: #1a2231;
+  color: #dbe7f5;
   font-size: 12px;
+  padding: 0 8px;
 }
 
-.freehand-label-count {
-  font-size: 11px;
-  color: #9fb4cc;
-  min-width: 18px;
-  text-align: right;
+.label-select-input:focus {
+  outline: none;
+  border-color: #7cb7ff;
+  box-shadow: 0 0 0 2px rgba(124, 183, 255, 0.25);
 }
 
 .itk-info-list {

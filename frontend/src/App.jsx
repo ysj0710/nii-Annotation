@@ -3600,19 +3600,24 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
             {(tool === 'brush' || tool === 'freehand') && (
               <div className="brush-settings-panel compact">
                 <div className="brush-settings-title">Label 选择</div>
-                <div className="freehand-label-list">
-                  {labels.map((label) => (
-                    <button
-                      key={label.id}
-                      type="button"
-                      className={`freehand-label-item${activeLabelId === label.id ? ' active' : ''}`}
-                      onClick={() => setActiveLabelId(label.id)}
-                    >
-                      <span className="freehand-label-dot" style={{ background: label.color }} />
-                      <span className="freehand-label-name">{label.name}</span>
-                      <span className="freehand-label-count">{labelStats[label.value] || 0}</span>
-                    </button>
-                  ))}
+                <div className="label-select-row">
+                  <span
+                    className="label-select-dot"
+                    style={{ background: activeLabel?.color || '#FF6B6B' }}
+                    aria-hidden="true"
+                  />
+                  <select
+                    className="label-select-input"
+                    value={String(activeLabelId)}
+                    onChange={(e) => setActiveLabelId(Number(e.target.value) || 1)}
+                    aria-label="选择当前标注 Label"
+                  >
+                    {labels.map((label) => (
+                      <option key={label.id} value={String(label.id)}>
+                        {label.name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             )}
