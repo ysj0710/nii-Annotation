@@ -1210,71 +1210,132 @@ const parseJsonSafe = (raw, fallback = null) => {
   }
 }
 
-const normalizeCustomFieldSchema = (raw) => {
-  const source = parseJsonSafe(raw, raw)
-  const list = Array.isArray(source)
-    ? source
-    : Array.isArray(source?.fields)
-      ? source.fields
-      : []
-  return list
-    .map((item, index) => {
-      const id = String(item?.id || item?.key || `field_${index + 1}`).trim()
-      if (!id) return null
-      const typeRaw = String(item?.type || 'text').trim().toLowerCase()
-      const type = ['text', 'textarea', 'number', 'select', 'radio', 'checkbox', 'switch'].includes(typeRaw)
-        ? typeRaw
-        : 'text'
-      const options = Array.isArray(item?.options)
-        ? item.options
-            .map((opt, i) => {
-              if (opt == null) return null
-              if (typeof opt === 'object') {
-                const value = String(opt.value ?? opt.id ?? opt.key ?? i)
-                const label = String(opt.label ?? opt.name ?? value)
-                return { label, value }
-              }
-              const value = String(opt)
-              return { label: value, value }
-            })
-            .filter(Boolean)
-        : []
-      return {
-        id,
-        label: String(item?.label || item?.name || id),
-        type,
-        required: !!item?.required,
-        placeholder: String(item?.placeholder || ''),
-        min: Number.isFinite(Number(item?.min)) ? Number(item.min) : undefined,
-        max: Number.isFinite(Number(item?.max)) ? Number(item.max) : undefined,
-        rows: Number.isFinite(Number(item?.rows)) ? Math.max(2, Number(item.rows)) : 3,
-        defaultValue: item?.defaultValue,
-        options
-      }
-    })
-    .filter(Boolean)
+const normalizeWorkflowFieldType = (rawType) => {
+  const typeRaw = String(rawType || 'text').trim().toLowerCase()
+  if (typeRaw === 'single') return 'radio'
+  if (typeRaw === 'multiple') return 'checkbox'
+  if (typeRaw === 'input' || typeRaw === 'inputtext' || typeRaw === 'textinput') return 'text'
+  if (['text', 'textarea', 'number', 'select', 'radio', 'checkbox', 'switch'].includes(typeRaw)) return typeRaw
+  return 'text'
 }
 
-const deriveDefaultCustomFieldValues = (schema = []) => {
-  const values = {}
-  for (const field of schema) {
-    if (!field?.id) continue
-    if (field.defaultValue != null) {
-      values[field.id] = field.defaultValue
-      continue
-    }
-    if (field.type === 'checkbox') {
-      values[field.id] = []
-      continue
-    }
-    if (field.type === 'switch') {
-      values[field.id] = false
-      continue
-    }
-    values[field.id] = ''
+const normalizeWorkflowField = (item, index = 0) => {
+  const id = String(item?.id || item?.key || `field_${index + 1}`).trim()
+  if (!id) return null
+  const options = Array.isArray(item?.options)
+    ? item.options
+        .map((opt, i) => {
+          if (opt == null) return null
+          if (typeof opt === 'object') {
+            const value = String(opt.value ?? opt.id ?? opt.key ?? i)
+            const label = String(opt.label ?? opt.name ?? value)
+            return { label, value }
+          }
+          const value = String(opt)
+          return { label: value, value }
+        })
+        .filter(Boolean)
+    : typeof item?.options === 'string'
+      ? String(item.options)
+          .split(',')
+          .map((v) => v.trim())
+          .filter(Boolean)
+          .map((v) => ({ label: v, value: v }))
+      : []
+  return {
+    id,
+    label: String(item?.label || item?.name || item?.questionTitle || id),
+    type: normalizeWorkflowFieldType(item?.type || item?.questionType),
+    required: !!item?.required || String(item?.isRequired || '').toLowerCase() === 'true',
+    placeholder: String(item?.placeholder || ''),
+    options,
+    rows: Number.isFinite(Number(item?.rows)) ? Math.max(2, Number(item.rows)) : 3
   }
-  return values
 }
+
+const parseCustomWorkflowSchema = (raw) => {
+  const parsed = parseJsonSafe(raw, raw)
+  if (!parsed) return { mainCategoryOptions: [], steps: [] }
+  const makeMainCategoryOptions = (mainCategory) =>
+    Array.isArray(mainCategory)
+      ? mainCategory.map((v) => {
+          const value = String(v)
+          return { label: value, value }
+        })
+      : []
+
+  if (Array.isArray(parsed)) {
+    return {
+      mainCategoryOptions: [],
+      steps: [
+        {
+          id: 'step_1',
+          title: '标注项',
+          scope: 'lesion',
+          fields: parsed.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
+        }
+      ]
+    }
+  }
+
+  if (Array.isArray(parsed?.steps)) {
+    const steps = parsed.steps
+      .map((step, stepIndex) => {
+        const fields = (Array.isArray(step?.fields) ? step.fields : [])
+          .map((f, i) => normalizeWorkflowField(f, i))
+          .filter(Boolean)
+        if (!fields.length) return null
+        return {
+          id: String(step?.id || `step_${stepIndex + 1}`),
+          title: String(step?.title || `标注项${stepIndex + 1}`),
+          scope: String(step?.scope || '').toLowerCase() === 'global' ? 'global' : 'lesion',
+          fields
+        }
+      })
+      .filter(Boolean)
+    return {
+      mainCategoryOptions: makeMainCategoryOptions(parsed?.mainCategory),
+      steps
+    }
+  }
+
+  const lesionSigns = Array.isArray(parsed?.lesionSigns)
+    ? parsed.lesionSigns.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
+    : []
+  const patientInfo = Array.isArray(parsed?.patientInfo)
+    ? parsed.patientInfo.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
+    : []
+  const steps = []
+  if (lesionSigns.length > 0) {
+    steps.push({
+      id: 'lesion',
+      title: '标注项',
+      scope: 'lesion',
+      fields: lesionSigns
+    })
+  }
+  if (patientInfo.length > 0) {
+    steps.push({
+      id: 'patient',
+      title: '患者信息',
+      scope: 'lesion',
+      fields: patientInfo
+    })
+  }
+  return {
+    mainCategoryOptions: makeMainCategoryOptions(parsed?.mainCategory),
+    steps
+  }
+}
+
+const makeEmptyCard = (stepId, index = 0) => ({
+  id: `${stepId}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  title: `病灶 ${index + 1}`,
+  suspicious: false,
+  completed: false,
+  mainCategory: '',
+  values: {}
+})
 
 export default function App() {
   const [labels] = useState(FIXED_LABELS)
@@ -1291,7 +1352,9 @@ export default function App() {
   const [activeImage, setActiveImage] = useState(null)
   const [exportDirHandle, setExportDirHandle] = useState(null)
   const [batchQueue, setBatchQueue] = useState(null)
-  const [customFieldSchema, setCustomFieldSchema] = useState([])
+  const [workflowSchema, setWorkflowSchema] = useState({ mainCategoryOptions: [], steps: [] })
+  const [workflowState, setWorkflowState] = useState({ stepIndex: 0, steps: {} })
+  const [workflowErrors, setWorkflowErrors] = useState({})
 
   const viewerRef = useRef(null)
   const viewerHostRef = useRef(null)
@@ -1431,11 +1494,21 @@ export default function App() {
     if (queueImages.length > 0) return activeQueueIndex
     return displayImages.findIndex((item) => item.id === activeImage?.id)
   }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
-  const activeCustomFieldValues = useMemo(() => {
-    const base = deriveDefaultCustomFieldValues(customFieldSchema)
-    const existing = parseJsonSafe(activeImage?.customFields, {}) || {}
-    return { ...base, ...existing }
-  }, [activeImage?.id, activeImage?.customFields, customFieldSchema])
+  const activeStepDef = useMemo(() => {
+    const steps = Array.isArray(workflowSchema?.steps) ? workflowSchema.steps : []
+    const idx = Math.max(0, Math.min(steps.length - 1, Number(workflowState?.stepIndex || 0)))
+    return steps[idx] || null
+  }, [workflowSchema, workflowState?.stepIndex])
+  const activeStepState = useMemo(() => {
+    const stepId = String(activeStepDef?.id || '')
+    if (!stepId) return null
+    return workflowState?.steps?.[stepId] || null
+  }, [workflowState, activeStepDef?.id])
+  const activeCard = useMemo(() => {
+    const cards = Array.isArray(activeStepState?.cards) ? activeStepState.cards : []
+    const index = Math.max(0, Math.min(cards.length - 1, Number(activeStepState?.activeCardIndex || 0)))
+    return cards[index] || null
+  }, [activeStepState])
   useEffect(() => {
     const detected = detectBrowserRuntimeEnv()
     runtimeEnvRef.current = detected
@@ -1443,9 +1516,9 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const localSchema = normalizeCustomFieldSchema(externalCtx.customSchema)
-    if (localSchema.length > 0) {
-      setCustomFieldSchema(localSchema)
+    const localSchema = parseCustomWorkflowSchema(externalCtx.customSchema)
+    if ((localSchema?.steps || []).length > 0) {
+      setWorkflowSchema(localSchema)
       return
     }
     const url = String(externalCtx.customSchemaUrl || '').trim()
@@ -1457,13 +1530,42 @@ export default function App() {
         })
         if (!resp.ok) return
         const json = await resp.json().catch(() => null)
-        const remoteSchema = normalizeCustomFieldSchema(json)
-        if (remoteSchema.length > 0) setCustomFieldSchema(remoteSchema)
+        const remoteSchema = parseCustomWorkflowSchema(json)
+        if ((remoteSchema?.steps || []).length > 0) setWorkflowSchema(remoteSchema)
       } catch {
         // ignore custom schema bootstrap failures
       }
     })()
   }, [externalCtx.customSchema, externalCtx.customSchemaUrl, externalCtx.platformOrigin, externalCtx.token])
+
+  useEffect(() => {
+    const steps = Array.isArray(workflowSchema?.steps) ? workflowSchema.steps : []
+    if (!steps.length) {
+      setWorkflowState({ stepIndex: 0, steps: {} })
+      return
+    }
+    const saved = parseJsonSafe(activeImage?.customFields?.__workflow__, null)
+    const nextSteps = {}
+    for (const step of steps) {
+      const savedStep = saved?.steps?.[step.id] || {}
+      const savedCards = Array.isArray(savedStep.cards) ? savedStep.cards : []
+      const cards = savedCards.length > 0
+        ? savedCards.map((card, idx) => ({
+            ...makeEmptyCard(step.id, idx),
+            ...card,
+            title: card?.title || `病灶 ${idx + 1}`
+          }))
+        : [makeEmptyCard(step.id, 0)]
+      nextSteps[step.id] = {
+        activeCardIndex: Math.max(0, Math.min(cards.length - 1, Number(savedStep.activeCardIndex || 0))),
+        cards
+      }
+    }
+    const savedStepIndex = Number(saved?.stepIndex || 0)
+    const stepIndex = Math.max(0, Math.min(steps.length - 1, Number.isFinite(savedStepIndex) ? savedStepIndex : 0))
+    setWorkflowState({ stepIndex, steps: nextSteps })
+    setWorkflowErrors({})
+  }, [activeImage?.id, activeImage?.customFields, workflowSchema])
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.BroadcastChannel !== 'function') return
@@ -1638,19 +1740,17 @@ export default function App() {
   }
 
   const getEffectiveCustomFieldValues = (record = null) => {
-    const base = deriveDefaultCustomFieldValues(customFieldSchema)
     const existing = parseJsonSafe(record?.customFields, {}) || {}
-    return { ...base, ...existing }
+    return { ...existing }
   }
 
-  const updateActiveCustomField = (fieldId, value) => {
+  const persistWorkflowStateToImage = (nextState) => {
     const id = String(activeImage?.id || '')
-    const key = String(fieldId || '')
-    if (!id || !key) return
+    if (!id) return
     const base = getEffectiveCustomFieldValues(activeImage)
     const nextCustomFields = {
       ...base,
-      [key]: value
+      __workflow__: nextState
     }
     const optimistic = {
       ...(activeImage || {}),
@@ -1666,6 +1766,44 @@ export default function App() {
       updatedAt: Date.now()
     }).then((updated) => {
       if (updated) cacheImageRecord(updated)
+    })
+  }
+
+  const updateWorkflowState = (updater, { persist = true } = {}) => {
+    setWorkflowState((prev) => {
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      if (persist) persistWorkflowStateToImage(next)
+      return next
+    })
+  }
+
+  const updateActiveCardFieldValue = (fieldId, value) => {
+    if (!activeStepDef || !activeCard) return
+    const stepId = String(activeStepDef.id)
+    updateWorkflowState((prev) => {
+      const step = prev?.steps?.[stepId]
+      if (!step) return prev
+      const cards = Array.isArray(step.cards) ? [...step.cards] : []
+      const cardIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
+      const current = cards[cardIndex]
+      if (!current) return prev
+      cards[cardIndex] = {
+        ...current,
+        values: {
+          ...(current.values || {}),
+          [fieldId]: value
+        }
+      }
+      return {
+        ...prev,
+        steps: {
+          ...prev.steps,
+          [stepId]: {
+            ...step,
+            cards
+          }
+        }
+      }
     })
   }
 
@@ -2595,6 +2733,9 @@ export default function App() {
     }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'clear' || reason === 'load' || reason === 'curve-complete') {
       scheduleLabelStatsRefresh()
+    }
+    if (reason === 'draw' || reason === 'annotate' || reason === 'curve-complete' || reason === 'load') {
+      maybeExpandCardsByAnnotationCount()
     }
   }
 
@@ -3771,9 +3912,173 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     </div>
   )
 
-  const renderCustomFieldInput = (field) => {
-    const value = activeCustomFieldValues[field.id]
-    const onChange = (next) => updateActiveCustomField(field.id, next)
+  const getCurrentStepStats = () => {
+    const cards = Array.isArray(activeStepState?.cards) ? activeStepState.cards : []
+    const completed = cards.filter((card) => card?.completed).length
+    return { total: cards.length, completed }
+  }
+
+  const maybeExpandCardsByAnnotationCount = () => {
+    const count = Number(viewerRef.current?.getAnnotationCount?.() || 0)
+    if (!activeStepDef || activeStepDef.scope !== 'lesion') return
+    if (!Number.isFinite(count) || count <= 0) return
+    const stepId = String(activeStepDef.id)
+    updateWorkflowState((prev) => {
+      const step = prev?.steps?.[stepId]
+      if (!step) return prev
+      const cards = Array.isArray(step.cards) ? [...step.cards] : []
+      if (cards.length >= count) return prev
+      for (let i = cards.length; i < count; i += 1) {
+        cards.push(makeEmptyCard(stepId, i))
+      }
+      return {
+        ...prev,
+        steps: {
+          ...prev.steps,
+          [stepId]: {
+            ...step,
+            cards
+          }
+        }
+      }
+    })
+  }
+
+  const validateCurrentCard = () => {
+    if (!activeStepDef || !activeCard) return true
+    const nextErrors = {}
+    if ((workflowSchema.mainCategoryOptions || []).length > 0 && !String(activeCard.mainCategory || '').trim()) {
+      nextErrors.mainCategory = '主分类项为必填项'
+    }
+    for (const field of activeStepDef.fields || []) {
+      if (!field?.required) continue
+      const value = activeCard?.values?.[field.id]
+      const empty = Array.isArray(value)
+        ? value.length === 0
+        : value == null || String(value).trim() === ''
+      if (empty) nextErrors[field.id] = `${field.label}为必填项`
+    }
+    setWorkflowErrors(nextErrors)
+    return Object.keys(nextErrors).length === 0
+  }
+
+  const markCurrentCardCompleted = () => {
+    if (!activeStepDef || !activeCard) return
+    const stepId = String(activeStepDef.id)
+    updateWorkflowState((prev) => {
+      const step = prev?.steps?.[stepId]
+      if (!step) return prev
+      const cards = Array.isArray(step.cards) ? [...step.cards] : []
+      const cardIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
+      const card = cards[cardIndex]
+      if (!card) return prev
+      cards[cardIndex] = {
+        ...card,
+        completed: true,
+        title: card.title || `病灶 ${cardIndex + 1}`
+      }
+      return {
+        ...prev,
+        steps: {
+          ...prev.steps,
+          [stepId]: {
+            ...step,
+            cards
+          }
+        }
+      }
+    })
+  }
+
+  const updateActiveCardMainCategory = (value) => {
+    if (!activeStepDef || !activeCard) return
+    const stepId = String(activeStepDef.id)
+    updateWorkflowState((prev) => {
+      const step = prev?.steps?.[stepId]
+      if (!step) return prev
+      const cards = Array.isArray(step.cards) ? [...step.cards] : []
+      const cardIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
+      const current = cards[cardIndex]
+      if (!current) return prev
+      cards[cardIndex] = {
+        ...current,
+        mainCategory: String(value || '')
+      }
+      return {
+        ...prev,
+        steps: {
+          ...prev.steps,
+          [stepId]: {
+            ...step,
+            cards
+          }
+        }
+      }
+    })
+  }
+
+  const switchCard = (direction = 1) => {
+    if (!activeStepDef || !activeStepState) return
+    const stepId = String(activeStepDef.id)
+    updateWorkflowState((prev) => {
+      const step = prev?.steps?.[stepId]
+      if (!step) return prev
+      const cards = Array.isArray(step.cards) ? [...step.cards] : []
+      if (!cards.length) cards.push(makeEmptyCard(stepId, 0))
+      const currentIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
+      let nextIndex = currentIndex + direction
+      if (nextIndex < 0) nextIndex = 0
+      if (nextIndex >= cards.length) {
+        if (direction > 0 && cards[currentIndex]?.completed) {
+          cards.push(makeEmptyCard(stepId, cards.length))
+          nextIndex = cards.length - 1
+        } else {
+          nextIndex = cards.length - 1
+        }
+      }
+      return {
+        ...prev,
+        steps: {
+          ...prev.steps,
+          [stepId]: {
+            ...step,
+            cards,
+            activeCardIndex: nextIndex
+          }
+        }
+      }
+    }, { persist: true })
+    setWorkflowErrors({})
+  }
+
+  const gotoWorkflowStep = (direction = 1) => {
+    const steps = Array.isArray(workflowSchema?.steps) ? workflowSchema.steps : []
+    if (!steps.length) return
+    if (direction > 0) {
+      const ok = validateCurrentCard()
+      if (!ok) return
+      markCurrentCardCompleted()
+    }
+    updateWorkflowState((prev) => {
+      const nextIndex = Math.max(0, Math.min(steps.length - 1, Number(prev?.stepIndex || 0) + direction))
+      return {
+        ...prev,
+        stepIndex: nextIndex
+      }
+    })
+    setWorkflowErrors({})
+  }
+
+  const submitWorkflowAndSave = async () => {
+    const ok = validateCurrentCard()
+    if (!ok) return
+    markCurrentCardCompleted()
+    await saveCurrentAnnotation()
+  }
+
+  const renderWorkflowFieldInput = (field) => {
+    const value = activeCard?.values?.[field.id]
+    const onChange = (next) => updateActiveCardFieldValue(field.id, next)
     if (field.type === 'textarea') {
       return (
         <Input.TextArea
@@ -4004,24 +4309,135 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
             <div className="custom-field-panel-head">
               <div className="custom-field-panel-title">自定义标注项</div>
               <div className="custom-field-panel-subtitle">
-                {activeImage?.displayName || activeImage?.name || '未选择影像'}
+                ID: {activeImage?.remoteImageId || externalCtx.imageId || activeImage?.id || '-'} {activeImage?.displayName || activeImage?.name || ''}
               </div>
             </div>
-            {customFieldSchema.length === 0 ? (
+            <div className="custom-field-meta">标注统计：{Number(viewerRef.current?.getAnnotationCount?.() || 0)}</div>
+            {Array.isArray(workflowSchema?.steps) && workflowSchema.steps.length > 0 ? (
+              <div className="custom-field-meta custom-field-step-indicator">
+                标注项 {Math.max(1, Number(workflowState?.stepIndex || 0) + 1)} / {workflowSchema.steps.length}
+              </div>
+            ) : null}
+            {!activeStepDef ? (
               <div className="custom-field-empty">当前任务未配置自定义标注项</div>
             ) : (
               <div className="custom-field-list">
-                {customFieldSchema.map((field) => (
-                  <div key={field.id} className="custom-field-item">
-                    <div className="custom-field-label">
-                      {field.label}
-                      {field.required ? <span className="custom-field-required">*</span> : null}
+                {(activeStepState?.cards || []).map((card, idx) => (
+                  <div
+                    key={card.id}
+                    className={`custom-field-item workflow-card${idx === Number(activeStepState?.activeCardIndex || 0) ? ' active' : ''}`}
+                    onClick={() => {
+                      const stepId = String(activeStepDef.id)
+                      updateWorkflowState((prev) => ({
+                        ...prev,
+                        steps: {
+                          ...prev.steps,
+                          [stepId]: {
+                            ...(prev.steps?.[stepId] || {}),
+                            cards: prev.steps?.[stepId]?.cards || [],
+                            activeCardIndex: idx
+                          }
+                        }
+                      }))
+                      setWorkflowErrors({})
+                    }}
+                  >
+                    <div className="workflow-card-header">
+                      <span className={`workflow-card-status${card?.completed ? ' completed' : ''}`}>
+                        {card?.completed ? card?.title || `病灶 ${idx + 1}` : '未标注'}
+                      </span>
+                      <label className="workflow-card-suspicious">
+                        <Checkbox
+                          checked={!!card?.suspicious}
+                          onChange={(e) => {
+                            const stepId = String(activeStepDef.id)
+                            updateWorkflowState((prev) => {
+                              const step = prev?.steps?.[stepId]
+                              if (!step) return prev
+                              const cards = Array.isArray(step.cards) ? [...step.cards] : []
+                              if (!cards[idx]) return prev
+                              cards[idx] = { ...cards[idx], suspicious: !!e?.target?.checked }
+                              return {
+                                ...prev,
+                                steps: {
+                                  ...prev.steps,
+                                  [stepId]: {
+                                    ...step,
+                                    cards
+                                  }
+                                }
+                              }
+                            })
+                          }}
+                        >
+                          可疑
+                        </Checkbox>
+                      </label>
                     </div>
-                    {renderCustomFieldInput(field)}
+                    {idx === Number(activeStepState?.activeCardIndex || 0) && (
+                      <>
+                        {(workflowSchema.mainCategoryOptions || []).length > 0 && (
+                          <div className="workflow-main-category">
+                            <div className="custom-field-label">
+                              主分类项
+                              <span className="custom-field-required">*</span>
+                            </div>
+                            <Radio.Group
+                              value={String(activeCard?.mainCategory || '')}
+                              onChange={(next) => updateActiveCardMainCategory(String(next || ''))}
+                            >
+                              {(workflowSchema.mainCategoryOptions || []).map((opt) => (
+                                <Radio key={`mc-${opt.value}`} value={String(opt.value)}>
+                                  {opt.label}
+                                </Radio>
+                              ))}
+                            </Radio.Group>
+                            {workflowErrors.mainCategory ? <div className="workflow-error">{workflowErrors.mainCategory}</div> : null}
+                          </div>
+                        )}
+                        <div className="workflow-section-title">{activeStepDef?.title || '标注项'}</div>
+                        {(activeStepDef?.fields || []).map((field) => (
+                          <div key={`${card.id}-${field.id}`} className="custom-field-label-wrap">
+                            <div className="custom-field-label">
+                              {field.label}
+                              {field.required ? <span className="custom-field-required">*</span> : null}
+                            </div>
+                            {renderWorkflowFieldInput(field)}
+                            {workflowErrors[field.id] ? <div className="workflow-error">{workflowErrors[field.id]}</div> : null}
+                          </div>
+                        ))}
+                      </>
+                    )}
                   </div>
                 ))}
               </div>
             )}
+            {activeStepDef ? (
+              <div className="workflow-actions">
+                <Button size="small" onClick={() => switchCard(-1)}>
+                  上一个
+                </Button>
+                <Button size="small" onClick={() => switchCard(1)}>
+                  下一个
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => gotoWorkflowStep(-1)}
+                  disabled={Number(workflowState?.stepIndex || 0) <= 0}
+                >
+                  上一步
+                </Button>
+                {Number(workflowState?.stepIndex || 0) < (workflowSchema.steps.length - 1) ? (
+                  <Button size="small" type="primary" onClick={() => gotoWorkflowStep(1)}>
+                    下一步
+                  </Button>
+                ) : (
+                  <Button size="small" type="primary" onClick={submitWorkflowAndSave}>
+                    提交
+                  </Button>
+                )}
+              </div>
+            ) : null}
           </div>
         </Sider>
       </Layout>
