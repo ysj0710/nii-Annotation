@@ -3610,6 +3610,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
                     dropdownMenuStyle={{ maxHeight: 260 }}
                     virtualListProps={{ height: 260, itemHeight: 36 }}
                     triggerProps={{ className: 'label-select-popup' }}
+                    getPopupContainer={(node) => node?.parentElement || document.body}
                     value={activeLabelId}
                     onChange={(value) => setActiveLabelId(Number(value) || 1)}
                     aria-label="选择当前标注 Label"
