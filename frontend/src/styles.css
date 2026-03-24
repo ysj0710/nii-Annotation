@@ -761,12 +761,22 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   height: 30px;
   border: 1px solid #3a4a63;
   border-radius: 6px;
-  background: #1a2231;
+  background: #1a2231 !important;
 }
 
 .label-select-input .arco-select-view-value {
   color: #dbe7f5;
   font-size: 12px;
+}
+
+.label-select-input:hover .arco-select-view,
+.label-select-input.arco-select-opened .arco-select-view {
+  background: #1a2231 !important;
+  border-color: #4c6383 !important;
+}
+
+.label-select-input .arco-select-view-suffix {
+  color: #9fb4cc !important;
 }
 
 .label-select-input.arco-select-focused .arco-select-view {
@@ -788,6 +798,7 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   display: inline-block;
 }
 
+.arco-select-popup.label-select-popup,
 .arco-select-popup.label-select-dropdown,
 .arco-select-popup .label-select-dropdown {
   background: #151d2a !important;
@@ -795,18 +806,54 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   box-shadow: 0 12px 30px rgba(2, 8, 22, 0.55) !important;
 }
 
+.arco-select-popup.label-select-popup .arco-select-popup-inner,
 .arco-select-popup.label-select-dropdown .arco-select-popup-inner,
 .arco-select-popup .label-select-dropdown.arco-select-popup-inner {
   background: #151d2a !important;
+  max-height: none !important;
 }
 
+.arco-select-popup.label-select-popup .arco-select-option,
 .arco-select-popup.label-select-dropdown .arco-select-option,
 .arco-select-popup .label-select-dropdown .arco-select-option {
   color: #d8e2f1 !important;
   background: #151d2a !important;
 }
 
+.arco-select-popup.label-select-popup .arco-select-option-disabled,
+.arco-select-popup.label-select-dropdown .arco-select-option-disabled,
+.arco-select-popup .label-select-dropdown .arco-select-option-disabled {
+  background: #151d2a !important;
+}
+
+.arco-select-popup.label-select-popup .arco-select-option-empty,
+.arco-select-popup.label-select-dropdown .arco-select-option-empty,
+.arco-select-popup .label-select-dropdown .arco-select-option-empty {
+  background: #151d2a !important;
+}
+
+.arco-select-popup.label-select-popup .arco-virtual-list-holder,
+.arco-select-popup.label-select-dropdown .arco-virtual-list-holder,
+.arco-select-popup .label-select-dropdown .arco-virtual-list-holder {
+  background: #151d2a !important;
+  max-height: none !important;
+}
+
+.arco-select-popup.label-select-popup .arco-virtual-list,
+.arco-select-popup.label-select-dropdown .arco-virtual-list,
+.arco-select-popup .label-select-dropdown .arco-virtual-list {
+  background: #151d2a !important;
+}
+
+.arco-select-popup.label-select-popup .arco-select-option,
+.arco-select-popup.label-select-dropdown .arco-select-option,
+.arco-select-popup .label-select-dropdown .arco-select-option {
+  line-height: 34px;
+}
+
+.arco-select-popup.label-select-popup .arco-select-option:hover,
 .arco-select-popup.label-select-dropdown .arco-select-option:hover,
+.arco-select-popup.label-select-popup .arco-select-option.arco-select-option-hover,
 .arco-select-popup.label-select-dropdown .arco-select-option.arco-select-option-hover,
 .arco-select-popup .label-select-dropdown .arco-select-option:hover,
 .arco-select-popup .label-select-dropdown .arco-select-option.arco-select-option-hover,
@@ -814,36 +861,44 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   background: #22324a !important;
 }
 
+.arco-select-popup.label-select-popup .arco-select-option.arco-select-option-selected,
 .arco-select-popup.label-select-dropdown .arco-select-option.arco-select-option-selected,
 .arco-select-popup .label-select-dropdown .arco-select-option.arco-select-option-selected {
   background: #1f3961 !important;
   color: #ffffff !important;
 }
 
+.arco-select-popup.label-select-popup .arco-select-option-content,
 .arco-select-popup.label-select-dropdown .arco-select-option-content,
 .arco-select-popup .label-select-dropdown .arco-select-option-content {
   color: inherit !important;
 }
 
+.arco-select-popup.label-select-popup .arco-select-option-icon-hover,
 .arco-select-popup.label-select-dropdown .arco-select-option-icon-hover,
 .arco-select-popup .label-select-dropdown .arco-select-option-icon-hover {
   color: #7cb7ff !important;
 }
 
+.arco-select-popup.label-select-popup .arco-select-list,
+.arco-select-popup.label-select-dropdown .arco-select-list,
+.arco-select-popup .label-select-dropdown .arco-select-list,
+.arco-select-popup.label-select-popup .arco-virtual-list-holder,
+.arco-select-popup.label-select-dropdown .arco-virtual-list-holder,
+.arco-select-popup .label-select-dropdown .arco-virtual-list-holder {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.arco-select-popup.label-select-popup .arco-select-list::-webkit-scrollbar,
 .arco-select-popup.label-select-dropdown .arco-select-list::-webkit-scrollbar,
-.arco-select-popup .label-select-dropdown .arco-select-list::-webkit-scrollbar {
-  width: 8px;
-}
-
-.arco-select-popup.label-select-dropdown .arco-select-list::-webkit-scrollbar-track,
-.arco-select-popup .label-select-dropdown .arco-select-list::-webkit-scrollbar-track {
-  background: #121825;
-}
-
-.arco-select-popup.label-select-dropdown .arco-select-list::-webkit-scrollbar-thumb,
-.arco-select-popup .label-select-dropdown .arco-select-list::-webkit-scrollbar-thumb {
-  background: #415673;
-  border-radius: 999px;
+.arco-select-popup .label-select-dropdown .arco-select-list::-webkit-scrollbar,
+.arco-select-popup.label-select-popup .arco-virtual-list-holder::-webkit-scrollbar,
+.arco-select-popup.label-select-dropdown .arco-virtual-list-holder::-webkit-scrollbar,
+.arco-select-popup .label-select-dropdown .arco-virtual-list-holder::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
 }
 
 .itk-info-list {
