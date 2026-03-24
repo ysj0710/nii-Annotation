@@ -4181,13 +4181,6 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     setWorkflowErrors({})
   }
 
-  const focusActiveCardAnnotation = () => {
-    if (!activeCard) return
-    const idx = Number(activeCard.annotationIndex)
-    if (!Number.isFinite(idx) || idx < 0) return
-    viewerRef.current?.jumpToAnnotation?.(idx)
-  }
-
   const gotoWorkflowStep = (direction = 1) => {
     const steps = Array.isArray(workflowSchema?.steps) ? workflowSchema.steps : []
     if (!steps.length) return
@@ -4446,6 +4439,8 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
             {Array.isArray(workflowSchema?.steps) && workflowSchema.steps.length > 0 ? (
               <div className="custom-field-meta custom-field-step-indicator">
                 标注项 {Math.max(1, Number(workflowState?.stepIndex || 0) + 1)} / {workflowSchema.steps.length}
+                {' · '}
+                {activeStepDef?.title || '标注项'}
               </div>
             ) : null}
             {!activeStepDef ? (
@@ -4529,15 +4524,6 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
                 </Button>
                 <Button size="small" onClick={() => switchCard(1)}>
                   下一个
-                </Button>
-                <Button size="small" onClick={focusActiveCardAnnotation}>
-                  定位标注
-                </Button>
-                <Button size="small" onClick={() => switchDisplayImage(-1)}>
-                  上一张
-                </Button>
-                <Button size="small" onClick={() => switchDisplayImage(1)}>
-                  下一张
                 </Button>
                 <Button
                   size="small"
