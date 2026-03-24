@@ -798,6 +798,18 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   display: inline-block;
 }
 
+.arco-trigger-popup.label-select-popup {
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.arco-trigger-popup.label-select-popup::before,
+.arco-trigger-popup.label-select-popup::after {
+  display: none !important;
+}
+
 .arco-select-popup.label-select-popup,
 .arco-select-popup.label-select-dropdown,
 .arco-select-popup .label-select-dropdown {
@@ -811,6 +823,8 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 .arco-select-popup .label-select-dropdown.arco-select-popup-inner {
   background: #151d2a !important;
   max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 .arco-select-popup.label-select-popup .arco-select-option,
@@ -843,6 +857,8 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 .arco-select-popup.label-select-dropdown .arco-virtual-list,
 .arco-select-popup .label-select-dropdown .arco-virtual-list {
   background: #151d2a !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 .arco-select-popup.label-select-popup .arco-select-option,
