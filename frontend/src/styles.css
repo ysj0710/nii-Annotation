@@ -788,6 +788,48 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   display: inline-block;
 }
 
+.label-select-dropdown.arco-select-popup {
+  background: #151d2a;
+  border: 1px solid #364761;
+  box-shadow: 0 12px 30px rgba(2, 8, 22, 0.55);
+}
+
+.label-select-dropdown .arco-select-option {
+  color: #d8e2f1;
+  background: transparent;
+}
+
+.label-select-dropdown .arco-select-option:hover,
+.label-select-dropdown .arco-select-option.arco-select-option-active {
+  background: #22324a;
+}
+
+.label-select-dropdown .arco-select-option.arco-select-option-selected {
+  background: #1f3961;
+  color: #ffffff;
+}
+
+.label-select-dropdown .arco-select-option-content {
+  color: inherit;
+}
+
+.label-select-dropdown .arco-select-option-icon-hover {
+  color: #7cb7ff;
+}
+
+.label-select-dropdown .arco-select-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.label-select-dropdown .arco-select-list::-webkit-scrollbar-track {
+  background: #121825;
+}
+
+.label-select-dropdown .arco-select-list::-webkit-scrollbar-thumb {
+  background: #415673;
+  border-radius: 999px;
+}
+
 .itk-info-list {
   max-height: 220px;
   overflow: auto;

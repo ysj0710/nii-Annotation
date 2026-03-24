@@ -3606,6 +3606,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
                   <Select
                     size="small"
                     className="label-select-input"
+                    dropdownMenuClassName="label-select-dropdown"
                     value={activeLabelId}
                     onChange={(value) => setActiveLabelId(Number(value) || 1)}
                     aria-label="选择当前标注 Label"
