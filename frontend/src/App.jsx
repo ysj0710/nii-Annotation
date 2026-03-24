@@ -1504,11 +1504,7 @@ export default function App() {
     if (!stepId) return null
     return workflowState?.steps?.[stepId] || null
   }, [workflowState, activeStepDef?.id])
-  const activeCard = useMemo(() => {
-    const cards = Array.isArray(activeStepState?.cards) ? activeStepState.cards : []
-    const index = Math.max(0, Math.min(cards.length - 1, Number(activeStepState?.activeCardIndex || 0)))
-    return cards[index] || null
-  }, [activeStepState])
+  const activeCard = useMemo(() => activeStepState || null, [activeStepState])
   useEffect(() => {
     const detected = detectBrowserRuntimeEnv()
     runtimeEnvRef.current = detected
@@ -1548,17 +1544,10 @@ export default function App() {
     const nextSteps = {}
     for (const step of steps) {
       const savedStep = saved?.steps?.[step.id] || {}
-      const savedCards = Array.isArray(savedStep.cards) ? savedStep.cards : []
-      const cards = savedCards.length > 0
-        ? savedCards.map((card, idx) => ({
-            ...makeEmptyCard(step.id, idx),
-            ...card,
-            title: card?.title || `病灶 ${idx + 1}`
-          }))
-        : [makeEmptyCard(step.id, 0)]
       nextSteps[step.id] = {
-        activeCardIndex: Math.max(0, Math.min(cards.length - 1, Number(savedStep.activeCardIndex || 0))),
-        cards
+        ...makeEmptyCard(step.id, 0),
+        ...savedStep,
+        title: String(savedStep?.title || `病灶 1`)
       }
     }
     const savedStepIndex = Number(saved?.stepIndex || 0)
@@ -1739,9 +1728,53 @@ export default function App() {
     }
   }
 
-  const getEffectiveCustomFieldValues = (record = null) => {
+  const getEffectiveCustomFieldValues = (record = null, workflowOverride = null) => {
     const existing = parseJsonSafe(record?.customFields, {}) || {}
-    return { ...existing }
+    const workflow = workflowOverride || parseJsonSafe(existing?.__workflow__, existing?.__workflow__) || null
+    if (!workflow || !workflow.steps || typeof workflow.steps !== 'object') return { ...existing }
+    const sanitized = { ...existing }
+    for (const step of Array.isArray(workflowSchema?.steps) ? workflowSchema.steps : []) {
+      const prefix = `${step.id}__`
+      for (const key of Object.keys(sanitized)) {
+        if (key.startsWith(prefix)) delete sanitized[key]
+      }
+    }
+    delete sanitized.label
+    const flattened = {}
+    let preferredLabelSet = false
+    const stepOrder = Array.isArray(workflowSchema?.steps) ? workflowSchema.steps : []
+    const sortedSteps = [...stepOrder].sort((a, b) => {
+      const aCount = Number(workflow?.steps?.[a.id]?.annotationCount || 0)
+      const bCount = Number(workflow?.steps?.[b.id]?.annotationCount || 0)
+      if (aCount !== bCount) return bCount - aCount
+      return stepOrder.findIndex((s) => s.id === a.id) - stepOrder.findIndex((s) => s.id === b.id)
+    })
+    for (const step of sortedSteps) {
+      const stepState = workflow.steps?.[step.id] || {}
+      if (!stepState || typeof stepState !== 'object') continue
+      if (stepState.mainCategory != null && String(stepState.mainCategory).trim()) {
+        flattened[`${step.id}__mainCategory`] = String(stepState.mainCategory)
+        if (!preferredLabelSet) {
+          const num = Number(stepState.mainCategory)
+          flattened.label = Number.isFinite(num) ? num : String(stepState.mainCategory)
+          preferredLabelSet = true
+        }
+      }
+      const values = stepState.values || {}
+      for (const field of step.fields || []) {
+        if (!field?.id) continue
+        const value = values[field.id]
+        if (value == null) continue
+        flattened[`${step.id}__${field.id}`] = value
+      }
+      if (stepState.annotationCount != null) {
+        flattened[`${step.id}__annotationCount`] = Number(stepState.annotationCount) || 0
+      }
+    }
+    return {
+      ...sanitized,
+      ...flattened
+    }
   }
 
   const persistWorkflowStateToImage = (nextState) => {
@@ -1783,14 +1816,11 @@ export default function App() {
     updateWorkflowState((prev) => {
       const step = prev?.steps?.[stepId]
       if (!step) return prev
-      const cards = Array.isArray(step.cards) ? [...step.cards] : []
-      const cardIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
-      const current = cards[cardIndex]
-      if (!current) return prev
-      cards[cardIndex] = {
-        ...current,
+      if ((step.values || {})[fieldId] === value) return prev
+      const nextStep = {
+        ...step,
         values: {
-          ...(current.values || {}),
+          ...(step.values || {}),
           [fieldId]: value
         }
       }
@@ -1798,10 +1828,7 @@ export default function App() {
         ...prev,
         steps: {
           ...prev.steps,
-          [stepId]: {
-            ...step,
-            cards
-          }
+          [stepId]: nextStep
         }
       }
     })
@@ -2555,7 +2582,7 @@ export default function App() {
     return true
   }
 
-  const syncActiveAnnotationToPlatform = async () => {
+  const syncActiveAnnotationToPlatform = async (workflowSnapshot = null) => {
     const remoteImageId = String(activeImage?.remoteImageId || externalCtx?.imageId || '')
     if (!remoteImageId || !externalCtx?.platformOrigin || !activeImage?.id) return false
     const record = await getImageById(activeImage.id)
@@ -2564,7 +2591,7 @@ export default function App() {
 
     const sourceName = String(record?.sourceName || record?.name || '')
     const sourceNameStem = fileStem(sourceName) || sourceName || `image-${remoteImageId}`
-    const customFields = getEffectiveCustomFieldValues(record)
+    const customFields = getEffectiveCustomFieldValues(record, workflowSnapshot)
     const clientEnvReport = buildClientEnvReport('platform-single', { imageId: remoteImageId })
     const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationByImageId`
@@ -2603,7 +2630,7 @@ export default function App() {
     return true
   }
 
-  const syncBatchAnnotationsToPlatform = async () => {
+  const syncBatchAnnotationsToPlatform = async ({ activeImageId = '', activeWorkflowSnapshot = null } = {}) => {
     if (!externalCtx?.batchId || !externalCtx?.platformOrigin) return false
     const normalizedOrigin = String(externalCtx.platformOrigin || '').replace(/\/+$/, '')
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/saveAnnotationBatch`
@@ -2624,7 +2651,10 @@ export default function App() {
       if (!maskBuffer) continue
       const sourceName = String(record?.sourceName || item?.sourceImageName || item?.fileName || `image-${remoteImageId}`)
       const sourceNameStem = fileStem(sourceName) || sourceName || `image-${remoteImageId}`
-      const customFields = getEffectiveCustomFieldValues(record)
+      const customFields =
+        activeWorkflowSnapshot && String(record?.id || '') === String(activeImageId || '')
+          ? getEffectiveCustomFieldValues(record, activeWorkflowSnapshot)
+          : getEffectiveCustomFieldValues(record)
       items.push({
         imageId: Number.isFinite(Number(remoteImageId)) ? Number(remoteImageId) : remoteImageId,
         sourceImageName: sourceNameStem,
@@ -2673,6 +2703,15 @@ export default function App() {
       Message.warning('当前没有可保存的影像')
       return
     }
+    let workflowSnapshot = null
+    if (activeStepDef) {
+      const ok = validateCurrentCard()
+      if (!ok) {
+        Message.warning('请先完成当前分类项必填信息')
+        return
+      }
+      workflowSnapshot = bindCurrentStepToAnnotation({ persist: true, markCompleted: true, returnNextState: true })
+    }
     clearAutoSaveSchedule()
     await saveQueueRef.current
     if (!hasUnsavedChangesRef.current) {
@@ -2689,7 +2728,12 @@ export default function App() {
       return
     }
     try {
-      const synced = externalCtx.batchId ? await syncBatchAnnotationsToPlatform() : await syncActiveAnnotationToPlatform()
+      const synced = externalCtx.batchId
+        ? await syncBatchAnnotationsToPlatform({
+            activeImageId: String(activeImage?.id || ''),
+            activeWorkflowSnapshot: workflowSnapshot
+          })
+        : await syncActiveAnnotationToPlatform(workflowSnapshot)
       if (synced) {
         if (externalCtx.batchId && activeImage?.remoteImageId) {
           setBatchQueue((prev) => {
@@ -2735,7 +2779,7 @@ export default function App() {
       scheduleLabelStatsRefresh()
     }
     if (reason === 'draw' || reason === 'annotate' || reason === 'curve-complete' || reason === 'load') {
-      maybeExpandCardsByAnnotationCount()
+      bindCurrentStepToAnnotation({ persist: reason === 'curve-complete' })
     }
   }
 
@@ -3912,36 +3956,38 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     </div>
   )
 
-  const getCurrentStepStats = () => {
-    const cards = Array.isArray(activeStepState?.cards) ? activeStepState.cards : []
-    const completed = cards.filter((card) => card?.completed).length
-    return { total: cards.length, completed }
-  }
-
-  const maybeExpandCardsByAnnotationCount = () => {
+  const bindCurrentStepToAnnotation = ({ persist = false, markCompleted = false, returnNextState = false } = {}) => {
+    if (!activeStepDef) return
     const count = Number(viewerRef.current?.getAnnotationCount?.() || 0)
-    if (!activeStepDef || activeStepDef.scope !== 'lesion') return
-    if (!Number.isFinite(count) || count <= 0) return
     const stepId = String(activeStepDef.id)
+    let computedNextState = null
     updateWorkflowState((prev) => {
       const step = prev?.steps?.[stepId]
       if (!step) return prev
-      const cards = Array.isArray(step.cards) ? [...step.cards] : []
-      if (cards.length >= count) return prev
-      for (let i = cards.length; i < count; i += 1) {
-        cards.push(makeEmptyCard(stepId, i))
+      const nextCompleted = markCompleted ? true : (count > 0 || step.completed === true)
+      const nextCount = Math.max(0, count)
+      const noChange = step.annotationCount === nextCount && step.completed === nextCompleted
+      if (noChange) {
+        computedNextState = prev
+        return prev
       }
-      return {
+      const next = {
         ...prev,
         steps: {
           ...prev.steps,
           [stepId]: {
             ...step,
-            cards
+            completed: nextCompleted,
+            annotationCount: nextCount
           }
         }
       }
-    })
+      computedNextState = next
+      return next
+    }, { persist })
+    if (returnNextState) {
+      return computedNextState
+    }
   }
 
   const validateCurrentCard = () => {
@@ -3968,23 +4014,11 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     updateWorkflowState((prev) => {
       const step = prev?.steps?.[stepId]
       if (!step) return prev
-      const cards = Array.isArray(step.cards) ? [...step.cards] : []
-      const cardIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
-      const card = cards[cardIndex]
-      if (!card) return prev
-      cards[cardIndex] = {
-        ...card,
-        completed: true,
-        title: card.title || `病灶 ${cardIndex + 1}`
-      }
       return {
         ...prev,
         steps: {
           ...prev.steps,
-          [stepId]: {
-            ...step,
-            cards
-          }
+          [stepId]: { ...step, completed: true }
         }
       }
     })
@@ -3996,59 +4030,16 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     updateWorkflowState((prev) => {
       const step = prev?.steps?.[stepId]
       if (!step) return prev
-      const cards = Array.isArray(step.cards) ? [...step.cards] : []
-      const cardIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
-      const current = cards[cardIndex]
-      if (!current) return prev
-      cards[cardIndex] = {
-        ...current,
-        mainCategory: String(value || '')
-      }
+      const normalized = String(value || '')
+      if (String(step.mainCategory || '') === normalized) return prev
       return {
         ...prev,
         steps: {
           ...prev.steps,
-          [stepId]: {
-            ...step,
-            cards
-          }
+          [stepId]: { ...step, mainCategory: normalized }
         }
       }
     })
-  }
-
-  const switchCard = (direction = 1) => {
-    if (!activeStepDef || !activeStepState) return
-    const stepId = String(activeStepDef.id)
-    updateWorkflowState((prev) => {
-      const step = prev?.steps?.[stepId]
-      if (!step) return prev
-      const cards = Array.isArray(step.cards) ? [...step.cards] : []
-      if (!cards.length) cards.push(makeEmptyCard(stepId, 0))
-      const currentIndex = Math.max(0, Math.min(cards.length - 1, Number(step.activeCardIndex || 0)))
-      let nextIndex = currentIndex + direction
-      if (nextIndex < 0) nextIndex = 0
-      if (nextIndex >= cards.length) {
-        if (direction > 0 && cards[currentIndex]?.completed) {
-          cards.push(makeEmptyCard(stepId, cards.length))
-          nextIndex = cards.length - 1
-        } else {
-          nextIndex = cards.length - 1
-        }
-      }
-      return {
-        ...prev,
-        steps: {
-          ...prev.steps,
-          [stepId]: {
-            ...step,
-            cards,
-            activeCardIndex: nextIndex
-          }
-        }
-      }
-    }, { persist: true })
-    setWorkflowErrors({})
   }
 
   const gotoWorkflowStep = (direction = 1) => {
@@ -4067,13 +4058,6 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
       }
     })
     setWorkflowErrors({})
-  }
-
-  const submitWorkflowAndSave = async () => {
-    const ok = validateCurrentCard()
-    if (!ok) return
-    markCurrentCardCompleted()
-    await saveCurrentAnnotation()
   }
 
   const renderWorkflowFieldInput = (field) => {
@@ -4322,103 +4306,52 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
               <div className="custom-field-empty">当前任务未配置自定义标注项</div>
             ) : (
               <div className="custom-field-list">
-                {(activeStepState?.cards || []).map((card, idx) => (
-                  <div
-                    key={card.id}
-                    className={`custom-field-item workflow-card${idx === Number(activeStepState?.activeCardIndex || 0) ? ' active' : ''}`}
-                    onClick={() => {
-                      const stepId = String(activeStepDef.id)
-                      updateWorkflowState((prev) => ({
-                        ...prev,
-                        steps: {
-                          ...prev.steps,
-                          [stepId]: {
-                            ...(prev.steps?.[stepId] || {}),
-                            cards: prev.steps?.[stepId]?.cards || [],
-                            activeCardIndex: idx
-                          }
-                        }
-                      }))
-                      setWorkflowErrors({})
-                    }}
-                  >
-                    <div className="workflow-card-header">
-                      <span className={`workflow-card-status${card?.completed ? ' completed' : ''}`}>
-                        {card?.completed ? card?.title || `病灶 ${idx + 1}` : '未标注'}
-                      </span>
-                      <label className="workflow-card-suspicious">
-                        <Checkbox
-                          checked={!!card?.suspicious}
-                          onChange={(e) => {
-                            const stepId = String(activeStepDef.id)
-                            updateWorkflowState((prev) => {
-                              const step = prev?.steps?.[stepId]
-                              if (!step) return prev
-                              const cards = Array.isArray(step.cards) ? [...step.cards] : []
-                              if (!cards[idx]) return prev
-                              cards[idx] = { ...cards[idx], suspicious: !!e?.target?.checked }
-                              return {
-                                ...prev,
-                                steps: {
-                                  ...prev.steps,
-                                  [stepId]: {
-                                    ...step,
-                                    cards
-                                  }
-                                }
-                              }
-                            })
-                          }}
-                        >
-                          可疑
-                        </Checkbox>
-                      </label>
-                    </div>
-                    {idx === Number(activeStepState?.activeCardIndex || 0) && (
-                      <>
-                        {(workflowSchema.mainCategoryOptions || []).length > 0 && (
-                          <div className="workflow-main-category">
-                            <div className="custom-field-label">
-                              主分类项
-                              <span className="custom-field-required">*</span>
-                            </div>
-                            <Radio.Group
-                              value={String(activeCard?.mainCategory || '')}
-                              onChange={(next) => updateActiveCardMainCategory(String(next || ''))}
-                            >
-                              {(workflowSchema.mainCategoryOptions || []).map((opt) => (
-                                <Radio key={`mc-${opt.value}`} value={String(opt.value)}>
-                                  {opt.label}
-                                </Radio>
-                              ))}
-                            </Radio.Group>
-                            {workflowErrors.mainCategory ? <div className="workflow-error">{workflowErrors.mainCategory}</div> : null}
-                          </div>
-                        )}
-                        <div className="workflow-section-title">{activeStepDef?.title || '标注项'}</div>
-                        {(activeStepDef?.fields || []).map((field) => (
-                          <div key={`${card.id}-${field.id}`} className="custom-field-label-wrap">
-                            <div className="custom-field-label">
-                              {field.label}
-                              {field.required ? <span className="custom-field-required">*</span> : null}
-                            </div>
-                            {renderWorkflowFieldInput(field)}
-                            {workflowErrors[field.id] ? <div className="workflow-error">{workflowErrors[field.id]}</div> : null}
-                          </div>
-                        ))}
-                      </>
-                    )}
+                <div className="custom-field-item">
+                  <div className="workflow-card-header">
+                    <span className={`workflow-card-status${activeStepState?.completed ? ' completed' : ''}`}>
+                      {activeStepState?.completed ? '已绑定当前标注' : '未绑定标注'}
+                    </span>
                   </div>
-                ))}
+                  {(workflowSchema.mainCategoryOptions || []).length > 0 && (
+                    <div className="workflow-main-category">
+                      <div className="custom-field-label">
+                        主分类项
+                        <span className="custom-field-required">*</span>
+                      </div>
+                      <Radio.Group
+                        value={String(activeCard?.mainCategory || '')}
+                        onChange={(next) => updateActiveCardMainCategory(String(next || ''))}
+                      >
+                        {(workflowSchema.mainCategoryOptions || []).map((opt) => (
+                          <Radio key={`mc-${opt.value}`} value={String(opt.value)}>
+                            {opt.label}
+                          </Radio>
+                        ))}
+                      </Radio.Group>
+                      {workflowErrors.mainCategory ? <div className="workflow-error">{workflowErrors.mainCategory}</div> : null}
+                    </div>
+                  )}
+                  <div className="workflow-section-title">{activeStepDef?.title || '标注项'}</div>
+                  {(activeStepDef?.fields || []).map((field) => (
+                    <div key={`${activeStepDef.id}-${field.id}`} className="custom-field-label-wrap">
+                      <div className="custom-field-label">
+                        {field.label}
+                        {field.required ? <span className="custom-field-required">*</span> : null}
+                      </div>
+                      {renderWorkflowFieldInput(field)}
+                      {workflowErrors[field.id] ? <div className="workflow-error">{workflowErrors[field.id]}</div> : null}
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
             {activeStepDef ? (
               <div className="workflow-actions">
-                <Button size="small" onClick={() => switchCard(-1)}>
-                  上一个
+                <Button size="small" onClick={() => switchDisplayImage(-1)}>
+                  上一张
                 </Button>
-                <Button size="small" onClick={() => switchCard(1)}>
-                  下一个
+                <Button size="small" onClick={() => switchDisplayImage(1)}>
+                  下一张
                 </Button>
                 <Button
                   size="small"
@@ -4427,15 +4360,14 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
                 >
                   上一步
                 </Button>
-                {Number(workflowState?.stepIndex || 0) < (workflowSchema.steps.length - 1) ? (
-                  <Button size="small" type="primary" onClick={() => gotoWorkflowStep(1)}>
-                    下一步
-                  </Button>
-                ) : (
-                  <Button size="small" type="primary" onClick={submitWorkflowAndSave}>
-                    提交
-                  </Button>
-                )}
+                <Button
+                  size="small"
+                  type="primary"
+                  onClick={() => gotoWorkflowStep(1)}
+                  disabled={Number(workflowState?.stepIndex || 0) >= (workflowSchema.steps.length - 1)}
+                >
+                  下一步
+                </Button>
               </div>
             ) : null}
           </div>
