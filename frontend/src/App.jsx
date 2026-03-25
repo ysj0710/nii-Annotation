@@ -1254,6 +1254,38 @@ const normalizeWorkflowField = (item, index = 0) => {
   }
 }
 
+const parseMaybeArray = (value) => {
+  if (Array.isArray(value)) return value
+  if (typeof value !== 'string') return []
+  const trimmed = value.trim()
+  if (!trimmed) return []
+  try {
+    const parsed = JSON.parse(trimmed)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+const splitMixedFieldsByPrefix = (fields = []) => {
+  const lesion = []
+  const patient = []
+  const rest = []
+  for (const field of fields) {
+    const rawId = String(field?.id || field?.key || '').toLowerCase()
+    if (rawId.startsWith('lesion_') || rawId.startsWith('lesion-')) {
+      lesion.push(field)
+      continue
+    }
+    if (rawId.startsWith('patient_') || rawId.startsWith('patient-')) {
+      patient.push(field)
+      continue
+    }
+    rest.push(field)
+  }
+  return { lesion, patient, rest }
+}
+
 const parseCustomWorkflowSchema = (raw) => {
   const parsed = parseJsonSafe(raw, raw)
   if (!parsed) return { mainCategoryOptions: [], steps: [] }
@@ -1266,21 +1298,41 @@ const parseCustomWorkflowSchema = (raw) => {
       : []
 
   if (Array.isArray(parsed)) {
+    const normalizedFields = parsed.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
+    const { lesion, patient, rest } = splitMixedFieldsByPrefix(normalizedFields)
+    if (lesion.length > 0 || patient.length > 0) {
+      return {
+        mainCategoryOptions: [],
+        steps: [
+          lesion.length > 0
+            ? { id: 'lesion', title: '病灶标注项', scope: 'lesion', fields: lesion }
+            : null,
+          patient.length > 0
+            ? { id: 'patient', title: '患者信息', scope: 'patient', fields: patient }
+            : null,
+          rest.length > 0
+            ? { id: 'step_1', title: '标注项', scope: 'lesion', fields: rest }
+            : null
+        ].filter(Boolean)
+      }
+    }
     return {
       mainCategoryOptions: [],
-      steps: [
-        {
-          id: 'step_1',
-          title: '标注项',
-          scope: 'lesion',
-          fields: parsed.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
-        }
-      ]
+      steps: normalizedFields.length > 0
+        ? [
+            {
+              id: 'step_1',
+              title: '标注项',
+              scope: 'lesion',
+              fields: normalizedFields
+            }
+          ]
+        : []
     }
   }
 
   if (Array.isArray(parsed?.steps)) {
-    const steps = parsed.steps
+    let steps = parsed.steps
       .map((step, stepIndex) => {
         const fields = (Array.isArray(step?.fields) ? step.fields : [])
           .map((f, i) => normalizeWorkflowField(f, i))
@@ -1294,23 +1346,38 @@ const parseCustomWorkflowSchema = (raw) => {
         }
       })
       .filter(Boolean)
+    if (steps.length === 1) {
+      const only = steps[0]
+      const { lesion, patient, rest } = splitMixedFieldsByPrefix(Array.isArray(only?.fields) ? only.fields : [])
+      if (lesion.length > 0 || patient.length > 0) {
+        steps = [
+          lesion.length > 0
+            ? { id: 'lesion', title: '病灶标注项', scope: 'lesion', fields: lesion }
+            : null,
+          patient.length > 0
+            ? { id: 'patient', title: '患者信息', scope: 'patient', fields: patient }
+            : null,
+          rest.length > 0
+            ? { ...only, fields: rest }
+            : null
+        ].filter(Boolean)
+      }
+    }
     return {
-      mainCategoryOptions: makeMainCategoryOptions(parsed?.mainCategory),
+      mainCategoryOptions: makeMainCategoryOptions(Array.isArray(parsed?.mainCategory) ? parsed.mainCategory : parseMaybeArray(parsed?.mainCategory)),
       steps
     }
   }
 
-  const lesionSigns = Array.isArray(parsed?.lesionSigns)
-    ? parsed.lesionSigns.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
-    : []
-  const patientInfo = Array.isArray(parsed?.patientInfo)
-    ? parsed.patientInfo.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
-    : []
+  const lesionSignsRaw = Array.isArray(parsed?.lesionSigns) ? parsed.lesionSigns : parseMaybeArray(parsed?.lesionSigns)
+  const patientInfoRaw = Array.isArray(parsed?.patientInfo) ? parsed.patientInfo : parseMaybeArray(parsed?.patientInfo)
+  const lesionSigns = lesionSignsRaw.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
+  const patientInfo = patientInfoRaw.map((f, i) => normalizeWorkflowField(f, i)).filter(Boolean)
   const steps = []
   if (lesionSigns.length > 0) {
     steps.push({
       id: 'lesion',
-      title: '标注项',
+      title: '病灶标注项',
       scope: 'lesion',
       fields: lesionSigns
     })
@@ -1324,7 +1391,7 @@ const parseCustomWorkflowSchema = (raw) => {
     })
   }
   return {
-    mainCategoryOptions: makeMainCategoryOptions(parsed?.mainCategory),
+    mainCategoryOptions: makeMainCategoryOptions(Array.isArray(parsed?.mainCategory) ? parsed.mainCategory : parseMaybeArray(parsed?.mainCategory)),
     steps
   }
 }
