@@ -1168,6 +1168,21 @@ const parseApiPayload = (json) => {
   return json
 }
 
+const getRawQueryParam = (name) => {
+  if (typeof window === 'undefined') return ''
+  const key = String(name || '').trim()
+  if (!key) return ''
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(`[?&]${escaped}=([^&#]*)`)
+  const match = window.location.search.match(re)
+  if (!match?.[1]) return ''
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return match[1]
+  }
+}
+
 const assertPlatformResponseSuccess = (json, fallbackMessage = '平台返回失败') => {
   if (!json || typeof json !== 'object') return
   const success = json.success
@@ -1449,10 +1464,18 @@ export default function App() {
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {}
     const p = new URLSearchParams(window.location.search)
+    const rawTokenFromQuery = getRawQueryParam('token')
+    const fallbackToken =
+      rawTokenFromQuery ||
+      p.get('token') ||
+      globalCtx.token ||
+      localStorage.getItem('token') ||
+      sessionStorage.getItem('token') ||
+      ''
     return {
       imageId: p.get('imageId') || globalCtx.imageId || '',
       imageUrl: p.get('imageUrl') || globalCtx.imageUrl || '',
-      token: p.get('token') || globalCtx.token || '',
+      token: String(fallbackToken || '').trim(),
       platformOrigin: p.get('platformOrigin') || globalCtx.platformOrigin || '',
       annotationBackendOrigin:
         p.get('annotationBackendOrigin') ||
@@ -1472,6 +1495,31 @@ export default function App() {
     const ctxOrigin = String(externalCtx.annotationBackendOrigin || '').trim().replace(/\/+$/, '')
     return ctxOrigin || envOrigin || 'http://192.168.110.88:8010'
   }, [externalCtx.annotationBackendOrigin])
+
+  const fetchWithAuthFallback = async (url, init = {}, token = '') => {
+    const normalizedInit = { ...(init || {}) }
+    const firstHeaders = {
+      ...(normalizedInit.headers || {}),
+      ...buildAuthHeaders(token)
+    }
+    const firstResp = await fetch(url, {
+      ...normalizedInit,
+      headers: firstHeaders
+    })
+    if (firstResp.status !== 401) return firstResp
+    const raw = String(token || '').trim()
+    if (!raw) return firstResp
+    const plain = raw.replace(/^Bearer\s+/i, '').trim()
+    if (!plain) return firstResp
+    const retryHeaders = {
+      ...(normalizedInit.headers || {}),
+      Authorization: plain
+    }
+    return fetch(url, {
+      ...normalizedInit,
+      headers: retryHeaders
+    })
+  }
 
   const activeLabel = useMemo(
     () => labels.find((label) => label.id === activeLabelId) || labels[0],
