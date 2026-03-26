@@ -780,6 +780,36 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return true;
   };
 
+  const syncSharedBitmapBindings = () => {
+    const bitmap = getSharedBitmap();
+    if (!bitmap) return false;
+    let rebound = false;
+    for (const key of getVisiblePaneKeys()) {
+      const nv = getPaneNv(key);
+      if (!nv) continue;
+      if (!nv.drawBitmap || nv.drawBitmap.length !== bitmap.length) {
+        nv.createEmptyDrawing?.();
+      }
+      if (nv.drawBitmap !== bitmap) {
+        nv.drawBitmap = bitmap;
+        rebound = true;
+      }
+    }
+    const primary = getPrimaryNv();
+    if (primary && primary.drawBitmap !== bitmap) {
+      if (!primary.drawBitmap || primary.drawBitmap.length !== bitmap.length) {
+        primary.createEmptyDrawing?.();
+      }
+      primary.drawBitmap = bitmap;
+      rebound = true;
+    }
+    if (sharedDrawBitmapRef.current !== bitmap) {
+      sharedDrawBitmapRef.current = bitmap;
+      rebound = true;
+    }
+    return rebound;
+  };
+
   const ensureBaseSnapshot = (bitmap) => {
     const history = historyRef.current;
     if (history.stack.length > 0 || !bitmap) return;
@@ -1524,6 +1554,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     nv.resizeListener?.();
     syncMarkerCanvasSize(paneKey);
     applyPaneBounds(paneKey);
+    const rebound = syncSharedBitmapBindings();
+    if (rebound && hasRefreshableDrawingBitmap(nv)) {
+      nv.refreshDrawing?.(false);
+    }
     nv.drawScene?.();
     return true;
   };
@@ -1544,6 +1578,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       paneLayoutSyncRafRef.current = requestAnimationFrame(() => {
         paneLayoutSyncRafRef.current = null;
         for (const key of targetKeys) syncPaneLayoutNow(key);
+        const rebound = syncSharedBitmapBindings();
+        if (rebound) {
+          for (const key of targetKeys) redrawPaneDrawing(key);
+        }
         if (redrawMarkers) drawStrokeMarkers(true);
       });
     });

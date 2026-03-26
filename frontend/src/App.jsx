@@ -1642,9 +1642,11 @@ export default function App() {
     if (!url) return
     void (async () => {
       try {
-        const resp = await fetch(resolveRemoteUrl(url, externalCtx.platformOrigin), {
-          headers: buildAuthHeaders(externalCtx.token)
-        })
+        const resp = await fetchWithAuthFallback(
+          resolveRemoteUrl(url, externalCtx.platformOrigin),
+          {},
+          externalCtx.token
+        )
         if (!resp.ok) return
         const json = await resp.json().catch(() => null)
         const remoteSchema = parseCustomWorkflowSchema(json)
@@ -2140,9 +2142,7 @@ export default function App() {
             if (topicId) params.set('topicId', String(topicId))
             return `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?${params.toString()}`
           })()
-      const resp = await fetch(url, {
-        headers: buildAuthHeaders(externalCtx.token)
-      })
+      const resp = await fetchWithAuthFallback(url, {}, externalCtx.token)
       if (!resp.ok) throw new Error(`download failed: ${resp.status}`)
 
       const blob = await resp.blob()
@@ -2369,9 +2369,7 @@ export default function App() {
     if (externalCtx.topicId) params.set('topicId', String(externalCtx.topicId))
     params.set('batchId', String(externalCtx.batchId))
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/getBatchImageQueue?${params.toString()}`
-    const resp = await fetch(endpoint, {
-      headers: buildAuthHeaders(externalCtx.token)
-    })
+    const resp = await fetchWithAuthFallback(endpoint, {}, externalCtx.token)
     if (!resp.ok) throw new Error(`get batch queue failed: ${resp.status}`)
     const json = await resp.json().catch(() => null)
     const payload = parseApiPayload(json)
