@@ -756,6 +756,7 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   padding: 12px;
   color: #dbe7f5;
   gap: 10px;
+  --color-text-1: #f8fbff;
 }
 
 .custom-field-panel-head {
@@ -867,35 +868,6 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 
 .workflow-main-category {
   margin-bottom: 10px;
-}
-
-.custom-field-panel .arco-radio {
-  color: #e7f0ff;
-}
-
-.custom-field-panel .arco-radio-label {
-  color: #e7f0ff !important;
-}
-
-.workflow-main-category .arco-radio-group .arco-radio .arco-radio-text,
-.workflow-main-category .arco-radio .arco-radio-text,
-.workflow-main-category .arco-radio .arco-radio-label {
-  color: #e7f0ff !important;
-  opacity: 1 !important;
-}
-
-.custom-field-panel .arco-radio.arco-radio-checked .arco-radio-label {
-  color: #ffffff !important;
-}
-
-.workflow-main-category .arco-radio-group .arco-radio-checked .arco-radio-text,
-.workflow-main-category .arco-radio.arco-radio-checked .arco-radio-text,
-.workflow-main-category .arco-radio.arco-radio-checked .arco-radio-label {
-  color: #ffffff !important;
-}
-
-.custom-field-panel .arco-radio.arco-radio-disabled .arco-radio-label {
-  color: #9fb4cc !important;
 }
 
 .workflow-section-title {
