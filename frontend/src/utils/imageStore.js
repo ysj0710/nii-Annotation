@@ -2,6 +2,34 @@ const DB_NAME = 'nii-annotation'
 const DB_VERSION = 1
 const STORE_NAME = 'images'
 
+const toImageMeta = (record) => {
+  if (!record) return null
+  return {
+    id: record.id,
+    name: record.name,
+    displayName: record.displayName,
+    baseName: record.baseName,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    sourceFormat: record.sourceFormat,
+    sourceName: record.sourceName,
+    remoteImageId: record.remoteImageId,
+    remoteBatchId: record.remoteBatchId,
+    isMaskOnly: !!record.isMaskOnly,
+    maskAttached: record.maskAttached,
+    maskVersion: record.maskVersion,
+    thumbnail: record.thumbnail,
+    dicomStudyUID: record.dicomStudyUID,
+    dicomStudyID: record.dicomStudyID,
+    dicomSeriesUID: record.dicomSeriesUID,
+    dicomSeriesDescription: record.dicomSeriesDescription,
+    dicomSeriesNumber: record.dicomSeriesNumber,
+    dicomSeriesOrder: record.dicomSeriesOrder,
+    dicomAccessionNumber: record.dicomAccessionNumber,
+    hasMask: !!(record.sourceMask || record.mask)
+  }
+}
+
 const openDB = () =>
   new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION)
@@ -79,3 +107,47 @@ export const clearAllImages = async () =>
   withStore('readwrite', (store) => {
     store.clear()
   })
+
+export const getImageCount = async () =>
+  withStore('readonly', (store) =>
+    new Promise((resolve, reject) => {
+      const request = store.count()
+      request.onsuccess = () => resolve(Number(request.result || 0))
+      request.onerror = () => reject(request.error)
+    })
+  )
+
+export const getImageIdOrder = async () =>
+  withStore('readonly', (store) =>
+    new Promise((resolve, reject) => {
+      const ids = []
+      const index = store.index('createdAt')
+      const request = index.openKeyCursor()
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor) {
+          resolve(ids)
+          return
+        }
+        ids.push(cursor.primaryKey)
+        cursor.continue()
+      }
+      request.onerror = () => reject(request.error)
+    })
+  )
+
+export const getImageMetasByIds = async (ids) =>
+  withStore('readonly', (store) =>
+    Promise.all(
+      (Array.isArray(ids) ? ids : [])
+        .filter((id) => id != null)
+        .map(
+          (id) =>
+            new Promise((resolve, reject) => {
+              const request = store.get(id)
+              request.onsuccess = () => resolve(toImageMeta(request.result))
+              request.onerror = () => reject(request.error)
+            })
+        )
+    ).then((items) => items.filter(Boolean))
+  )

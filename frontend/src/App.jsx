@@ -15,7 +15,15 @@ import {
 import JSZip from 'jszip'
 import * as nifti from 'nifti-reader-js'
 import dicomParser from 'dicom-parser'
-import { getAllImages, getImageById, saveImages, updateImage, clearAllImages } from './utils/imageStore.js'
+import {
+  getAllImages,
+  getImageById,
+  saveImages,
+  updateImage,
+  clearAllImages,
+  getImageIdOrder,
+  getImageMetasByIds
+} from './utils/imageStore.js'
 import { resolveAutoWindowRange } from './utils/windowPresets.js'
 
 const Viewer = lazy(() => import('./components/Viewer.jsx'))
@@ -53,6 +61,7 @@ const RASTER_CONVERSION_VERSION = 8
 const PLATFORM_SYNC_CHANNEL = 'nii-annotation-sync'
 const PLATFORM_SYNC_STORAGE_KEY = 'nii-annotation:sync'
 const QUEUE_PREFETCH_RADIUS = 2
+const LOCAL_IMAGE_PAGE_SIZE = 20
 
 const detectBrowserRuntimeEnv = () => {
   const nav = typeof navigator !== 'undefined' ? navigator : {}
@@ -1109,7 +1118,7 @@ const toListItem = (record) => ({
   remoteImageId: record.remoteImageId ? String(record.remoteImageId) : '',
   remoteBatchId: record.remoteBatchId ? String(record.remoteBatchId) : '',
   isMaskOnly: !!record.isMaskOnly,
-  hasMask: !!(record.sourceMask || record.mask),
+  hasMask: typeof record.hasMask === 'boolean' ? record.hasMask : !!(record.sourceMask || record.mask),
   maskAttached: record.maskAttached !== false,
   maskVersion: Number(record.maskVersion || 0),
   thumbnail: record.thumbnail || ''
@@ -1432,6 +1441,7 @@ export default function App() {
   const [runtimeEnv, setRuntimeEnv] = useState(null)
 
   const [images, setImages] = useState([])
+  const [localImageIds, setLocalImageIds] = useState([])
   const [activeImage, setActiveImage] = useState(null)
   const [exportDirHandle, setExportDirHandle] = useState(null)
   const [batchQueue, setBatchQueue] = useState(null)
@@ -1554,9 +1564,9 @@ export default function App() {
     return activeDicomSeries.findIndex((item) => item.id === activeImage.id)
   }, [activeDicomSeries, activeImage?.id])
 
-  const activeImageIndex = useMemo(
-    () => images.findIndex((item) => item.id === activeImage?.id),
-    [images, activeImage?.id]
+  const activeLocalGlobalIndex = useMemo(
+    () => localImageIds.findIndex((id) => String(id) === String(activeImage?.id || '')),
+    [localImageIds, activeImage?.id]
   )
 
   const queueImages = useMemo(() => (Array.isArray(batchQueue?.images) ? batchQueue.images : []), [batchQueue?.images])
@@ -1606,10 +1616,6 @@ export default function App() {
       .filter((img) => !img.isMaskOnly && String(img.remoteBatchId || '') === currentBatchId)
       .map((img) => ({ ...img, isAnnotated: !!img.hasMask }))
   }, [isBatchMode, queueImages, images, currentBatchId])
-  const displayActiveIndex = useMemo(() => {
-    if (queueImages.length > 0) return activeQueueIndex
-    return displayImages.findIndex((item) => item.id === activeImage?.id)
-  }, [queueImages.length, activeQueueIndex, displayImages, activeImage?.id])
   const activeStepDef = useMemo(() => {
     const steps = Array.isArray(workflowSchema?.steps) ? workflowSchema.steps : []
     const idx = Math.max(0, Math.min(steps.length - 1, Number(workflowState?.stepIndex || 0)))
@@ -1985,111 +1991,52 @@ export default function App() {
     })
   }
 
+  const loadLocalImagePage = async (idOrder, startIndex = 0) => {
+    const total = idOrder.length
+    if (total <= 0) {
+      setImages([])
+      return { items: [], start: 0 }
+    }
+    const clampedStart = Math.max(
+      0,
+      Math.min(Math.floor(startIndex / LOCAL_IMAGE_PAGE_SIZE) * LOCAL_IMAGE_PAGE_SIZE, Math.max(0, total - LOCAL_IMAGE_PAGE_SIZE))
+    )
+    const pageIds = idOrder.slice(clampedStart, clampedStart + LOCAL_IMAGE_PAGE_SIZE)
+    const metas = await getImageMetasByIds(pageIds)
+    setImages(metas.map(toListItem))
+    return { items: metas, start: clampedStart }
+  }
+
   const refreshImageList = async () => {
-    const records = await getAllImages()
-    // 历史图片记录回迁为浏览器原始图显示，避免由错误转换导致全黑/纯色显示。
-    for (const record of records) {
-      if (!record.data) continue
-      const sourceName = record.sourceName || record.displayName || record.name
-      if (!isRasterOriginRecord(record)) continue
-      if ((record.rasterConversionVersion || 0) >= RASTER_CONVERSION_VERSION) continue
-      const originalSourceData = record.sourceData || record.data
-      const regenerated = await createThumbnail(originalSourceData, sourceName)
-      const shouldResetAutoMask =
-        !record.modifiedByUser && !record.sourceMask && !!record.mask && isImageFile(sourceName)
-      record.data = originalSourceData
-      record.name = sourceName
-      record.displayName = sourceName
-      record.isMaskOnly = false
-      record.spatialMeta = record.spatialMeta || null
-      record.rasterConversionVersion = RASTER_CONVERSION_VERSION
-      record.sourceName = sourceName
-      record.sourceData = originalSourceData
-      record.thumbnail = regenerated || record.thumbnail
-      record.thumbnailRenderVersion = THUMBNAIL_RENDER_VERSION
-      await updateImage(record.id, {
-        data: originalSourceData,
-        name: sourceName,
-        displayName: sourceName,
-        isMaskOnly: false,
-        spatialMeta: record.spatialMeta || null,
-        rasterConversionVersion: RASTER_CONVERSION_VERSION,
-        sourceName,
-        sourceData: originalSourceData,
-        thumbnail: record.thumbnail,
-        thumbnailRenderVersion: THUMBNAIL_RENDER_VERSION,
-        ...(shouldResetAutoMask
-          ? {
-              mask: null,
-              maskName: null,
-              maskAttached: false
-            }
-          : {}),
-        updatedAt: Date.now()
-      })
-    }
-    const sorted = records.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-    for (const record of sorted) cacheImageRecord(record)
-    setImages(sorted.map(toListItem))
-    if (!thumbnailRefreshInFlightRef.current) {
-      const candidates = sorted.filter((record) => {
-        if (!record?.id || record?.sourceFormat === 'dicom') return false
-        if ((record?.thumbnailRenderVersion || 0) >= THUMBNAIL_RENDER_VERSION) return false
-        const source = arrayBufferFrom(record?.sourceData || record?.data)
-        return !!(source && isNiftiBuffer(source))
-      })
-      if (candidates.length > 0) {
-        thumbnailRefreshInFlightRef.current = true
-        ;(async () => {
-          try {
-            for (const record of candidates) {
-              const source = arrayBufferFrom(record?.sourceData || record?.data)
-              if (!source) continue
-              const sourceName = record?.sourceName || record?.displayName || record?.name || 'image.nii.gz'
-              const thumbnail = await createThumbnail(source, sourceName, { isMask: !!record?.isMaskOnly })
-              if (!thumbnail) continue
-              await updateImage(record.id, {
-                thumbnail,
-                thumbnailRenderVersion: THUMBNAIL_RENDER_VERSION,
-                updatedAt: Date.now()
-              })
-              setImages((prev) => prev.map((img) => (img.id === record.id ? { ...img, thumbnail } : img)))
-              setActiveImage((prev) => (
-                prev && prev.id === record.id
-                  ? { ...prev, thumbnail, thumbnailRenderVersion: THUMBNAIL_RENDER_VERSION }
-                  : prev
-              ))
-            }
-          } catch (error) {
-            console.warn('后台刷新缩略图失败', error)
-          } finally {
-            thumbnailRefreshInFlightRef.current = false
-          }
-        })()
-      }
-    }
+    const idOrder = await getImageIdOrder()
+    setLocalImageIds(idOrder.map((id) => String(id)))
     const activeId = String(activeImageIdRef.current || '')
+    const activeOrderIndex = activeId ? idOrder.findIndex((id) => String(id) === activeId) : -1
+    const desiredIndex = activeOrderIndex >= 0 ? activeOrderIndex : 0
+    const { items } = await loadLocalImagePage(idOrder, desiredIndex)
+    for (const record of items) cacheImageRecord(record)
+
     if (activeId) {
-      const matched = sorted.find((item) => String(item.id) === activeId)
-      if (matched) {
+      const stillExists = activeOrderIndex >= 0
+      if (!stillExists) return
+      const fresh = await getImageById(activeId)
+      if (fresh) {
+        cacheImageRecord(fresh)
         setActiveImage((prev) => {
           if (String(prev?.id || '') !== activeId) return prev
           return {
-            ...matched,
-            maskVersion: Math.max(Number(prev?.maskVersion || 0), resolveMaskVersion(matched))
+            ...fresh,
+            maskVersion: Math.max(Number(prev?.maskVersion || 0), resolveMaskVersion(fresh))
           }
         })
-        return
       }
-      // 仍有活动影像上下文时，避免后台预取刷新把当前视口重置到其它影像。
       return
     }
-    if (sorted.length > 0) {
-      const scoped = currentBatchId
-        ? sorted.filter((item) => String(item.remoteBatchId || '') === String(currentBatchId))
-        : sorted
-      const first = scoped[0]
+
+    if (idOrder.length > 0) {
+      const first = await getImageById(idOrder[0])
       if (!first) return
+      cacheImageRecord(first)
       setActiveImage({
         ...first,
         maskVersion: resolveMaskVersion(first)
@@ -2386,6 +2333,7 @@ export default function App() {
       if (externalCtx.batchId) {
         await clearAllImages()
         setImages([])
+        setLocalImageIds([])
         setActiveImage(null)
       }
       if (!hasRemoteBootstrap) {
@@ -2848,14 +2796,14 @@ export default function App() {
   const saveCurrentAnnotation = async () => {
     if (!activeImage?.id) {
       Message.warning('当前没有可保存的影像')
-      return
+      return false
     }
     let workflowSnapshot = null
     if (activeStepDef) {
       const ok = validateCurrentCard()
       if (!ok) {
         Message.warning('请先完成当前分类项必填信息')
-        return
+        return false
       }
       workflowSnapshot = syncWorkflowCardsByAnnotations({ persist: true, returnNextState: true })
     }
@@ -2865,14 +2813,14 @@ export default function App() {
       const annotationCount = Number(viewerRef.current?.getAnnotationCount?.() || 0)
       if (annotationCount <= 0) {
         Message.info('当前无新增修改，未执行保存')
-        return
+        return true
       }
       hasUnsavedChangesRef.current = true
     }
     const saved = await enqueuePersistActiveDrawing()
     if (!saved) {
       Message.warning('保存失败，请重试')
-      return
+      return false
     }
     try {
       const synced = externalCtx.batchId
@@ -2896,6 +2844,7 @@ export default function App() {
           })
         }
         hasUnsavedChangesRef.current = false
+        localPersistDirtyRef.current = false
         notifyPlatformSaveSuccess({
           imageId: String(activeImage?.remoteImageId || externalCtx.imageId || activeImage?.id || ''),
           batchId: String(externalCtx.batchId || ''),
@@ -2905,11 +2854,16 @@ export default function App() {
         Message.success(externalCtx.batchId ? '批次标注已保存并同步科研平台' : '当前标注已保存并同步科研平台')
       } else {
         hasUnsavedChangesRef.current = false
+        localPersistDirtyRef.current = false
         Message.success('当前标注已保存')
       }
+      return true
     } catch (error) {
       console.error(error)
       Message.error('标注已本地保存，但科研平台同步失败')
+      hasUnsavedChangesRef.current = false
+      localPersistDirtyRef.current = false
+      return true
     }
   }
 
@@ -2920,7 +2874,6 @@ export default function App() {
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'annotate') {
       hasUnsavedChangesRef.current = true
       localPersistDirtyRef.current = true
-      scheduleAutoPersist(1200)
     }
     if (reason === 'draw' || reason === 'undo' || reason === 'redo' || reason === 'clear' || reason === 'load' || reason === 'curve-complete') {
       scheduleLabelStatsRefresh()
@@ -2940,32 +2893,42 @@ export default function App() {
 
   const selectImage = async (id) => {
     if (activeImage?.id === id) return
-    // 取消待执行的自动保存，防止切换后的旧计时器用错误的影像数据写入 DB
+    if (hasUnsavedChangesRef.current || localPersistDirtyRef.current) {
+      const allowSwitch = await new Promise((resolve) => {
+        Modal.confirm({
+          title: '存在未保存标注',
+          content: '当前影像有未保存修改。请先点击“保存”，再切换到下一张。',
+          okText: '去保存',
+          cancelText: '取消切换',
+          onOk: async () => {
+            const saved = await saveCurrentAnnotation()
+            resolve(!!saved)
+          },
+          onCancel: () => resolve(false),
+          unmountOnExit: true
+        })
+      })
+      if (!allowSwitch) return
+    }
+
     clearAutoSaveSchedule()
-    const currentRecord = activeImage
-    const nextRecordPromise = getImageRecordFast(id)
-    let pendingPayload = null
-    if (localPersistDirtyRef.current && currentRecord?.id) {
-      pendingPayload = await captureViewerPersistPayload(currentRecord, 'switch')
-      localPersistDirtyRef.current = false
-      const optimisticRecord = buildOptimisticPersistRecord(currentRecord, pendingPayload)
-      if (optimisticRecord) {
-        cacheImageRecord(optimisticRecord)
-        setImages((prev) =>
-          prev.map((img) =>
-            img.id === optimisticRecord.id
-              ? {
-                  ...img,
-                  hasMask: !!(optimisticRecord.mask || optimisticRecord.sourceMask),
-                  maskAttached: optimisticRecord.maskAttached !== false,
-                  maskVersion: resolveMaskVersion(optimisticRecord)
-                }
-              : img
-          )
-        )
+    let idOrder = localImageIds
+    if (!isBatchMode && queueImages.length === 0) {
+      if (!idOrder.length || !idOrder.includes(String(id))) {
+        const refreshedIds = await getImageIdOrder()
+        idOrder = refreshedIds.map((item) => String(item))
+        setLocalImageIds(idOrder)
+      }
+      const targetIndex = idOrder.findIndex((item) => String(item) === String(id))
+      if (targetIndex >= 0) {
+        const pageStart = Math.floor(targetIndex / LOCAL_IMAGE_PAGE_SIZE) * LOCAL_IMAGE_PAGE_SIZE
+        const pageIds = idOrder.slice(pageStart, pageStart + LOCAL_IMAGE_PAGE_SIZE)
+        const metas = await getImageMetasByIds(pageIds)
+        setImages(metas.map(toListItem))
       }
     }
-    const record = await nextRecordPromise
+
+    const record = await getImageRecordFast(id)
     if (!record) return
     cacheImageRecord(record)
     activeImageIdRef.current = String(record.id)
@@ -2973,9 +2936,6 @@ export default function App() {
       ...record,
       maskVersion: resolveMaskVersion(record)
     })
-    if (pendingPayload) {
-      void enqueuePersistPayload(pendingPayload)
-    }
   }
 
   const switchQueueImage = async (direction = 1) => {
@@ -3018,27 +2978,26 @@ export default function App() {
       await switchQueueImage(direction)
       return
     }
-    if (!displayImages.length) return
-    const currentIndex = displayImages.findIndex((item) => item.id === activeImage?.id)
-    const baseIndex = currentIndex >= 0 ? currentIndex : 0
-    const targetIndex = (baseIndex + direction + displayImages.length) % displayImages.length
-    const target = displayImages[targetIndex]
-    if (!target || !target.id || target._placeholder || String(target.id).startsWith('remote-')) return
-    await selectImage(target.id)
+    if (!localImageIds.length) return
+    const baseIndex = activeLocalGlobalIndex >= 0 ? activeLocalGlobalIndex : 0
+    const targetIndex = (baseIndex + direction + localImageIds.length) % localImageIds.length
+    const targetId = localImageIds[targetIndex]
+    if (!targetId) return
+    await selectImage(targetId)
   }
 
   useEffect(() => {
     if (isBatchMode || queueImages.length > 0) return
-    if (!activeImage?.id || displayImages.length <= 1) return
-    const currentIndex = displayImages.findIndex((item) => item.id === activeImage.id)
+    if (!activeImage?.id || localImageIds.length <= 1) return
+    const currentIndex = localImageIds.findIndex((id) => String(id) === String(activeImage.id))
     if (currentIndex < 0) return
-    const prev = displayImages[(currentIndex - 1 + displayImages.length) % displayImages.length]
-    const next = displayImages[(currentIndex + 1) % displayImages.length]
-    for (const item of [prev, next]) {
-      if (!item?.id || item._placeholder || String(item.id).startsWith('remote-')) continue
-      prefetchImageRecord(item.id)
+    const prev = localImageIds[(currentIndex - 1 + localImageIds.length) % localImageIds.length]
+    const next = localImageIds[(currentIndex + 1) % localImageIds.length]
+    for (const id of [prev, next]) {
+      if (!id) continue
+      prefetchImageRecord(id)
     }
-  }, [activeImage?.id, displayImages, isBatchMode, queueImages.length])
+  }, [activeImage?.id, localImageIds, isBatchMode, queueImages.length])
 
   useEffect(() => {
     const host = viewerHostRef.current
@@ -3342,7 +3301,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
 
       if (newRecords.length > 0) {
         await saveImages(newRecords)
-        setImages((prev) => [...prev, ...newRecords.map(toListItem)])
+        await refreshImageList()
         const first = newRecords[0]
         activateImportedRecordIfAllowed(first, { dicom: true })
       }
@@ -3398,7 +3357,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
     await saveImages([record])
     hashSet.add(hash)
 
-    setImages((prev) => [...prev, toListItem(record)])
+    await refreshImageList()
     activateImportedRecordIfAllowed(record)
   }
 
@@ -3552,7 +3511,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
 
     if (newRecords.length > 0) {
       await saveImages(newRecords)
-      setImages((prev) => [...prev, ...newRecords.map(toListItem)])
+      await refreshImageList()
       const first = newRecords[0]
       activateImportedRecordIfAllowed(first)
     }
@@ -3722,7 +3681,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
 
     if (newRecords.length > 0) {
       await saveImages(newRecords)
-      setImages((prev) => [...prev, ...newRecords.map(toListItem)])
+      await refreshImageList()
       const first = newRecords[0]
       activateImportedRecordIfAllowed(first)
     }
@@ -4394,24 +4353,24 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
       <Header className="topbar">
         <div className="brand">影像标注平台</div>
         <Space className="topbar-actions">
-          {(isBatchMode || queueImages.length > 0 || displayImages.length > 1) && (
+          {(isBatchMode || queueImages.length > 0 || localImageIds.length > 1) && (
             <>
               <Button
                 onClick={() => switchDisplayImage(-1)}
-                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : displayImages.length <= 1}
+                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : localImageIds.length <= 1}
               >
                 上一张
               </Button>
               <Button
                 onClick={() => switchDisplayImage(1)}
-                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : displayImages.length <= 1}
+                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : localImageIds.length <= 1}
               >
                 下一张
               </Button>
               <span style={{ color: '#cbd5e1', fontSize: 12, minWidth: 84, textAlign: 'center' }}>
                 {isBatchMode || queueImages.length > 0
                   ? (queueImages.length ? `${Math.max(1, activeQueueIndex + 1)}/${queueImages.length}` : '批次 0/0')
-                  : `${Math.max(1, displayActiveIndex + 1)}/${displayImages.length}`}
+                  : `${Math.max(1, activeLocalGlobalIndex + 1)}/${localImageIds.length || 0}`}
               </span>
             </>
           )}
@@ -4428,7 +4387,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
             <div className="tool-sidebar-head">
               <div className="tool-sidebar-title">标注工具</div>
               <div className="tool-sidebar-subtitle">
-                {displayActiveIndex >= 0 ? `${displayActiveIndex + 1}` : 0} / {displayImages.length || 0}
+                {activeLocalGlobalIndex >= 0 ? `${activeLocalGlobalIndex + 1}` : 0} / {localImageIds.length || 0}
               </div>
             </div>
             <div className="tool-sidebar-menu">{annotationToolsMenuContent}</div>
