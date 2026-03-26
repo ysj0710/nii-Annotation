@@ -1690,6 +1690,11 @@ const makeEmptyCard = (stepId, index = 0) => ({
   values: {},
 });
 
+const formatLesionNameBySeq = (seq = 0) => {
+  const n = Math.max(0, Number(seq || 0));
+  return `病灶${String.fromCharCode(65 + (n % 26))}${n >= 26 ? Math.floor(n / 26) : ""}`;
+};
+
 export default function App() {
   const [labels] = useState(FIXED_LABELS);
   const [activeLabelId, setActiveLabelId] = useState(1);
@@ -1723,6 +1728,7 @@ export default function App() {
   const processedFilesRef = useRef(new Set());
   const imageRecordCacheRef = useRef(new Map());
   const imageRecordPrefetchingRef = useRef(new Set());
+  const lesionNameRegistryRef = useRef(new Map());
   const saveTimerRef = useRef(null);
   const saveIdleRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve(false));
@@ -1967,24 +1973,45 @@ export default function App() {
     return cards[index] || null;
   }, [activeStepState]);
   const lesionItems = useMemo(() => {
+    const imageKey = String(activeImage?.id || "");
+    if (!imageKey) return [];
+    if (!lesionNameRegistryRef.current.has(imageKey)) {
+      lesionNameRegistryRef.current.set(imageKey, {
+        nextSeq: 0,
+        byLesionId: new Map(),
+      });
+    }
+    const naming = lesionNameRegistryRef.current.get(imageKey);
     const lesions = Array.isArray(viewerRef.current?.exportLesionItems?.())
       ? viewerRef.current.exportLesionItems()
       : Array.isArray(viewerRef.current?.exportAnnotations?.())
         ? viewerRef.current.exportAnnotations()
         : [];
-    return lesions.map((annotation, idx) => {
+    const nextItems = lesions.map((annotation) => {
       const coord = resolveAnnotationAnchorForCard(annotation);
-      const lesionId = String(annotation?.lesionId || `lesion-${idx + 1}`);
+      const lesionId = String(annotation?.lesionId || "");
+      if (lesionId && !naming.byLesionId.has(lesionId)) {
+        const seq = Number(naming.nextSeq || 0);
+        naming.byLesionId.set(lesionId, formatLesionNameBySeq(seq));
+        naming.nextSeq = seq + 1;
+      }
       return {
-        key: lesionId,
+        key: lesionId || `lesion-${Math.random().toString(16).slice(2)}`,
         lesionId,
-        name: `病灶${String.fromCharCode(65 + (idx % 26))}${idx >= 26 ? Math.floor(idx / 26) : ""}`,
+        name: lesionId
+          ? naming.byLesionId.get(lesionId) || "病灶"
+          : "病灶",
         labelValue: Number(annotation?.labelValue || 0),
         labelName: String(annotation?.labelName || ""),
         voxelCount: Number(annotation?.voxelCount || 0),
         coord,
       };
     });
+    const liveIds = new Set(nextItems.map((item) => item.lesionId).filter(Boolean));
+    for (const key of naming.byLesionId.keys()) {
+      if (!liveIds.has(key)) naming.byLesionId.delete(key);
+    }
+    return nextItems;
   }, [activeImage?.id, activeImage?.maskVersion, workflowState, labelStats]);
   useEffect(() => {
     if (!selectedLesionId) return;

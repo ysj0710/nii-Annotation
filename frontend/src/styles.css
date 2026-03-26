@@ -869,6 +869,22 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   margin-bottom: 10px;
 }
 
+.custom-field-panel .arco-radio {
+  color: #e7f0ff;
+}
+
+.custom-field-panel .arco-radio-label {
+  color: #e7f0ff !important;
+}
+
+.custom-field-panel .arco-radio.arco-radio-checked .arco-radio-label {
+  color: #ffffff !important;
+}
+
+.custom-field-panel .arco-radio.arco-radio-disabled .arco-radio-label {
+  color: #9fb4cc !important;
+}
+
 .workflow-section-title {
   color: #d7e4f5;
   font-weight: 600;

@@ -496,6 +496,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const refreshPerfRef = useRef({ emaMs: 0, samples: 0 });
   const labelAnalysisRef = useRef({ dirty: true, stats: {}, centroids: {} });
   const lesionAnalysisRef = useRef({ dirty: true, items: [] });
+  const lesionTrackingRef = useRef({
+    imageKey: "",
+    nextId: 1,
+    prevItems: [],
+  });
   const [panesReady, setPanesReady] = useState(false);
   const [focusedPlane, setFocusedPlane] = useState(null);
   const [canFocusPlanes, setCanFocusPlanes] = useState(false);
@@ -740,6 +745,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
   const getLesionAnalysis = () => {
     if (!lesionAnalysisRef.current.dirty) return lesionAnalysisRef.current;
+    const imageKey = String(getImageKey() || "");
+    if (lesionTrackingRef.current.imageKey !== imageKey) {
+      lesionTrackingRef.current = {
+        imageKey,
+        nextId: 1,
+        prevItems: [],
+      };
+    }
     const bitmap = getSharedBitmap();
     const dims = getPrimaryNv()?.back?.dims;
     const nx = Number(dims?.[1] || 0);
@@ -830,20 +843,51 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       });
     }
 
-    items.sort((a, b) => {
-      if (a.labelValue !== b.labelValue) return a.labelValue - b.labelValue;
-      const ac = a.centroid || [0, 0, 0];
-      const bc = b.centroid || [0, 0, 0];
-      if (ac[2] !== bc[2]) return ac[2] - bc[2];
-      if (ac[1] !== bc[1]) return ac[1] - bc[1];
-      return ac[0] - bc[0];
-    });
-    const labelSerial = {};
+    const prevItems = Array.isArray(lesionTrackingRef.current.prevItems)
+      ? lesionTrackingRef.current.prevItems
+      : [];
+    const matchedPrevIds = new Set();
     for (const item of items) {
-      const lv = Number(item.labelValue || 0);
-      labelSerial[lv] = (labelSerial[lv] || 0) + 1;
-      item.lesionId = `lesion-${lv}-${labelSerial[lv]}`;
+      const currentCentroid = Array.isArray(item.centroid) ? item.centroid : [0, 0, 0];
+      let bestMatch = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      for (const prev of prevItems) {
+        if (matchedPrevIds.has(prev.id)) continue;
+        if (Number(prev.labelValue || 0) !== Number(item.labelValue || 0)) continue;
+        const prevCentroid = Array.isArray(prev.centroid) ? prev.centroid : [0, 0, 0];
+        const dx = Number(currentCentroid[0] || 0) - Number(prevCentroid[0] || 0);
+        const dy = Number(currentCentroid[1] || 0) - Number(prevCentroid[1] || 0);
+        const dz = Number(currentCentroid[2] || 0) - Number(prevCentroid[2] || 0);
+        const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const allowDistance = Math.max(
+          10,
+          Math.min(90, Math.sqrt(Math.max(1, Number(item.voxelCount || 1))) * 1.4),
+        );
+        if (distance > allowDistance) continue;
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestMatch = prev;
+        }
+      }
+      if (bestMatch?.id) {
+        item.lesionId = String(bestMatch.id);
+        item._sortId = Number(bestMatch.sortId || Number.POSITIVE_INFINITY);
+        matchedPrevIds.add(bestMatch.id);
+      } else {
+        const nextId = Number(lesionTrackingRef.current.nextId || 1);
+        item.lesionId = `lesion-${nextId}`;
+        item._sortId = nextId;
+        lesionTrackingRef.current.nextId = nextId + 1;
+      }
     }
+    items.sort((a, b) => Number(a._sortId || 0) - Number(b._sortId || 0));
+    lesionTrackingRef.current.prevItems = items.map((item) => ({
+      id: String(item.lesionId || ""),
+      sortId: Number(item._sortId || 0),
+      labelValue: Number(item.labelValue || 0),
+      centroid: Array.isArray(item.centroid) ? [...item.centroid] : [0, 0, 0],
+    }));
+    for (const item of items) delete item._sortId;
     lesionAnalysisRef.current = { dirty: false, items };
     return lesionAnalysisRef.current;
   };
@@ -2820,9 +2864,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   useEffect(() => {
     if (!panesReady || !image?.id || !image?.data) return;
     let cancelled = false;
-    imageKeyRef.current = String(image.id);
+    const nextImageKey = String(image.id);
+    imageKeyRef.current = nextImageKey;
+    lesionTrackingRef.current = {
+      imageKey: nextImageKey,
+      nextId: 1,
+      prevItems: [],
+    };
     annotationsByImageRef.current.set(
-      String(image.id),
+      nextImageKey,
       cloneAnnotations(image.overlayAnnotations),
     );
     clearFreehandDraft();
