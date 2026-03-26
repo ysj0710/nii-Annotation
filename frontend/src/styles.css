@@ -877,7 +877,20 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   color: #e7f0ff !important;
 }
 
+.workflow-main-category .arco-radio-group .arco-radio .arco-radio-text,
+.workflow-main-category .arco-radio .arco-radio-text,
+.workflow-main-category .arco-radio .arco-radio-label {
+  color: #e7f0ff !important;
+  opacity: 1 !important;
+}
+
 .custom-field-panel .arco-radio.arco-radio-checked .arco-radio-label {
+  color: #ffffff !important;
+}
+
+.workflow-main-category .arco-radio-group .arco-radio-checked .arco-radio-text,
+.workflow-main-category .arco-radio.arco-radio-checked .arco-radio-text,
+.workflow-main-category .arco-radio.arco-radio-checked .arco-radio-label {
   color: #ffffff !important;
 }
 
