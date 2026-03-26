@@ -63,6 +63,8 @@ const PLATFORM_SYNC_CHANNEL = 'nii-annotation-sync'
 const PLATFORM_SYNC_STORAGE_KEY = 'nii-annotation:sync'
 const QUEUE_PREFETCH_RADIUS = 2
 const LOCAL_IMAGE_PAGE_SIZE = 20
+const BATCH_PREFETCH_CONCURRENCY = 3
+const ENABLE_NEARBY_PREFETCH = false
 
 const detectBrowserRuntimeEnv = () => {
   const nav = typeof navigator !== 'undefined' ? navigator : {}
@@ -1472,6 +1474,7 @@ export default function App() {
   const queueSwitchingRef = useRef(false)
   const queuedSwitchDirectionRef = useRef(0)
   const remoteImportInFlightRef = useRef(new Map())
+  const batchPrefetchStartedRef = useRef(false)
   const platformBroadcastRef = useRef(null)
 
   const externalCtx = useMemo(() => {
@@ -1583,6 +1586,9 @@ export default function App() {
   }, [queueImages, activeImage?.remoteImageId])
   const currentBatchId = String(batchQueue?.batchId || externalCtx.batchId || '')
   const isBatchMode = !!currentBatchId
+  const isQueueMode = isBatchMode || queueImages.length > 0
+  const progressTotal = isQueueMode ? queueImages.length : localImageIds.length
+  const progressIndex = isQueueMode ? activeQueueIndex : activeLocalGlobalIndex
   const displayImages = useMemo(() => {
     if (!isBatchMode) return images.filter((img) => !img.isMaskOnly)
     if (queueImages.length > 0) {
@@ -2296,28 +2302,41 @@ export default function App() {
 
   const prefetchQueueImages = async (
     items = [],
-    { skipImageId = '', aroundIndex = -1, radius = QUEUE_PREFETCH_RADIUS, scope = 'window' } = {}
+    {
+      skipImageId = '',
+      aroundIndex = -1,
+      radius = QUEUE_PREFETCH_RADIUS,
+      scope = 'window',
+      concurrency = 1
+    } = {}
   ) => {
     const targets = pickQueuePrefetchCandidates(items, { aroundIndex, radius, skipImageId, scope })
     if (!targets.length) return
     let changed = false
-    for (const item of targets) {
-      const remoteImageId = String(item?.imageId || '')
-      if (!remoteImageId || (skipImageId && String(skipImageId) === remoteImageId)) continue
-      const existing = await findLocalByRemoteImageId(remoteImageId)
-      if (existing) continue
-      const imported = await fetchAndImportByImageId({
-        imageId: remoteImageId,
-        imageUrl: item?.imageUrl || item?.downloadUrl || '',
-        originalName: item?.sourceImageName || item?.fileName || `image-${remoteImageId}.nii.gz`,
-        remoteBatchId: batchQueue?.batchId || externalCtx.batchId,
-        topicId: externalCtx.topicId,
-        useAutoGuard: false,
-        silent: true,
-        skipUiRefresh: true
-      })
-      if (imported?.id) changed = true
+    const maxWorkers = Math.max(1, Math.min(6, Number(concurrency || 1)))
+    const queue = [...targets]
+    const runWorker = async () => {
+      while (queue.length > 0) {
+        const item = queue.shift()
+        if (!item) continue
+        const remoteImageId = String(item?.imageId || '')
+        if (!remoteImageId || (skipImageId && String(skipImageId) === remoteImageId)) continue
+        const existing = await findLocalByRemoteImageId(remoteImageId)
+        if (existing) continue
+        const imported = await fetchAndImportByImageId({
+          imageId: remoteImageId,
+          imageUrl: item?.imageUrl || item?.downloadUrl || '',
+          originalName: item?.sourceImageName || item?.fileName || `image-${remoteImageId}.nii.gz`,
+          remoteBatchId: batchQueue?.batchId || externalCtx.batchId,
+          topicId: externalCtx.topicId,
+          useAutoGuard: false,
+          silent: true,
+          skipUiRefresh: true
+        })
+        if (imported?.id) changed = true
+      }
     }
+    await Promise.all(Array.from({ length: maxWorkers }, () => runWorker()))
     if (changed) {
       await refreshImageList()
     }
@@ -2365,11 +2384,21 @@ export default function App() {
           }
           if (targetItem) {
             await ensureQueueImageLoaded(targetItem)
-            void prefetchQueueImages(queue?.images || [], {
-              skipImageId: targetItem?.imageId,
-              aroundIndex: queueNavIndexRef.current,
-              scope: 'window'
-            })
+            if (ENABLE_NEARBY_PREFETCH) {
+              void prefetchQueueImages(queue?.images || [], {
+                skipImageId: targetItem?.imageId,
+                aroundIndex: queueNavIndexRef.current,
+                scope: 'window'
+              })
+            }
+            if (!batchPrefetchStartedRef.current) {
+              batchPrefetchStartedRef.current = true
+              void prefetchQueueImages(queue?.images || [], {
+                skipImageId: targetItem?.imageId,
+                scope: 'all',
+                concurrency: BATCH_PREFETCH_CONCURRENCY
+              })
+            }
           }
         } catch (error) {
           console.error(error)
@@ -2978,7 +3007,7 @@ export default function App() {
     try {
       const ok = await ensureQueueImageLoaded(target)
       if (!ok) Message.error('切换影像失败，请检查批次数据与下载接口')
-      if (ok) {
+      if (ok && ENABLE_NEARBY_PREFETCH) {
         void prefetchQueueImages(queueImages, {
           skipImageId: target?.imageId,
           aroundIndex: targetIndex,
@@ -4375,24 +4404,22 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
       <Header className="topbar">
         <div className="brand">影像标注平台</div>
         <Space className="topbar-actions">
-          {(isBatchMode || queueImages.length > 0 || localImageIds.length > 1) && (
+          {(isQueueMode || localImageIds.length > 1) && (
             <>
               <Button
                 onClick={() => switchDisplayImage(-1)}
-                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : localImageIds.length <= 1}
+                disabled={isQueueMode ? !queueImages.length : localImageIds.length <= 1}
               >
                 上一张
               </Button>
               <Button
                 onClick={() => switchDisplayImage(1)}
-                disabled={isBatchMode || queueImages.length > 0 ? !queueImages.length : localImageIds.length <= 1}
+                disabled={isQueueMode ? !queueImages.length : localImageIds.length <= 1}
               >
                 下一张
               </Button>
               <span style={{ color: '#cbd5e1', fontSize: 12, minWidth: 84, textAlign: 'center' }}>
-                {isBatchMode || queueImages.length > 0
-                  ? (queueImages.length ? `${Math.max(1, activeQueueIndex + 1)}/${queueImages.length}` : '批次 0/0')
-                  : `${Math.max(1, activeLocalGlobalIndex + 1)}/${localImageIds.length || 0}`}
+                {progressTotal > 0 ? `${Math.max(1, progressIndex + 1)}/${progressTotal}` : '0/0'}
               </span>
             </>
           )}
@@ -4409,7 +4436,7 @@ const sanitizeMaskBuffer = (maskBuffer, { templateBuffer = null } = {}) => {
             <div className="tool-sidebar-head">
               <div className="tool-sidebar-title">标注工具</div>
               <div className="tool-sidebar-subtitle">
-                {activeLocalGlobalIndex >= 0 ? `${activeLocalGlobalIndex + 1}` : 0} / {localImageIds.length || 0}
+                {progressTotal > 0 ? `${Math.max(1, progressIndex + 1)}` : 0} / {progressTotal || 0}
               </div>
             </div>
             <div className="tool-sidebar-menu">{annotationToolsMenuContent}</div>
