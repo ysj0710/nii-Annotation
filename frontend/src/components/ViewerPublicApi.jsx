@@ -441,6 +441,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     onDrawingChange,
     renderMaskOnly3D = true,
     runtimeEnv = null,
+    selectedAnnotationIndex = -1,
   },
   ref,
 ) {
@@ -469,6 +470,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const brushShapeRef = useRef(brushShape);
   const activeLabelValueRef = useRef(activeLabelValue);
   const labelsRef = useRef(labels);
+  const selectedAnnotationIndexRef = useRef(selectedAnnotationIndex);
   const onDrawingChangeRef = useRef(onDrawingChange);
   const runtimeEnvRef = useRef(runtimeEnv);
   const renderMaskOnly3DRef = useRef(renderMaskOnly3D);
@@ -1408,10 +1410,17 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       })
       .filter(Boolean);
     if (!points.length) return;
+    const annotationIndex = Number(annotation?.annotationIndex ?? -1);
+    const isSelected =
+      Number.isInteger(annotationIndex) &&
+      annotationIndex >= 0 &&
+      Number(selectedAnnotationIndexRef.current) === annotationIndex;
     ctx.save();
-    ctx.strokeStyle = annotation.color || "rgba(147, 197, 253, 0.95)";
+    ctx.strokeStyle = isSelected
+      ? "rgba(250, 204, 21, 0.98)"
+      : annotation.color || "rgba(147, 197, 253, 0.95)";
     ctx.fillStyle = annotation.color || "rgba(147, 197, 253, 0.95)";
-    ctx.lineWidth = 1.8;
+    ctx.lineWidth = isSelected ? 3.2 : 1.8;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     if (points.length === 1) {
@@ -1480,7 +1489,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         !PANE_CONFIGS[paneKey].is2D
       )
         continue;
-      for (const annotation of getCurrentAnnotations()) {
+      const currentAnnotations = getCurrentAnnotations();
+      for (let annotationIndex = 0; annotationIndex < currentAnnotations.length; annotationIndex += 1) {
+        const annotation = {
+          ...(currentAnnotations[annotationIndex] || {}),
+          annotationIndex,
+        };
         if (annotation?.type !== "freehand") continue;
         if (AX_COR_SAG_TO_PANE[Number(annotation?.axCorSag)] !== paneKey)
           continue;
@@ -2535,6 +2549,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     labelsRef.current = labels;
     applyDrawColormap();
   }, [labels]);
+
+  useEffect(() => {
+    selectedAnnotationIndexRef.current = Number(selectedAnnotationIndex);
+    drawStrokeMarkers(true);
+  }, [selectedAnnotationIndex]);
 
   useEffect(() => {
     onDrawingChangeRef.current = onDrawingChange;

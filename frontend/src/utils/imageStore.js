@@ -93,6 +93,16 @@ export const getImageByRemoteImageId = async (remoteImageId) =>
     })
   )
 
+export const getImagesByRemoteImageId = async (remoteImageId) =>
+  withStore('readonly', (store) =>
+    new Promise((resolve, reject) => {
+      const index = store.index('remoteImageId')
+      const request = index.getAll(String(remoteImageId || ''))
+      request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : [])
+      request.onerror = () => reject(request.error)
+    })
+  )
+
 export const saveImages = async (images) =>
   withStore('readwrite', (store) => {
     for (const image of images) {
