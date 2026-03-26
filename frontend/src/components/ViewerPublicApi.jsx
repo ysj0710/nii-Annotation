@@ -442,6 +442,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     renderMaskOnly3D = true,
     runtimeEnv = null,
     selectedAnnotationIndex = -1,
+    selectedLesionId = "",
   },
   ref,
 ) {
@@ -471,6 +472,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const activeLabelValueRef = useRef(activeLabelValue);
   const labelsRef = useRef(labels);
   const selectedAnnotationIndexRef = useRef(selectedAnnotationIndex);
+  const selectedLesionIdRef = useRef(String(selectedLesionId || ""));
   const onDrawingChangeRef = useRef(onDrawingChange);
   const runtimeEnvRef = useRef(runtimeEnv);
   const renderMaskOnly3DRef = useRef(renderMaskOnly3D);
@@ -493,8 +495,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const refreshTelemetryRef = useRef({ last: null });
   const refreshPerfRef = useRef({ emaMs: 0, samples: 0 });
   const labelAnalysisRef = useRef({ dirty: true, stats: {}, centroids: {} });
-  const focusMarkerRef = useRef({ vox: null, expiresAt: 0 });
-  const focusMarkerTimerRef = useRef(null);
+  const lesionAnalysisRef = useRef({ dirty: true, items: [] });
   const [panesReady, setPanesReady] = useState(false);
   const [focusedPlane, setFocusedPlane] = useState(null);
   const [canFocusPlanes, setCanFocusPlanes] = useState(false);
@@ -689,6 +690,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
   const invalidateLabelAnalysis = () => {
     labelAnalysisRef.current.dirty = true;
+    lesionAnalysisRef.current.dirty = true;
   };
 
   const getLabelAnalysis = () => {
@@ -736,33 +738,114 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return labelAnalysisRef.current;
   };
 
-  const clearFocusMarker = ({ redraw = true } = {}) => {
-    focusMarkerRef.current = { vox: null, expiresAt: 0 };
-    if (focusMarkerTimerRef.current !== null) {
-      clearTimeout(focusMarkerTimerRef.current);
-      focusMarkerTimerRef.current = null;
+  const getLesionAnalysis = () => {
+    if (!lesionAnalysisRef.current.dirty) return lesionAnalysisRef.current;
+    const bitmap = getSharedBitmap();
+    const dims = getPrimaryNv()?.back?.dims;
+    const nx = Number(dims?.[1] || 0);
+    const ny = Number(dims?.[2] || 0);
+    const nz = Math.max(1, Number(dims?.[3] || 1));
+    if (!bitmap?.length || nx < 1 || ny < 1 || nz < 1) {
+      lesionAnalysisRef.current = { dirty: false, items: [] };
+      return lesionAnalysisRef.current;
     }
-    if (redraw) drawStrokeMarkers(true);
-  };
+    const xy = nx * ny;
+    const total = nx * ny * nz;
+    const visited = new Uint8Array(total);
+    const items = [];
+    for (let idx0 = 0; idx0 < total; idx0 += 1) {
+      const labelValue = Number(bitmap[idx0] || 0);
+      if (labelValue <= 0 || visited[idx0]) continue;
+      visited[idx0] = 1;
+      const queue = [idx0];
+      const voxels = [];
+      let qIndex = 0;
+      let count = 0;
+      let sx = 0;
+      let sy = 0;
+      let sz = 0;
+      while (qIndex < queue.length) {
+        const idx = queue[qIndex];
+        qIndex += 1;
+        const z = Math.floor(idx / xy);
+        const remain = idx - z * xy;
+        const y = Math.floor(remain / nx);
+        const x = remain - y * nx;
+        voxels.push([x, y, z]);
+        sx += x;
+        sy += y;
+        sz += z;
+        count += 1;
 
-  const setFocusMarker = (vox, { ttlMs = 1800 } = {}) => {
-    const normalized =
-      Array.isArray(vox) && vox.length >= 3
-        ? [Number(vox[0]), Number(vox[1]), Number(vox[2])]
-        : null;
-    if (!normalized || normalized.some((v) => !Number.isFinite(v))) return false;
-    focusMarkerRef.current = {
-      vox: normalized,
-      expiresAt: Date.now() + Math.max(240, Number(ttlMs || 0)),
-    };
-    if (focusMarkerTimerRef.current !== null)
-      clearTimeout(focusMarkerTimerRef.current);
-    focusMarkerTimerRef.current = setTimeout(() => {
-      const expiresAt = Number(focusMarkerRef.current?.expiresAt || 0);
-      if (Date.now() >= expiresAt) clearFocusMarker({ redraw: true });
-    }, Math.max(260, Number(ttlMs || 0) + 120));
-    drawStrokeMarkers(true);
-    return true;
+        if (x > 0) {
+          const ni = idx - 1;
+          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
+            visited[ni] = 1;
+            queue.push(ni);
+          }
+        }
+        if (x + 1 < nx) {
+          const ni = idx + 1;
+          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
+            visited[ni] = 1;
+            queue.push(ni);
+          }
+        }
+        if (y > 0) {
+          const ni = idx - nx;
+          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
+            visited[ni] = 1;
+            queue.push(ni);
+          }
+        }
+        if (y + 1 < ny) {
+          const ni = idx + nx;
+          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
+            visited[ni] = 1;
+            queue.push(ni);
+          }
+        }
+        if (z > 0) {
+          const ni = idx - xy;
+          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
+            visited[ni] = 1;
+            queue.push(ni);
+          }
+        }
+        if (z + 1 < nz) {
+          const ni = idx + xy;
+          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
+            visited[ni] = 1;
+            queue.push(ni);
+          }
+        }
+      }
+      if (!count) continue;
+      items.push({
+        lesionId: "",
+        labelValue,
+        voxelCount: count,
+        centroid: [sx / count, sy / count, sz / count],
+        voxels,
+      });
+    }
+
+    items.sort((a, b) => {
+      if (a.labelValue !== b.labelValue) return a.labelValue - b.labelValue;
+      const ac = a.centroid || [0, 0, 0];
+      const bc = b.centroid || [0, 0, 0];
+      if (ac[2] !== bc[2]) return ac[2] - bc[2];
+      if (ac[1] !== bc[1]) return ac[1] - bc[1];
+      return ac[0] - bc[0];
+    });
+    const labelSerial = {};
+    for (const item of items) {
+      const lv = Number(item.labelValue || 0);
+      labelSerial[lv] = (labelSerial[lv] || 0) + 1;
+      item.lesionId = `lesion-${lv}-${labelSerial[lv]}`;
+    }
+    lesionAnalysisRef.current = { dirty: false, items };
+    return lesionAnalysisRef.current;
   };
 
   const hasRefreshableDrawingBitmap = (nv) => {
@@ -1508,19 +1591,71 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     ctx.restore();
   };
 
-  const drawFocusMarker = (ctx, canvas, paneKey, vox) => {
-    const pt = toPxPoint({ vox }, canvas, paneKey);
-    if (!pt) return;
+  const getLesionById = (lesionId) => {
+    const id = String(lesionId || "");
+    if (!id) return null;
+    return (
+      getLesionAnalysis().items.find(
+        (item) => String(item?.lesionId || "") === id,
+      ) || null
+    );
+  };
+
+  const drawSelectedLesionOutline = (ctx, canvas, paneKey) => {
+    const lesionId = String(selectedLesionIdRef.current || "");
+    if (!lesionId) return;
+    const lesion = getLesionById(lesionId);
+    if (!lesion) return;
+    const cfg = PANE_CONFIGS[paneKey];
+    if (!cfg?.is2D || !Number.isInteger(cfg.fixedAxis)) return;
+    const fixedAxis = Number(cfg.fixedAxis);
+    const currentSlice = getPaneCurrentSliceIndex(paneKey);
+    if (!Number.isInteger(currentSlice)) return;
+
+    const inPlaneAxes = [0, 1, 2].filter((axis) => axis !== fixedAxis);
+    const boundaryVox = [];
+    const pointSet = new Set();
+    const toKey = (u, v) => `${u}:${v}`;
+
+    for (const vox of lesion.voxels || []) {
+      const x = Number(vox?.[0]);
+      const y = Number(vox?.[1]);
+      const z = Number(vox?.[2]);
+      const values = [x, y, z];
+      if (!values.every((value) => Number.isFinite(value))) continue;
+      if (Math.round(values[fixedAxis]) !== currentSlice) continue;
+      const u = Math.round(values[inPlaneAxes[0]]);
+      const v = Math.round(values[inPlaneAxes[1]]);
+      pointSet.add(toKey(u, v));
+    }
+    if (pointSet.size === 0) return;
+
+    for (const key of pointSet) {
+      const [uStr, vStr] = String(key).split(":");
+      const u = Number(uStr);
+      const v = Number(vStr);
+      if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+      const isBoundary =
+        !pointSet.has(toKey(u - 1, v)) ||
+        !pointSet.has(toKey(u + 1, v)) ||
+        !pointSet.has(toKey(u, v - 1)) ||
+        !pointSet.has(toKey(u, v + 1));
+      if (!isBoundary) continue;
+      const full = [0, 0, 0];
+      full[fixedAxis] = currentSlice;
+      full[inPlaneAxes[0]] = u;
+      full[inPlaneAxes[1]] = v;
+      boundaryVox.push(full);
+    }
+    if (!boundaryVox.length) return;
+
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 10, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(250, 204, 21, 0.98)";
-    ctx.lineWidth = 3;
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(250, 204, 21, 0.92)";
-    ctx.fill();
+    ctx.fillStyle = "rgba(250, 204, 21, 0.96)";
+    for (const vox of boundaryVox) {
+      const px = toPxPoint({ vox }, canvas, paneKey);
+      if (!px) continue;
+      ctx.fillRect(px.x - 1.5, px.y - 1.5, 3, 3);
+    }
     ctx.restore();
   };
 
@@ -1568,27 +1703,22 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           drawAnnotation(ctx, markerCanvas, draft, paneKey);
         }
       }
-      const focusMarker = focusMarkerRef.current;
-      const focusVox = Array.isArray(focusMarker?.vox) ? focusMarker.vox : null;
-      const expiresAt = Number(focusMarker?.expiresAt || 0);
-      if (focusVox && Date.now() < expiresAt) {
-        drawFocusMarker(ctx, markerCanvas, paneKey, focusVox);
-      }
+      drawSelectedLesionOutline(ctx, markerCanvas, paneKey);
     }
   };
 
   const hasVisibleMarkerWork = () => {
     if (annotationDraftRef.current) return true;
+    if (String(selectedLesionIdRef.current || "")) return true;
+    const annotations = getCurrentAnnotations();
     if (
-      Array.isArray(focusMarkerRef.current?.vox) &&
-      Date.now() < Number(focusMarkerRef.current?.expiresAt || 0)
+      annotations.some(
+        (annotation) =>
+          annotation?.type === "freehand" && annotation?.renderOnMarker !== false,
+      )
     )
       return true;
-    const annotations = getCurrentAnnotations();
-    return annotations.some(
-      (annotation) =>
-        annotation?.type === "freehand" && annotation?.renderOnMarker !== false,
-    );
+    return false;
   };
 
   const drawStrokeMarkers = (immediate = false) => {
@@ -2529,17 +2659,41 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     getRefreshDiagnostics: () => ({ ...(refreshTelemetryRef.current || {}) }),
     getAnnotationCount: () => getCurrentAnnotations().length,
     getLabelStats: () => ({ ...(getLabelAnalysis().stats || {}) }),
+    getLesionCount: () => getLesionAnalysis().items.length,
+    clearAnalysisCache: ({ clearSelection = false } = {}) => {
+      labelAnalysisRef.current = { dirty: true, stats: {}, centroids: {} };
+      lesionAnalysisRef.current = { dirty: true, items: [] };
+      if (clearSelection) selectedLesionIdRef.current = "";
+      drawStrokeMarkers(true);
+      return true;
+    },
     jumpToLabel: (labelValue) => {
       const target = Math.max(0, Math.min(255, Number(labelValue || 0)));
-      const analysis = getLabelAnalysis();
-      const vox =
-        analysis?.centroids?.[target] ||
-        analysis?.centroids?.[String(target)] ||
-        null;
+      const lesion = getLesionAnalysis().items.find(
+        (item) => Number(item?.labelValue || 0) === target,
+      );
+      if (lesion?.lesionId) {
+        selectedLesionIdRef.current = String(lesion.lesionId);
+      }
+      const vox = Array.isArray(lesion?.centroid)
+        ? lesion.centroid
+        : getLabelAnalysis()?.centroids?.[target] ||
+          getLabelAnalysis()?.centroids?.[String(target)] ||
+          null;
       if (!Array.isArray(vox) || vox.length < 3) return false;
-      setFocusMarker(vox);
-      setCrosshairFromVox(vox, { redraw: true });
-      return true;
+      const jumped = setCrosshairFromVox(vox, { redraw: true });
+      drawStrokeMarkers(true);
+      return jumped;
+    },
+    jumpToLesion: (lesionId) => {
+      const lesion = getLesionById(lesionId);
+      if (!lesion) return false;
+      selectedLesionIdRef.current = String(lesion.lesionId || "");
+      const vox = Array.isArray(lesion.centroid) ? lesion.centroid : null;
+      if (!vox || vox.length < 3) return false;
+      const jumped = setCrosshairFromVox(vox, { redraw: true });
+      drawStrokeMarkers(true);
+      return jumped;
     },
     jumpToAnnotation: (indexOrAnnotation) => {
       const annotations = getCurrentAnnotations();
@@ -2560,38 +2714,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       }
       const vox = getAnnotationFocusVox(annotation);
       if (!Array.isArray(vox) || vox.length < 3) return false;
-      setFocusMarker(vox);
       return setCrosshairFromVox(vox, { redraw: true });
     },
-    highlightVox: (vox, ttlMs = 1800) =>
-      setFocusMarker(vox, { ttlMs: Number(ttlMs || 1800) }),
     exportLesionItems: () => {
-      const annotations = cloneAnnotations(getCurrentAnnotations());
-      if (annotations.length > 0) {
-        return annotations.map((annotation, index) => ({
-          ...annotation,
-          annotationIndex: index,
-          lesionType: "annotation",
-        }));
-      }
-      const analysis = getLabelAnalysis();
-      const stats = analysis?.stats || {};
-      const centroids = analysis?.centroids || {};
-      const labelEntries = Object.entries(stats)
-        .map(([labelValue, count]) => ({
-          labelValue: Number(labelValue),
-          count: Number(count || 0),
-        }))
-        .filter(
-          (entry) =>
-            Number.isFinite(entry.labelValue) &&
-            entry.labelValue > 0 &&
-            entry.count > 0,
-        )
-        .sort((a, b) => a.labelValue - b.labelValue);
-      return labelEntries.map((entry) => {
-        const center =
-          centroids?.[entry.labelValue] || centroids?.[String(entry.labelValue)];
+      return getLesionAnalysis().items.map((item) => {
+        const center = Array.isArray(item?.centroid) ? item.centroid : null;
         const vox = Array.isArray(center)
           ? [
               Math.round(Number(center[0] || 0)),
@@ -2599,21 +2726,20 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
               Math.round(Number(center[2] || 0)),
             ]
           : null;
+        const labelValue = Number(item?.labelValue || 0);
         const labelMeta = labelsRef.current.find(
-          (item) => Number(item?.value || 0) === entry.labelValue,
+          (meta) => Number(meta?.value || 0) === labelValue,
         );
         return {
-          type: "mask-label",
-          lesionType: "mask-label",
-          annotationIndex: -1,
-          labelValue: entry.labelValue,
-          labelName: String(labelMeta?.name || `Label ${entry.labelValue}`),
+          lesionId: String(item?.lesionId || ""),
+          labelValue,
+          labelName: String(labelMeta?.name || `Label ${labelValue}`),
           color: labelMeta?.color || "#f59e0b",
+          voxelCount: Number(item?.voxelCount || 0),
           points: vox ? [{ vox }] : [],
           axCorSag: 0,
           paneKey: "A",
           sliceIndex: Number.isFinite(Number(vox?.[2])) ? Number(vox[2]) : 0,
-          voxelCount: entry.count,
         };
       });
     },
@@ -2632,8 +2758,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         cancelAnimationFrame(markerRedrawRafRef.current);
       if (markerDrawRafRef.current !== null)
         cancelAnimationFrame(markerDrawRafRef.current);
-      if (focusMarkerTimerRef.current !== null)
-        clearTimeout(focusMarkerTimerRef.current);
       for (const observer of Object.values(paneResizeObserversRef.current)) {
         observer?.disconnect?.();
       }
@@ -2670,6 +2794,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     selectedAnnotationIndexRef.current = Number(selectedAnnotationIndex);
     drawStrokeMarkers(true);
   }, [selectedAnnotationIndex]);
+
+  useEffect(() => {
+    selectedLesionIdRef.current = String(selectedLesionId || "");
+    drawStrokeMarkers(true);
+  }, [selectedLesionId]);
 
   useEffect(() => {
     onDrawingChangeRef.current = onDrawingChange;
@@ -3014,7 +3143,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
               sourcePaneKey: paneKey,
               targetVox: finalVox,
             });
-            emitDrawingChange("draw");
+            emitDrawingChange("brush-stroke-complete");
           }
           brushStrokeDirtyRef.current = false;
           lastBrushVoxRef.current = null;

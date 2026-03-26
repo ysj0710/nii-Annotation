@@ -1390,16 +1390,25 @@ const normalizeWorkflowFieldType = (rawType) => {
 const normalizeWorkflowOption = (opt, i = 0) => {
   if (opt == null) return null;
   if (typeof opt === "object") {
-    const rawValue =
-      opt.value ?? opt.id ?? opt.key ?? opt.code ?? opt.optionValue ?? i;
-    const value = String(rawValue);
+    const hasOwn = (key) => Object.prototype.hasOwnProperty.call(opt, key);
+    const rawValue = hasOwn("value")
+      ? opt.value
+      : hasOwn("optionValue")
+        ? opt.optionValue
+        : hasOwn("id")
+          ? opt.id
+          : hasOwn("key")
+            ? opt.key
+            : hasOwn("code")
+              ? opt.code
+              : opt.label ?? opt.name ?? opt.title ?? opt.text ?? i;
+    const value = rawValue;
     const rawLabel =
       opt.label ?? opt.name ?? opt.title ?? opt.text ?? opt.optionName ?? value;
     const label = String(rawLabel);
     return { label, value };
   }
-  const value = String(opt);
-  return { label: value, value };
+  return { label: String(opt), value: opt };
 };
 
 const normalizeWorkflowField = (item, index = 0) => {
@@ -1707,7 +1716,7 @@ export default function App() {
     steps: {},
   });
   const [workflowErrors, setWorkflowErrors] = useState({});
-  const [selectedLesionIndex, setSelectedLesionIndex] = useState(-1);
+  const [selectedLesionId, setSelectedLesionId] = useState("");
 
   const viewerRef = useRef(null);
   const viewerHostRef = useRef(null);
@@ -1964,42 +1973,25 @@ export default function App() {
         ? viewerRef.current.exportAnnotations()
         : [];
     return lesions.map((annotation, idx) => {
-      const lesionType =
-        String(annotation?.lesionType || annotation?.type || "").toLowerCase() ===
-        "mask-label"
-          ? "mask-label"
-          : "annotation";
-      const labelValue = Number(annotation?.labelValue);
-      const annotationIndex = Number(annotation?.annotationIndex);
       const coord = resolveAnnotationAnchorForCard(annotation);
+      const lesionId = String(annotation?.lesionId || `lesion-${idx + 1}`);
       return {
-        key:
-          lesionType === "mask-label"
-            ? `lesion-mask-${Number.isFinite(labelValue) ? labelValue : idx}`
-            : `lesion-${idx}`,
-        name:
-          lesionType === "mask-label"
-            ? String(
-                annotation?.labelName ||
-                  `Label ${Number.isFinite(labelValue) ? labelValue : idx + 1}`,
-              )
-            : `病灶${String.fromCharCode(65 + (idx % 26))}${idx >= 26 ? Math.floor(idx / 26) : ""}`,
-        lesionType,
-        labelValue: Number.isFinite(labelValue) ? labelValue : null,
-        annotationIndex: Number.isFinite(annotationIndex)
-          ? annotationIndex
-          : idx,
+        key: lesionId,
+        lesionId,
+        name: `病灶${String.fromCharCode(65 + (idx % 26))}${idx >= 26 ? Math.floor(idx / 26) : ""}`,
+        labelValue: Number(annotation?.labelValue || 0),
+        labelName: String(annotation?.labelName || ""),
+        voxelCount: Number(annotation?.voxelCount || 0),
         coord,
       };
     });
   }, [activeImage?.id, activeImage?.maskVersion, workflowState, labelStats]);
-  const selectedAnnotationIndexForViewer = useMemo(() => {
-    const lesion = lesionItems[selectedLesionIndex] || null;
-    if (!lesion || lesion.lesionType !== "annotation") return -1;
-    return Number.isFinite(Number(lesion.annotationIndex))
-      ? Number(lesion.annotationIndex)
-      : -1;
-  }, [lesionItems, selectedLesionIndex]);
+  useEffect(() => {
+    if (!selectedLesionId) return;
+    if (!lesionItems.some((item) => item.lesionId === selectedLesionId)) {
+      setSelectedLesionId("");
+    }
+  }, [lesionItems, selectedLesionId]);
   useEffect(() => {
     const detected = detectBrowserRuntimeEnv();
     runtimeEnvRef.current = detected;
@@ -2170,7 +2162,7 @@ export default function App() {
   useEffect(() => {
     hasUnsavedChangesRef.current = false;
     localPersistDirtyRef.current = false;
-    setSelectedLesionIndex(-1);
+    setSelectedLesionId("");
   }, [activeImage?.id]);
 
   useEffect(() => {
@@ -3595,10 +3587,12 @@ export default function App() {
             ? "批次标注已保存并同步科研平台"
             : "当前标注已保存并同步科研平台",
         );
+        viewerRef.current?.clearAnalysisCache?.();
       } else {
         hasUnsavedChangesRef.current = false;
         localPersistDirtyRef.current = false;
         Message.success("当前标注已保存");
+        viewerRef.current?.clearAnalysisCache?.();
       }
       return true;
     } catch (error) {
@@ -3606,6 +3600,7 @@ export default function App() {
       Message.error("标注已本地保存，但科研平台同步失败");
       hasUnsavedChangesRef.current = false;
       localPersistDirtyRef.current = false;
+      viewerRef.current?.clearAnalysisCache?.();
       return true;
     }
   };
@@ -3616,6 +3611,7 @@ export default function App() {
     }
     if (
       reason === "draw" ||
+      reason === "brush-stroke-complete" ||
       reason === "undo" ||
       reason === "redo" ||
       reason === "annotate"
@@ -3625,6 +3621,7 @@ export default function App() {
     }
     if (
       reason === "draw" ||
+      reason === "brush-stroke-complete" ||
       reason === "undo" ||
       reason === "redo" ||
       reason === "clear" ||
@@ -3635,6 +3632,7 @@ export default function App() {
     }
     if (
       reason === "draw" ||
+      reason === "brush-stroke-complete" ||
       reason === "annotate" ||
       reason === "undo" ||
       reason === "redo" ||
@@ -5209,7 +5207,7 @@ export default function App() {
       );
       const card = cards[cardIndex];
       if (!card) return prev;
-      const normalized = String(value || "");
+      const normalized = String(value ?? "");
       if (String(card.mainCategory || "") === normalized) return prev;
       return {
         ...prev,
@@ -5312,12 +5310,12 @@ export default function App() {
     if (field.type === "select") {
       return (
         <Select
-          value={value == null || value === "" ? undefined : String(value)}
+          value={value == null || value === "" ? undefined : value}
           placeholder={field.placeholder || "请选择"}
-          onChange={(next) => onChange(String(next || ""))}
+          onChange={(next) => onChange(next ?? "")}
         >
           {field.options.map((opt) => (
-            <Option key={`${field.id}-${opt.value}`} value={String(opt.value)}>
+            <Option key={`${field.id}-${String(opt.value)}`} value={opt.value}>
               {opt.label}
             </Option>
           ))}
@@ -5327,11 +5325,11 @@ export default function App() {
     if (field.type === "radio") {
       return (
         <Radio.Group
-          value={String(value ?? "")}
-          onChange={(next) => onChange(String(next || ""))}
+          value={value ?? ""}
+          onChange={(next) => onChange(next ?? "")}
         >
           {field.options.map((opt) => (
-            <Radio key={`${field.id}-${opt.value}`} value={String(opt.value)}>
+            <Radio key={`${field.id}-${String(opt.value)}`} value={opt.value}>
               {opt.label}
             </Radio>
           ))}
@@ -5339,9 +5337,7 @@ export default function App() {
       );
     }
     if (field.type === "checkbox") {
-      const checkedValues = Array.isArray(value)
-        ? value.map((item) => String(item))
-        : [];
+      const checkedValues = Array.isArray(value) ? value : [];
       return (
         <Checkbox.Group
           value={checkedValues}
@@ -5349,8 +5345,8 @@ export default function App() {
         >
           {field.options.map((opt) => (
             <Checkbox
-              key={`${field.id}-${opt.value}`}
-              value={String(opt.value)}
+              key={`${field.id}-${String(opt.value)}`}
+              value={opt.value}
             >
               {opt.label}
             </Checkbox>
@@ -5573,7 +5569,7 @@ export default function App() {
               radiological2D={viewerMode === "dicom" ? true : radiological2D}
               renderMaskOnly3D
               runtimeEnv={runtimeEnv}
-              selectedAnnotationIndex={selectedAnnotationIndexForViewer}
+              selectedLesionId={selectedLesionId}
               onDrawingChange={onViewerEvent}
             />
           </Suspense>
@@ -5593,7 +5589,7 @@ export default function App() {
               </div>
             </div>
             <div className="custom-field-meta">
-              标注统计：{Number(viewerRef.current?.getAnnotationCount?.() || 0)}
+              标注统计：{lesionItems.length}
             </div>
             {Array.isArray(workflowSchema?.steps) &&
             workflowSchema.steps.length > 0 ? (
@@ -5623,9 +5619,9 @@ export default function App() {
                         <span className="custom-field-required">*</span>
                       </div>
                       <Radio.Group
-                        value={String(activeCard?.mainCategory || "")}
+                        value={String(activeCard?.mainCategory ?? "")}
                         onChange={(next) =>
-                          updateActiveCardMainCategory(String(next || ""))
+                          updateActiveCardMainCategory(String(next ?? ""))
                         }
                       >
                         {(workflowSchema.mainCategoryOptions || []).map((opt) => (
@@ -5667,21 +5663,10 @@ export default function App() {
                         <button
                           key={lesion.key}
                           type="button"
-                          className={`annotation-menu-item${selectedLesionIndex === idx ? " active" : ""}`}
+                          className={`annotation-menu-item${selectedLesionId === lesion.lesionId ? " active" : ""}`}
                           onClick={() => {
-                            setSelectedLesionIndex(idx);
-                            if (lesion.lesionType === "mask-label") {
-                              const jumped = Number.isFinite(Number(lesion.labelValue))
-                                ? viewerRef.current?.jumpToLabel?.(Number(lesion.labelValue))
-                                : false;
-                              if (!jumped && Array.isArray(lesion.coord) && lesion.coord.length >= 3) {
-                                viewerRef.current?.highlightVox?.(lesion.coord);
-                              }
-                              return;
-                            }
-                            viewerRef.current?.jumpToAnnotation?.(
-                              Number(lesion.annotationIndex),
-                            );
+                            setSelectedLesionId(lesion.lesionId);
+                            viewerRef.current?.jumpToLesion?.(lesion.lesionId);
                           }}
                         >
                           <span className="annotation-menu-name">
