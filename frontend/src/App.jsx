@@ -1958,19 +1958,48 @@ export default function App() {
     return cards[index] || null;
   }, [activeStepState]);
   const lesionItems = useMemo(() => {
-    const annotations = Array.isArray(viewerRef.current?.exportAnnotations?.())
-      ? viewerRef.current.exportAnnotations()
-      : [];
-    return annotations.map((annotation, idx) => {
+    const lesions = Array.isArray(viewerRef.current?.exportLesionItems?.())
+      ? viewerRef.current.exportLesionItems()
+      : Array.isArray(viewerRef.current?.exportAnnotations?.())
+        ? viewerRef.current.exportAnnotations()
+        : [];
+    return lesions.map((annotation, idx) => {
+      const lesionType =
+        String(annotation?.lesionType || annotation?.type || "").toLowerCase() ===
+        "mask-label"
+          ? "mask-label"
+          : "annotation";
+      const labelValue = Number(annotation?.labelValue);
+      const annotationIndex = Number(annotation?.annotationIndex);
       const coord = resolveAnnotationAnchorForCard(annotation);
       return {
-        key: `lesion-${idx}`,
-        name: `病灶${String.fromCharCode(65 + (idx % 26))}${idx >= 26 ? Math.floor(idx / 26) : ""}`,
-        annotationIndex: idx,
+        key:
+          lesionType === "mask-label"
+            ? `lesion-mask-${Number.isFinite(labelValue) ? labelValue : idx}`
+            : `lesion-${idx}`,
+        name:
+          lesionType === "mask-label"
+            ? String(
+                annotation?.labelName ||
+                  `Label ${Number.isFinite(labelValue) ? labelValue : idx + 1}`,
+              )
+            : `病灶${String.fromCharCode(65 + (idx % 26))}${idx >= 26 ? Math.floor(idx / 26) : ""}`,
+        lesionType,
+        labelValue: Number.isFinite(labelValue) ? labelValue : null,
+        annotationIndex: Number.isFinite(annotationIndex)
+          ? annotationIndex
+          : idx,
         coord,
       };
     });
   }, [activeImage?.id, activeImage?.maskVersion, workflowState, labelStats]);
+  const selectedAnnotationIndexForViewer = useMemo(() => {
+    const lesion = lesionItems[selectedLesionIndex] || null;
+    if (!lesion || lesion.lesionType !== "annotation") return -1;
+    return Number.isFinite(Number(lesion.annotationIndex))
+      ? Number(lesion.annotationIndex)
+      : -1;
+  }, [lesionItems, selectedLesionIndex]);
   useEffect(() => {
     const detected = detectBrowserRuntimeEnv();
     runtimeEnvRef.current = detected;
@@ -5544,7 +5573,7 @@ export default function App() {
               radiological2D={viewerMode === "dicom" ? true : radiological2D}
               renderMaskOnly3D
               runtimeEnv={runtimeEnv}
-              selectedAnnotationIndex={selectedLesionIndex}
+              selectedAnnotationIndex={selectedAnnotationIndexForViewer}
               onDrawingChange={onViewerEvent}
             />
           </Suspense>
@@ -5631,7 +5660,7 @@ export default function App() {
                   ))}
                   <div className="workflow-section-title">病灶列表（{lesionItems.length}）</div>
                   {lesionItems.length === 0 ? (
-                    <div className="custom-field-empty">暂无病灶，请先使用自由曲线标注病灶区域</div>
+                    <div className="custom-field-empty">暂无病灶，请先使用笔刷或自由曲线标注病灶区域</div>
                   ) : (
                     <div className="custom-field-list">
                       {lesionItems.map((lesion, idx) => (
@@ -5641,7 +5670,18 @@ export default function App() {
                           className={`annotation-menu-item${selectedLesionIndex === idx ? " active" : ""}`}
                           onClick={() => {
                             setSelectedLesionIndex(idx);
-                            viewerRef.current?.jumpToAnnotation?.(Number(lesion.annotationIndex));
+                            if (lesion.lesionType === "mask-label") {
+                              const jumped = Number.isFinite(Number(lesion.labelValue))
+                                ? viewerRef.current?.jumpToLabel?.(Number(lesion.labelValue))
+                                : false;
+                              if (!jumped && Array.isArray(lesion.coord) && lesion.coord.length >= 3) {
+                                viewerRef.current?.highlightVox?.(lesion.coord);
+                              }
+                              return;
+                            }
+                            viewerRef.current?.jumpToAnnotation?.(
+                              Number(lesion.annotationIndex),
+                            );
                           }}
                         >
                           <span className="annotation-menu-name">

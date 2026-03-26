@@ -493,6 +493,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const refreshTelemetryRef = useRef({ last: null });
   const refreshPerfRef = useRef({ emaMs: 0, samples: 0 });
   const labelAnalysisRef = useRef({ dirty: true, stats: {}, centroids: {} });
+  const focusMarkerRef = useRef({ vox: null, expiresAt: 0 });
+  const focusMarkerTimerRef = useRef(null);
   const [panesReady, setPanesReady] = useState(false);
   const [focusedPlane, setFocusedPlane] = useState(null);
   const [canFocusPlanes, setCanFocusPlanes] = useState(false);
@@ -732,6 +734,35 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     }
     labelAnalysisRef.current = { dirty: false, stats, centroids };
     return labelAnalysisRef.current;
+  };
+
+  const clearFocusMarker = ({ redraw = true } = {}) => {
+    focusMarkerRef.current = { vox: null, expiresAt: 0 };
+    if (focusMarkerTimerRef.current !== null) {
+      clearTimeout(focusMarkerTimerRef.current);
+      focusMarkerTimerRef.current = null;
+    }
+    if (redraw) drawStrokeMarkers(true);
+  };
+
+  const setFocusMarker = (vox, { ttlMs = 1800 } = {}) => {
+    const normalized =
+      Array.isArray(vox) && vox.length >= 3
+        ? [Number(vox[0]), Number(vox[1]), Number(vox[2])]
+        : null;
+    if (!normalized || normalized.some((v) => !Number.isFinite(v))) return false;
+    focusMarkerRef.current = {
+      vox: normalized,
+      expiresAt: Date.now() + Math.max(240, Number(ttlMs || 0)),
+    };
+    if (focusMarkerTimerRef.current !== null)
+      clearTimeout(focusMarkerTimerRef.current);
+    focusMarkerTimerRef.current = setTimeout(() => {
+      const expiresAt = Number(focusMarkerRef.current?.expiresAt || 0);
+      if (Date.now() >= expiresAt) clearFocusMarker({ redraw: true });
+    }, Math.max(260, Number(ttlMs || 0) + 120));
+    drawStrokeMarkers(true);
+    return true;
   };
 
   const hasRefreshableDrawingBitmap = (nv) => {
@@ -1477,6 +1508,22 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     ctx.restore();
   };
 
+  const drawFocusMarker = (ctx, canvas, paneKey, vox) => {
+    const pt = toPxPoint({ vox }, canvas, paneKey);
+    if (!pt) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 10, 0, Math.PI * 2);
+    ctx.strokeStyle = "rgba(250, 204, 21, 0.98)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(250, 204, 21, 0.92)";
+    ctx.fill();
+    ctx.restore();
+  };
+
   const drawStrokeMarkersNow = () => {
     for (const paneKey of PANE_ORDER) {
       const markerCanvas = getPaneMarkerCanvas(paneKey);
@@ -1521,11 +1568,22 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           drawAnnotation(ctx, markerCanvas, draft, paneKey);
         }
       }
+      const focusMarker = focusMarkerRef.current;
+      const focusVox = Array.isArray(focusMarker?.vox) ? focusMarker.vox : null;
+      const expiresAt = Number(focusMarker?.expiresAt || 0);
+      if (focusVox && Date.now() < expiresAt) {
+        drawFocusMarker(ctx, markerCanvas, paneKey, focusVox);
+      }
     }
   };
 
   const hasVisibleMarkerWork = () => {
     if (annotationDraftRef.current) return true;
+    if (
+      Array.isArray(focusMarkerRef.current?.vox) &&
+      Date.now() < Number(focusMarkerRef.current?.expiresAt || 0)
+    )
+      return true;
     const annotations = getCurrentAnnotations();
     return annotations.some(
       (annotation) =>
@@ -2479,6 +2537,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         analysis?.centroids?.[String(target)] ||
         null;
       if (!Array.isArray(vox) || vox.length < 3) return false;
+      setFocusMarker(vox);
       setCrosshairFromVox(vox, { redraw: true });
       return true;
     },
@@ -2501,7 +2560,62 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       }
       const vox = getAnnotationFocusVox(annotation);
       if (!Array.isArray(vox) || vox.length < 3) return false;
+      setFocusMarker(vox);
       return setCrosshairFromVox(vox, { redraw: true });
+    },
+    highlightVox: (vox, ttlMs = 1800) =>
+      setFocusMarker(vox, { ttlMs: Number(ttlMs || 1800) }),
+    exportLesionItems: () => {
+      const annotations = cloneAnnotations(getCurrentAnnotations());
+      if (annotations.length > 0) {
+        return annotations.map((annotation, index) => ({
+          ...annotation,
+          annotationIndex: index,
+          lesionType: "annotation",
+        }));
+      }
+      const analysis = getLabelAnalysis();
+      const stats = analysis?.stats || {};
+      const centroids = analysis?.centroids || {};
+      const labelEntries = Object.entries(stats)
+        .map(([labelValue, count]) => ({
+          labelValue: Number(labelValue),
+          count: Number(count || 0),
+        }))
+        .filter(
+          (entry) =>
+            Number.isFinite(entry.labelValue) &&
+            entry.labelValue > 0 &&
+            entry.count > 0,
+        )
+        .sort((a, b) => a.labelValue - b.labelValue);
+      return labelEntries.map((entry) => {
+        const center =
+          centroids?.[entry.labelValue] || centroids?.[String(entry.labelValue)];
+        const vox = Array.isArray(center)
+          ? [
+              Math.round(Number(center[0] || 0)),
+              Math.round(Number(center[1] || 0)),
+              Math.round(Number(center[2] || 0)),
+            ]
+          : null;
+        const labelMeta = labelsRef.current.find(
+          (item) => Number(item?.value || 0) === entry.labelValue,
+        );
+        return {
+          type: "mask-label",
+          lesionType: "mask-label",
+          annotationIndex: -1,
+          labelValue: entry.labelValue,
+          labelName: String(labelMeta?.name || `Label ${entry.labelValue}`),
+          color: labelMeta?.color || "#f59e0b",
+          points: vox ? [{ vox }] : [],
+          axCorSag: 0,
+          paneKey: "A",
+          sliceIndex: Number.isFinite(Number(vox?.[2])) ? Number(vox[2]) : 0,
+          voxelCount: entry.count,
+        };
+      });
     },
   }));
 
@@ -2518,6 +2632,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         cancelAnimationFrame(markerRedrawRafRef.current);
       if (markerDrawRafRef.current !== null)
         cancelAnimationFrame(markerDrawRafRef.current);
+      if (focusMarkerTimerRef.current !== null)
+        clearTimeout(focusMarkerTimerRef.current);
       for (const observer of Object.values(paneResizeObserversRef.current)) {
         observer?.disconnect?.();
       }
