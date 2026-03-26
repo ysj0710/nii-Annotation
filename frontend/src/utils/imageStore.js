@@ -1,5 +1,5 @@
 const DB_NAME = 'nii-annotation'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const STORE_NAME = 'images'
 
 const toImageMeta = (record) => {
@@ -38,6 +38,16 @@ const openDB = () =>
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' })
         store.createIndex('createdAt', 'createdAt')
+        store.createIndex('remoteImageId', 'remoteImageId')
+        return
+      }
+      const tx = request.transaction
+      const store = tx?.objectStore(STORE_NAME)
+      if (store && !store.indexNames.contains('createdAt')) {
+        store.createIndex('createdAt', 'createdAt')
+      }
+      if (store && !store.indexNames.contains('remoteImageId')) {
+        store.createIndex('remoteImageId', 'remoteImageId')
       }
     }
     request.onsuccess = () => resolve(request.result)
@@ -68,6 +78,16 @@ export const getImageById = async (id) =>
   withStore('readonly', (store) =>
     new Promise((resolve, reject) => {
       const request = store.get(id)
+      request.onsuccess = () => resolve(request.result || null)
+      request.onerror = () => reject(request.error)
+    })
+  )
+
+export const getImageByRemoteImageId = async (remoteImageId) =>
+  withStore('readonly', (store) =>
+    new Promise((resolve, reject) => {
+      const index = store.index('remoteImageId')
+      const request = index.get(String(remoteImageId || ''))
       request.onsuccess = () => resolve(request.result || null)
       request.onerror = () => reject(request.error)
     })

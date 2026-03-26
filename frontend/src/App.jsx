@@ -18,6 +18,7 @@ import dicomParser from 'dicom-parser'
 import {
   getAllImages,
   getImageById,
+  getImageByRemoteImageId,
   saveImages,
   updateImage,
   clearAllImages,
@@ -1469,6 +1470,8 @@ export default function App() {
   const localPersistDirtyRef = useRef(false)
   const activeImageIdRef = useRef('')
   const queueSwitchingRef = useRef(false)
+  const queuedSwitchDirectionRef = useRef(0)
+  const remoteImportInFlightRef = useRef(new Map())
   const platformBroadcastRef = useRef(null)
 
   const externalCtx = useMemo(() => {
@@ -2056,10 +2059,9 @@ export default function App() {
 
   const findLocalByRemoteImageId = async (remoteImageId) => {
     if (!remoteImageId) return null
-    const records = await getAllImages()
-    return (
-      records.find((record) => String(record.remoteImageId || '') === String(remoteImageId) && !record.isMaskOnly) || null
-    )
+    const record = await getImageByRemoteImageId(String(remoteImageId))
+    if (!record || record.isMaskOnly) return null
+    return record
   }
 
   const fetchAndImportByImageId = async ({
@@ -2072,6 +2074,11 @@ export default function App() {
     silent = false,
     skipUiRefresh = false
   } = {}) => {
+    const remoteKey = String(imageId || imageUrl || '').trim()
+    if (remoteKey && remoteImportInFlightRef.current.has(remoteKey)) {
+      return remoteImportInFlightRef.current.get(remoteKey)
+    }
+    const runPromise = (async () => {
     if (useAutoGuard && autoImportedRef.current) return null
     const hasDirectImageUrl = !!imageUrl
     const hasImageIdDownload = !!imageId && !!externalCtx.platformOrigin
@@ -2236,6 +2243,13 @@ export default function App() {
         Message.error('自动加载影像失败，请检查科研平台传参与下载接口')
       }
       return null
+    }
+    })()
+    if (remoteKey) remoteImportInFlightRef.current.set(remoteKey, runPromise)
+    try {
+      return await runPromise
+    } finally {
+      if (remoteKey) remoteImportInFlightRef.current.delete(remoteKey)
     }
   }
 
@@ -2940,7 +2954,10 @@ export default function App() {
 
   const switchQueueImage = async (direction = 1) => {
     if (!queueImages.length) return
-    if (queueSwitchingRef.current) return
+    if (queueSwitchingRef.current) {
+      queuedSwitchDirectionRef.current += Number(direction || 0)
+      return
+    }
     queueSwitchingRef.current = true
     const baseIndex =
       activeQueueIndex >= 0
@@ -2970,6 +2987,11 @@ export default function App() {
       }
     } finally {
       queueSwitchingRef.current = false
+      const pending = Number(queuedSwitchDirectionRef.current || 0)
+      queuedSwitchDirectionRef.current = 0
+      if (pending !== 0) {
+        void switchQueueImage(pending)
+      }
     }
   }
 
