@@ -1410,7 +1410,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       })
       .filter(Boolean);
     if (!points.length) return;
-    const annotationIndex = Number(annotation?.annotationIndex ?? -1);
+    const annotationIndex = Number(annotation?.__annotationIndex ?? -1);
     const isSelected =
       Number.isInteger(annotationIndex) &&
       annotationIndex >= 0 &&
@@ -1489,11 +1489,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         !PANE_CONFIGS[paneKey].is2D
       )
         continue;
-      const currentAnnotations = getCurrentAnnotations();
-      for (let annotationIndex = 0; annotationIndex < currentAnnotations.length; annotationIndex += 1) {
+      const current = getCurrentAnnotations();
+      for (let annotationIndex = 0; annotationIndex < current.length; annotationIndex += 1) {
         const annotation = {
-          ...(currentAnnotations[annotationIndex] || {}),
-          annotationIndex,
+          ...(current[annotationIndex] || {}),
+          __annotationIndex: annotationIndex,
         };
         if (annotation?.type !== "freehand") continue;
         if (AX_COR_SAG_TO_PANE[Number(annotation?.axCorSag)] !== paneKey)

@@ -1484,6 +1484,35 @@ const splitMixedFieldsByPrefix = (fields = []) => {
   return { lesion, patient, rest };
 };
 
+const resolveAnnotationAnchorForCard = (annotation = {}) => {
+  const points = Array.isArray(annotation?.points) ? annotation.points : [];
+  const voxPoints = points
+    .map((pt) =>
+      Array.isArray(pt?.vox) && pt.vox.length >= 3
+        ? [Number(pt.vox[0]), Number(pt.vox[1]), Number(pt.vox[2])]
+        : null,
+    )
+    .filter((pt) => Array.isArray(pt) && pt.every((v) => Number.isFinite(v)));
+  if (voxPoints.length > 0) {
+    const center = voxPoints.reduce(
+      (acc, pt) => [acc[0] + pt[0], acc[1] + pt[1], acc[2] + pt[2]],
+      [0, 0, 0],
+    );
+    return [
+      Math.round(center[0] / voxPoints.length),
+      Math.round(center[1] / voxPoints.length),
+      Math.round(center[2] / voxPoints.length),
+    ];
+  }
+  return null;
+};
+
+const isLesionCheckboxField = (field) => {
+  const label = String(field?.label || "").trim();
+  const type = String(field?.type || "").toLowerCase();
+  return type === "checkbox" && label === "病灶";
+};
+
 const parseCustomWorkflowSchema = (raw) => {
   const parsed = parseJsonSafe(raw, raw);
   if (!parsed) return { mainCategoryOptions: [], mainCategoryTitle: "主分类项", steps: [] };
@@ -1679,7 +1708,6 @@ export default function App() {
   });
   const [workflowErrors, setWorkflowErrors] = useState({});
   const [selectedLesionIndex, setSelectedLesionIndex] = useState(-1);
-  const [lesionListVersion, setLesionListVersion] = useState(0);
 
   const viewerRef = useRef(null);
   const viewerHostRef = useRef(null);
@@ -1933,34 +1961,16 @@ export default function App() {
     const annotations = Array.isArray(viewerRef.current?.exportAnnotations?.())
       ? viewerRef.current.exportAnnotations()
       : [];
-    if (annotations.length > 0) {
-      return annotations.map((annotation, idx) => {
-        const anchor = resolveAnnotationAnchor(annotation);
-        const coord = Array.isArray(anchor) ? anchor.map((v) => Math.round(Number(v || 0))) : null;
-        return {
-          key: `ann-${idx}`,
-          name: `病灶${String.fromCharCode(65 + (idx % 26))}${idx >= 26 ? Math.floor(idx / 26) : ""}`,
-          annotationIndex: idx,
-          coord,
-          isMaskOnly: false,
-        };
-      });
-    }
-    const stats = viewerRef.current?.getLabelStats?.() || {};
-    const hasMask = Object.entries(stats).some(
-      ([label, count]) => Number(label) > 0 && Number(count || 0) > 0,
-    );
-    if (!hasMask) return [];
-    return [
-      {
-        key: "mask-0",
-        name: "病灶A",
-        annotationIndex: -1,
-        coord: null,
-        isMaskOnly: true,
-      },
-    ];
-  }, [activeImage?.id, activeImage?.maskVersion, lesionListVersion, labelStats]);
+    return annotations.map((annotation, idx) => {
+      const coord = resolveAnnotationAnchorForCard(annotation);
+      return {
+        key: `lesion-${idx}`,
+        name: `病灶${String.fromCharCode(65 + (idx % 26))}${idx >= 26 ? Math.floor(idx / 26) : ""}`,
+        annotationIndex: idx,
+        coord,
+      };
+    });
+  }, [activeImage?.id, activeImage?.maskVersion, workflowState, labelStats]);
   useEffect(() => {
     const detected = detectBrowserRuntimeEnv();
     runtimeEnvRef.current = detected;
@@ -3583,7 +3593,6 @@ export default function App() {
     ) {
       hasUnsavedChangesRef.current = true;
       localPersistDirtyRef.current = true;
-      setLesionListVersion((v) => v + 1);
     }
     if (
       reason === "draw" ||
@@ -5116,6 +5125,7 @@ export default function App() {
       nextErrors.mainCategory = "主分类项为必填项";
     }
     for (const field of activeStepDef.fields || []) {
+      if (isLesionCheckboxField(field)) continue;
       if (!field?.required) continue;
       const value = activeCard?.values?.[field.id];
       const empty = Array.isArray(value)
@@ -5600,7 +5610,9 @@ export default function App() {
                       ) : null}
                     </div>
                   )}
-                  {(activeStepDef?.fields || []).map((field) => (
+                  {(activeStepDef?.fields || [])
+                    .filter((field) => !isLesionCheckboxField(field))
+                    .map((field) => (
                     <div
                       key={`single-${field.id}`}
                       className="custom-field-label-wrap"
@@ -5619,7 +5631,7 @@ export default function App() {
                   ))}
                   <div className="workflow-section-title">病灶列表（{lesionItems.length}）</div>
                   {lesionItems.length === 0 ? (
-                    <div className="custom-field-empty">暂无病灶，请先标注病灶区域</div>
+                    <div className="custom-field-empty">暂无病灶，请先使用自由曲线标注病灶区域</div>
                   ) : (
                     <div className="custom-field-list">
                       {lesionItems.map((lesion, idx) => (
@@ -5629,18 +5641,14 @@ export default function App() {
                           className={`annotation-menu-item${selectedLesionIndex === idx ? " active" : ""}`}
                           onClick={() => {
                             setSelectedLesionIndex(idx);
-                            if (Number(lesion.annotationIndex) >= 0) {
-                              viewerRef.current?.jumpToAnnotation?.(Number(lesion.annotationIndex));
-                            } else if (activeLabel?.value) {
-                              viewerRef.current?.jumpToLabel?.(Number(activeLabel.value));
-                            }
+                            viewerRef.current?.jumpToAnnotation?.(Number(lesion.annotationIndex));
                           }}
                         >
                           <span className="annotation-menu-name">
                             {lesion.name}
                             {Array.isArray(lesion.coord)
                               ? `  (${lesion.coord.join(", ")})`
-                              : "  (mask)"}
+                              : ""}
                           </span>
                         </button>
                       ))}
