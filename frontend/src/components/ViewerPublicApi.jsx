@@ -3540,6 +3540,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const nextZoom = clamp(currentZoom * zoomFactor, 0.15, 20);
         nv.scene.pan2Dxyzmm[3] = nextZoom;
         nv.drawScene?.();
+        nv.sync?.();
+        requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
         if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
       };
 
