@@ -5161,20 +5161,6 @@ export default function App() {
     });
   };
 
-  const handleZoomToFit = () => {
-    viewerRef.current?.zoomToFit?.();
-  };
-
-  const handleFocusLesion = (lesionId) => {
-    const id = String(lesionId || "");
-    if (!id) return;
-    setSelectedLesionId(id);
-    viewerRef.current?.zoomToFit?.();
-    requestAnimationFrame(() => {
-      viewerRef.current?.jumpToLesion?.(id);
-    });
-  };
-
   const annotationMenuItems = [
     {
       key: "brush",
@@ -5707,9 +5693,6 @@ export default function App() {
               </span>
             </>
           )}
-          <Button onClick={handleZoomToFit}>
-            归位视图
-          </Button>
           <Button onClick={saveCurrentAnnotation}>
             保存
           </Button>
@@ -5970,7 +5953,8 @@ export default function App() {
                           type="button"
                           className={`annotation-menu-item${selectedLesionId === lesion.lesionId ? " active" : ""}`}
                           onClick={() => {
-                            handleFocusLesion(lesion.lesionId);
+                            setSelectedLesionId(lesion.lesionId);
+                            viewerRef.current?.jumpToLesion?.(lesion.lesionId);
                           }}
                         >
                           <span className="annotation-menu-name">

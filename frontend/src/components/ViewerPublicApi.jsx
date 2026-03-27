@@ -478,6 +478,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const renderMaskOnly3DRef = useRef(renderMaskOnly3D);
   const crosshairWidthRef = useRef(THREE_D_CROSSHAIR_MIN_WIDTH);
   const markerRedrawRafRef = useRef(null);
+  const markerRedrawDelayFramesRef = useRef(0);
   const markerDrawRafRef = useRef(null);
   const drawRefreshPendingRef = useRef(false);
   const pendingDrawRefreshPayloadRef = useRef(null);
@@ -1132,21 +1133,32 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   };
 
   const scheduleMarkerRedraw = (delayFrames = 0) => {
+    const nextDelay = Math.max(0, Number(delayFrames) || 0);
     if (markerRedrawRafRef.current !== null) {
-      cancelAnimationFrame(markerRedrawRafRef.current);
-      markerRedrawRafRef.current = null;
+      markerRedrawDelayFramesRef.current = Math.min(
+        Number(markerRedrawDelayFramesRef.current || 0),
+        nextDelay,
+      );
+      return;
     }
-    const run = (remaining) => {
+    markerRedrawDelayFramesRef.current = nextDelay;
+    const run = () => {
       markerRedrawRafRef.current = requestAnimationFrame(() => {
+        const remaining = Math.max(
+          0,
+          Number(markerRedrawDelayFramesRef.current || 0),
+        );
         if (remaining > 0) {
-          run(remaining - 1);
+          markerRedrawDelayFramesRef.current = remaining - 1;
+          run();
           return;
         }
         markerRedrawRafRef.current = null;
+        markerRedrawDelayFramesRef.current = 0;
         drawStrokeMarkers(true);
       });
     };
-    run(Math.max(0, Number(delayFrames) || 0));
+    run();
   };
 
   const toStoredPoint = (paneKey, pt, canvas = null) => {
@@ -3230,7 +3242,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const currentTool = toolRef.current;
         if (currentTool === "pan") {
           requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
-          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1);
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(0);
           return;
         }
         if (!isAnnotationTool(currentTool)) return;
@@ -3346,7 +3358,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const currentTool = toolRef.current;
         if (currentTool === "pan") {
           scheduleCrosshairSync(paneKey);
-          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1);
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(0);
           return;
         }
         if (currentTool === "freehand") {
@@ -3447,7 +3459,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const currentTool = toolRef.current;
         if (currentTool === "pan") {
           requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
-          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1);
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(0);
           return;
         }
         if (currentTool === "freehand") {
@@ -3529,7 +3541,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const onWheel = (event) => {
         const currentTool = toolRef.current;
         if (currentTool !== "pan") {
-          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(0);
           return;
         }
         if (!paneCfg?.is2D) return;
@@ -3543,7 +3555,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const nextZoom = clamp(currentZoom * zoomFactor, 0.15, 20);
         nv.scene.pan2Dxyzmm[3] = nextZoom;
         nv.drawScene?.();
-        if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
+        if (hasVisibleMarkerWork()) scheduleMarkerRedraw(0);
       };
 
       canvas.addEventListener("pointerdown", onPointerDown);
