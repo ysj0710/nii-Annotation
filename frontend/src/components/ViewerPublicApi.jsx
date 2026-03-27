@@ -2122,10 +2122,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const x1 = clamp(Math.ceil(maxX) + 1, 0, canvasW - 1);
       const y1 = clamp(Math.ceil(maxY) + 1, 0, canvasH - 1);
       if (x1 < x0 || y1 < y0) return false;
+      const spanW = x1 - x0 + 1;
+      const spanH = y1 - y0 + 1;
+      const area = spanW * spanH;
+      let supersample = 4;
+      if (area > 180000) supersample = 1;
+      else if (area > 80000) supersample = 2;
       const tmpCanvas = document.createElement("canvas");
-      const supersample = 4;
-      tmpCanvas.width = (x1 - x0 + 1) * supersample;
-      tmpCanvas.height = (y1 - y0 + 1) * supersample;
+      tmpCanvas.width = spanW * supersample;
+      tmpCanvas.height = spanH * supersample;
       const tmpCtx = tmpCanvas.getContext("2d", { willReadFrequently: true });
       if (!tmpCtx) return false;
       tmpCtx.clearRect(0, 0, tmpCanvas.width, tmpCanvas.height);
@@ -2152,16 +2157,47 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         tmpCanvas.width,
         tmpCanvas.height,
       ).data;
-      for (let py = 0; py < tmpCanvas.height; py += 1) {
-        const rowOffset = py * tmpCanvas.width * 4;
-        for (let px = 0; px < tmpCanvas.width; px += 1) {
-          const a = Number(alpha[rowOffset + px * 4 + 3] || 0);
-          if (a < 8) continue;
+      if (supersample <= 1) {
+        for (let py = 0; py < tmpCanvas.height; py += 1) {
+          const rowOffset = py * tmpCanvas.width * 4;
+          for (let px = 0; px < tmpCanvas.width; px += 1) {
+            const a = Number(alpha[rowOffset + px * 4 + 3] || 0);
+            if (a < 8) continue;
+            const vox = canvasPosToVox(
+              paneKey,
+              {
+                x: x0 + px + 0.5,
+                y: y0 + py + 0.5,
+              },
+              markerCanvas,
+            );
+            setVoxelAt(vox);
+          }
+        }
+        return true;
+      }
+      // Downsample alpha hit-testing to one canvas->vox mapping per base pixel.
+      for (let by = 0; by < spanH; by += 1) {
+        const py0 = by * supersample;
+        for (let bx = 0; bx < spanW; bx += 1) {
+          const px0 = bx * supersample;
+          let hit = false;
+          for (let sy = 0; sy < supersample && !hit; sy += 1) {
+            const rowOffset = (py0 + sy) * tmpCanvas.width * 4;
+            for (let sx = 0; sx < supersample; sx += 1) {
+              const a = Number(alpha[rowOffset + (px0 + sx) * 4 + 3] || 0);
+              if (a >= 8) {
+                hit = true;
+                break;
+              }
+            }
+          }
+          if (!hit) continue;
           const vox = canvasPosToVox(
             paneKey,
             {
-              x: x0 + (px + 0.5) / supersample,
-              y: y0 + (py + 0.5) / supersample,
+              x: x0 + bx + 0.5,
+              y: y0 + by + 0.5,
             },
             markerCanvas,
           );
@@ -3255,7 +3291,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       }
       const maskChanged = rasterizeClosedAnnotationToMask(closedPoints, {
         recordHistory: false,
-        emitChange: true,
+        emitChange: false,
         axCorSag: curvePlaneRef.current,
         sliceIndex: curveSliceIndexRef.current,
         sourcePaneKey: paneKey,

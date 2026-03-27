@@ -3619,7 +3619,8 @@ export default function App() {
       reason === "brush-stroke-complete" ||
       reason === "undo" ||
       reason === "redo" ||
-      reason === "annotate"
+      reason === "annotate" ||
+      reason === "curve-complete"
     ) {
       hasUnsavedChangesRef.current = true;
       localPersistDirtyRef.current = true;
