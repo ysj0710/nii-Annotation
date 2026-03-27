@@ -1522,14 +1522,26 @@ const isLesionCheckboxField = (field) => {
   return type === "checkbox" && label === "病灶";
 };
 
+const createEmptyWorkflowSchema = () => ({
+  mainCategoryOptions: [],
+  mainCategoryTitle: "主分类项",
+  steps: [],
+});
+
 const parseCustomWorkflowSchema = (raw) => {
   const parsed = parseJsonSafe(raw, raw);
-  if (!parsed) return { mainCategoryOptions: [], mainCategoryTitle: "主分类项", steps: [] };
+  if (!parsed) return createEmptyWorkflowSchema();
   const makeMainCategoryOptions = (mainCategory) =>
     Array.isArray(mainCategory)
       ? mainCategory
           .map((v, i) => normalizeWorkflowOption(v, i))
-          .filter(Boolean)
+          .filter(
+            (opt) =>
+              !!opt &&
+              opt.value != null &&
+              String(opt.value).trim() !== "" &&
+              String(opt.label || "").trim() !== "",
+          )
       : [];
 
   if (Array.isArray(parsed)) {
@@ -1711,11 +1723,9 @@ export default function App() {
   const [activeImage, setActiveImage] = useState(null);
   const [exportDirHandle, setExportDirHandle] = useState(null);
   const [batchQueue, setBatchQueue] = useState(null);
-  const [workflowSchema, setWorkflowSchema] = useState({
-    mainCategoryOptions: [],
-    mainCategoryTitle: "主分类项",
-    steps: [],
-  });
+  const [workflowSchema, setWorkflowSchema] = useState(
+    createEmptyWorkflowSchema(),
+  );
   const [workflowState, setWorkflowState] = useState({
     stepIndex: 0,
     steps: {},
@@ -2010,7 +2020,11 @@ export default function App() {
       return;
     }
     const url = String(externalCtx.customSchemaUrl || "").trim();
-    if (!url) return;
+    if (!url) {
+      setWorkflowSchema(createEmptyWorkflowSchema());
+      return;
+    }
+    let cancelled = false;
     void (async () => {
       try {
         const resp = await fetchWithAuthFallback(
@@ -2018,15 +2032,26 @@ export default function App() {
           {},
           externalCtx.token,
         );
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          if (!cancelled) setWorkflowSchema(createEmptyWorkflowSchema());
+          return;
+        }
         const json = await resp.json().catch(() => null);
         const remoteSchema = parseCustomWorkflowSchema(json);
-        if ((remoteSchema?.steps || []).length > 0)
-          setWorkflowSchema(remoteSchema);
+        if (!cancelled) {
+          if ((remoteSchema?.steps || []).length > 0) {
+            setWorkflowSchema(remoteSchema);
+          } else {
+            setWorkflowSchema(createEmptyWorkflowSchema());
+          }
+        }
       } catch {
-        // ignore custom schema bootstrap failures
+        if (!cancelled) setWorkflowSchema(createEmptyWorkflowSchema());
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [
     externalCtx.customSchema,
     externalCtx.customSchemaUrl,
