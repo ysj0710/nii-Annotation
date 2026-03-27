@@ -2065,6 +2065,35 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       lastTargetVox = [x, y, z];
     };
 
+    // Bridge quantization gaps caused by canvas->vox mapping so one filled
+    // region is not fragmented into thousands of tiny disconnected voxels.
+    const connectVoxelGap = (fromVox, toVox) => {
+      if (!Array.isArray(fromVox) || !Array.isArray(toVox)) return;
+      const from = [
+        Math.round(Number(fromVox[0] || 0)),
+        Math.round(Number(fromVox[1] || 0)),
+        Math.round(Number(fromVox[2] || 0)),
+      ];
+      const to = [
+        Math.round(Number(toVox[0] || 0)),
+        Math.round(Number(toVox[1] || 0)),
+        Math.round(Number(toVox[2] || 0)),
+      ];
+      const dx = to[0] - from[0];
+      const dy = to[1] - from[1];
+      const dz = to[2] - from[2];
+      const steps = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
+      if (steps <= 1) return;
+      for (let i = 1; i < steps; i += 1) {
+        const t = i / steps;
+        setVoxelAt([
+          from[0] + dx * t,
+          from[1] + dy * t,
+          from[2] + dz * t,
+        ]);
+      }
+    };
+
     ensureBaseSnapshot(nv.drawBitmap);
     const rasterizeByCanvas = () => {
       // Use the exact screen-space polygon the user drew, then map filled pixels
@@ -2157,29 +2186,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         tmpCanvas.width,
         tmpCanvas.height,
       ).data;
-      if (supersample <= 1) {
-        for (let py = 0; py < tmpCanvas.height; py += 1) {
-          const rowOffset = py * tmpCanvas.width * 4;
-          for (let px = 0; px < tmpCanvas.width; px += 1) {
-            const a = Number(alpha[rowOffset + px * 4 + 3] || 0);
-            if (a < 8) continue;
-            const vox = canvasPosToVox(
-              paneKey,
-              {
-                x: x0 + px + 0.5,
-                y: y0 + py + 0.5,
-              },
-              markerCanvas,
-            );
-            setVoxelAt(vox);
-          }
-        }
-        return true;
-      }
-      // Downsample alpha hit-testing to one canvas->vox mapping per base pixel.
-      for (let by = 0; by < spanH; by += 1) {
+      const baseW = supersample <= 1 ? tmpCanvas.width : spanW;
+      const baseH = supersample <= 1 ? tmpCanvas.height : spanH;
+      const prevRowVox = new Array(baseW).fill(null);
+      // Downsample alpha hit-testing to one canvas->vox mapping per base pixel,
+      // then connect neighboring mapped voxels to avoid sparse checkerboard masks.
+      for (let by = 0; by < baseH; by += 1) {
         const py0 = by * supersample;
-        for (let bx = 0; bx < spanW; bx += 1) {
+        let prevInRow = null;
+        for (let bx = 0; bx < baseW; bx += 1) {
           const px0 = bx * supersample;
           let hit = false;
           for (let sy = 0; sy < supersample && !hit; sy += 1) {
@@ -2192,7 +2207,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
               }
             }
           }
-          if (!hit) continue;
+          if (!hit) {
+            prevInRow = null;
+            prevRowVox[bx] = null;
+            continue;
+          }
           const vox = canvasPosToVox(
             paneKey,
             {
@@ -2201,7 +2220,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             },
             markerCanvas,
           );
+          if (!Array.isArray(vox) || vox.length < 3) {
+            prevInRow = null;
+            prevRowVox[bx] = null;
+            continue;
+          }
           setVoxelAt(vox);
+          connectVoxelGap(prevInRow, vox);
+          connectVoxelGap(prevRowVox[bx], vox);
+          prevInRow = vox;
+          prevRowVox[bx] = vox;
         }
       }
       return true;
