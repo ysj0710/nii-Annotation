@@ -5163,12 +5163,6 @@ export default function App() {
 
   const annotationMenuItems = [
     {
-      key: "zoom",
-      name: "缩放",
-      active: tool === "zoom",
-      onClick: () => toggleAnnotationTool("zoom"),
-    },
-    {
       key: "brush",
       name: "笔刷",
       active: tool === "brush",

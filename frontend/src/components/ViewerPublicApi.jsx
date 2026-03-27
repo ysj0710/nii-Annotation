@@ -2546,7 +2546,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const nv = getPaneNv(key);
       if (!nv) continue;
       const showCrosshair =
-        key === "R" ? true : currentTool === "pan" || currentTool === "zoom";
+        key === "R" ? true : currentTool === "pan";
       nv.setCrosshairVisible?.(showCrosshair);
       if (nv.opts) nv.opts.show3Dcrosshair = key === "R";
       if (
@@ -3515,28 +3515,20 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const onWheel = (event) => {
         const currentTool = toolRef.current;
         if (currentTool !== "pan") {
-          // 保留原有滚轮缩放行为，不在这里拦截。
           if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
           return;
         }
-        // pan 工具下滚轮仅做当前视口切层，不做四视口联动。
+        if (!paneCfg?.is2D) return;
         event?.preventDefault?.();
+        event?.stopPropagation?.();
         const nv = getPaneNv(paneKey);
-        const fixedAxis = Number(paneCfg?.fixedAxis);
-        const dimLen = Number(nv?.back?.dims?.[fixedAxis + 1] || 0);
-        const currentSlice = getPaneCurrentSliceIndex(paneKey);
-        if (
-          nv?.scene?.crosshairPos &&
-          Number.isInteger(fixedAxis) &&
-          fixedAxis >= 0 &&
-          dimLen > 1 &&
-          Number.isInteger(currentSlice)
-        ) {
-          const direction = Number(event?.deltaY || 0) > 0 ? 1 : -1;
-          const nextSlice = clamp(currentSlice + direction, 0, dimLen - 1);
-          nv.scene.crosshairPos[fixedAxis] = nextSlice / Math.max(1, dimLen - 1);
-          nv.drawScene?.();
-        }
+        const scrollDelta = Number(event?.deltaY || 0);
+        if (!nv?.scene?.pan2Dxyzmm || scrollDelta === 0) return;
+        const currentZoom = Number(nv.scene.pan2Dxyzmm[3] || 1);
+        const zoomFactor = scrollDelta < 0 ? 1.06 : 1 / 1.06;
+        const nextZoom = clamp(currentZoom * zoomFactor, 0.15, 20);
+        nv.scene.pan2Dxyzmm[3] = nextZoom;
+        nv.drawScene?.();
         if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
       };
 
