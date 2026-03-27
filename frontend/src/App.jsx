@@ -3665,7 +3665,7 @@ export default function App() {
           create: true,
         });
         const labelWritable = await labelHandle.createWritable();
-        await labelWritable.write(saveLabelCsv);
+        await labelWritable.write(toExcelFriendlyCsv(saveLabelCsv));
         await labelWritable.close();
       }
       if (saveDirHandle && saveLabelXlsxBuffer) {
@@ -4896,7 +4896,13 @@ export default function App() {
       const safeLabel = `"${String(labelValue).replaceAll('"', '""')}"`;
       lines.push(`${safeId},${safeLabel}`);
     }
-    return lines.join("\n");
+    return lines.join("\r\n");
+  };
+
+  const toExcelFriendlyCsv = (csvText = "") => {
+    if (!csvText) return "";
+    const bom = "\uFEFF";
+    return csvText.startsWith(bom) ? csvText : `${bom}${csvText}`;
   };
 
   const buildLabelRows = (records = []) => {
@@ -5021,7 +5027,7 @@ export default function App() {
           create: true,
         });
         const labelWritable = await labelHandle.createWritable();
-        await labelWritable.write(labelCsv);
+        await labelWritable.write(toExcelFriendlyCsv(labelCsv));
         await labelWritable.close();
       }
       if (labelXlsxBuffer) {
@@ -5056,7 +5062,7 @@ export default function App() {
       imgFolder?.file(entry.imageName, entry.imageData);
       maskFolder?.file(entry.maskName, entry.maskData);
     }
-    if (labelCsv) zip.file("labels.csv", labelCsv);
+    if (labelCsv) zip.file("labels.csv", toExcelFriendlyCsv(labelCsv));
     if (labelXlsxBuffer) zip.file("labels.xlsx", labelXlsxBuffer);
 
     const blob = await zip.generateAsync({ type: "blob" });
