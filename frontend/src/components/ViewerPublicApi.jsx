@@ -505,6 +505,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const [focusedPlane, setFocusedPlane] = useState(null);
   const [canFocusPlanes, setCanFocusPlanes] = useState(false);
   const [visiblePaneKeys, setVisiblePaneKeys] = useState([...PANE_ORDER]);
+  const [threeDUpdatePending, setThreeDUpdatePending] = useState(false);
 
   imageKeyRef.current = image?.id ? String(image.id) : "";
 
@@ -543,6 +544,17 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     annotationsByImageRef.current.set(key, next);
   };
   const emitDrawingChange = (reason) => {
+    if (
+      reason === "brush-stroke-complete" ||
+      reason === "curve-complete" ||
+      reason === "undo" ||
+      reason === "redo" ||
+      reason === "clear"
+    ) {
+      setThreeDUpdatePending(true);
+    } else if (reason === "load") {
+      setThreeDUpdatePending(false);
+    }
     const notify = onDrawingChangeRef.current;
     if (typeof notify === "function") notify(reason);
   };
@@ -1770,6 +1782,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return true;
   };
 
+  const applyManual3DUpdate = () => {
+    const renderNv = getPaneNv("R");
+    if (!renderNv) return false;
+    syncSharedBitmapBindings();
+    refreshDrawingAcrossPanes({ reason: "manual-3d" });
+    setThreeDUpdatePending(false);
+    return true;
+  };
+
   const syncPaneLayoutNow = (paneKey) => {
     const nv = getPaneNv(paneKey);
     if (!nv) return false;
@@ -1863,12 +1884,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       effectiveMaxTier = Math.min(effectiveMaxTier, 2);
     const tiers = [];
     const visibleKeys = getVisiblePaneKeys();
-    let redrawKeys = visibleKeys;
+    const allow3DRedraw = reason === "load" || reason === "manual-3d";
+    let redrawKeys = visibleKeys.filter(
+      (key) => PANE_CONFIGS[key]?.is2D || (allow3DRedraw && key === "R"),
+    );
     if (reason === "stroke") {
       if (perfProfile.strokeRefreshTarget === "source-only" && sourcePaneKey) {
-        redrawKeys = visibleKeys.filter((key) => key === sourcePaneKey);
+        redrawKeys = redrawKeys.filter((key) => key === sourcePaneKey);
       } else {
-        redrawKeys = visibleKeys.filter((key) => PANE_CONFIGS[key]?.is2D);
+        redrawKeys = redrawKeys.filter((key) => PANE_CONFIGS[key]?.is2D);
       }
     }
     if (!redrawKeys.length && sourcePaneKey) redrawKeys = [sourcePaneKey];
@@ -3135,6 +3159,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (!panesReady || !image?.id || !image?.data) return;
     let cancelled = false;
     const nextImageKey = String(image.id);
+    setThreeDUpdatePending(false);
     imageKeyRef.current = nextImageKey;
     lesionTrackingRef.current = {
       imageKey: nextImageKey,
@@ -3489,35 +3514,28 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
       const onWheel = (event) => {
         const currentTool = toolRef.current;
-        if (currentTool === "zoom") {
-          // 缩放工具：滚轮仅缩放，不做切层/联动。
+        if (currentTool !== "pan") {
+          // 保留原有滚轮缩放行为，不在这里拦截。
           if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
           return;
         }
-        // 非缩放工具下统一禁用滚轮缩放。
+        // pan 工具下滚轮仅做当前视口切层，不做四视口联动。
         event?.preventDefault?.();
-        if (currentTool === "pan") {
-          // pan 工具：滚轮仅切层并联动，完全不做缩放。
-          const nv = getPaneNv(paneKey);
-          const fixedAxis = Number(paneCfg?.fixedAxis);
-          const dimLen = Number(nv?.back?.dims?.[fixedAxis + 1] || 0);
-          const currentSlice = getPaneCurrentSliceIndex(paneKey);
-          if (
-            nv?.scene?.crosshairPos &&
-            Number.isInteger(fixedAxis) &&
-            fixedAxis >= 0 &&
-            dimLen > 1 &&
-            Number.isInteger(currentSlice)
-          ) {
-            const direction = Number(event?.deltaY || 0) > 0 ? 1 : -1;
-            const nextSlice = clamp(currentSlice + direction, 0, dimLen - 1);
-            nv.scene.crosshairPos[fixedAxis] =
-              nextSlice / Math.max(1, dimLen - 1);
-            nv.drawScene?.();
-            scheduleCrosshairSync(paneKey);
-          }
-        } else {
-          scheduleCrosshairSync(paneKey);
+        const nv = getPaneNv(paneKey);
+        const fixedAxis = Number(paneCfg?.fixedAxis);
+        const dimLen = Number(nv?.back?.dims?.[fixedAxis + 1] || 0);
+        const currentSlice = getPaneCurrentSliceIndex(paneKey);
+        if (
+          nv?.scene?.crosshairPos &&
+          Number.isInteger(fixedAxis) &&
+          fixedAxis >= 0 &&
+          dimLen > 1 &&
+          Number.isInteger(currentSlice)
+        ) {
+          const direction = Number(event?.deltaY || 0) > 0 ? 1 : -1;
+          const nextSlice = clamp(currentSlice + direction, 0, dimLen - 1);
+          nv.scene.crosshairPos[fixedAxis] = nextSlice / Math.max(1, dimLen - 1);
+          nv.drawScene?.();
         }
         if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
       };
@@ -3666,6 +3684,18 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
                     ref={setPaneMarkerCanvasRef(paneKey)}
                     className="viewer-marker-canvas"
                   />
+                )}
+                {paneKey === "R" && (
+                  <div className="viewer-3d-update-wrap">
+                    <button
+                      type="button"
+                      className="viewer-3d-update-btn"
+                      onClick={applyManual3DUpdate}
+                      disabled={!threeDUpdatePending}
+                    >
+                      Update
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

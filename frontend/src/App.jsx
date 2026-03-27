@@ -2499,13 +2499,16 @@ export default function App() {
             : card,
         ),
       };
-      return {
+      const nextState = {
         ...prev,
         steps: {
           ...prev.steps,
           [stepId]: nextStep,
         },
       };
+      hasUnsavedChangesRef.current = true;
+      localPersistDirtyRef.current = true;
+      return nextState;
     });
   };
 
@@ -5491,7 +5494,7 @@ export default function App() {
       if (!card) return prev;
       const normalized = String(value ?? "");
       if (String(card.mainCategory || "") === normalized) return prev;
-      return {
+      const nextState = {
         ...prev,
         steps: {
           ...prev.steps,
@@ -5503,6 +5506,9 @@ export default function App() {
           },
         },
       };
+      hasUnsavedChangesRef.current = true;
+      localPersistDirtyRef.current = true;
+      return nextState;
     });
   };
 
