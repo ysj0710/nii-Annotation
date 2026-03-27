@@ -3230,6 +3230,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const currentTool = toolRef.current;
         if (currentTool === "pan") {
           requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1);
           return;
         }
         if (!isAnnotationTool(currentTool)) return;
@@ -3345,6 +3346,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const currentTool = toolRef.current;
         if (currentTool === "pan") {
           scheduleCrosshairSync(paneKey);
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1);
           return;
         }
         if (currentTool === "freehand") {
@@ -3445,6 +3447,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const currentTool = toolRef.current;
         if (currentTool === "pan") {
           requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(1);
           return;
         }
         if (currentTool === "freehand") {
@@ -3540,8 +3543,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         const nextZoom = clamp(currentZoom * zoomFactor, 0.15, 20);
         nv.scene.pan2Dxyzmm[3] = nextZoom;
         nv.drawScene?.();
-        nv.sync?.();
-        requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
         if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
       };
 
