@@ -1287,6 +1287,28 @@ const buildAuthHeaders = (token) => {
   return { Authorization: authValue };
 };
 
+const PLATFORM_SESSION_EXPIRED_ERROR_CODE = "PLATFORM_SESSION_EXPIRED";
+
+const createPlatformSessionExpiredError = (message = "标注会话已过期") => {
+  const error = new Error(message);
+  error.code = PLATFORM_SESSION_EXPIRED_ERROR_CODE;
+  return error;
+};
+
+const isPlatformSessionExpiredError = (error) => {
+  if (!error) return false;
+  if (error.code === PLATFORM_SESSION_EXPIRED_ERROR_CODE) return true;
+  const text = String(error?.message || "").toLowerCase();
+  return (
+    text.includes("会话已失效") ||
+    text.includes("会话已过期") ||
+    text.includes("sessioncode") ||
+    text.includes("refreshtoken") ||
+    text.includes("401") ||
+    text.includes("鉴权失败")
+  );
+};
+
 const resolveRemoteUrl = (url, platformOrigin) => {
   const rawUrl = String(url || "").trim();
   if (!rawUrl) return "";
@@ -1739,6 +1761,7 @@ export default function App() {
   });
   const [workflowErrors, setWorkflowErrors] = useState({});
   const [selectedLesionId, setSelectedLesionId] = useState("");
+  const [platformSessionExpired, setPlatformSessionExpired] = useState(false);
 
   const viewerRef = useRef(null);
   const viewerHostRef = useRef(null);
@@ -1764,22 +1787,27 @@ export default function App() {
   const remoteImportInFlightRef = useRef(new Map());
   const batchPrefetchStartedRef = useRef(false);
   const platformBroadcastRef = useRef(null);
+  const platformSessionRef = useRef({
+    sessionId: "",
+    accessToken: "",
+    accessTokenExpiresAt: 0,
+    refreshToken: "",
+    refreshTokenExpiresAt: 0,
+  });
+  const sessionAuthInFlightRef = useRef(null);
+  const sessionExpiredPromptRef = useRef(false);
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {};
     const p = new URLSearchParams(window.location.search);
-    const rawTokenFromQuery = getRawQueryParam("token");
-    const fallbackToken =
-      rawTokenFromQuery ||
-      p.get("token") ||
-      globalCtx.token ||
-      localStorage.getItem("token") ||
-      sessionStorage.getItem("token") ||
-      "";
     return {
       imageId: p.get("imageId") || globalCtx.imageId || "",
       imageUrl: p.get("imageUrl") || globalCtx.imageUrl || "",
-      token: String(fallbackToken || "").trim(),
+      sessionCode:
+        getRawQueryParam("sessionCode") ||
+        p.get("sessionCode") ||
+        globalCtx.sessionCode ||
+        "",
       platformOrigin: p.get("platformOrigin") || globalCtx.platformOrigin || "",
       annotationBackendOrigin:
         p.get("annotationBackendOrigin") ||
@@ -1817,8 +1845,155 @@ export default function App() {
     return ctxOrigin || envOrigin || "http://192.168.110.88:8010";
   }, [externalCtx.annotationBackendOrigin]);
 
-  const fetchWithAuthFallback = async (url, init = {}, token = "") => {
+  const exchangeSessionAccessToken = async () => {
+    const sessionCode = String(externalCtx.sessionCode || "").trim();
+    const normalizedOrigin = String(externalCtx.platformOrigin || "").replace(
+      /\/+$/,
+      "",
+    );
+    if (!normalizedOrigin || !sessionCode) {
+      throw new Error("缺少标注会话参数，请从科研平台重新打开");
+    }
+    const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/session/exchange`;
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionCode }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(errText || `session exchange failed: ${resp.status}`);
+    }
+    const json = await resp.json().catch(() => null);
+    assertPlatformResponseSuccess(json, "标注会话交换失败");
+    const payload = parseApiPayload(json) || {};
+    const next = {
+      sessionId: String(payload.sessionId || ""),
+      accessToken: String(payload.accessToken || ""),
+      accessTokenExpiresAt: Number(payload.accessTokenExpiresAt || 0),
+      refreshToken: String(payload.refreshToken || ""),
+      refreshTokenExpiresAt: Number(payload.refreshTokenExpiresAt || 0),
+    };
+    platformSessionRef.current = next;
+    if (!next.accessToken) {
+      throw new Error("未获取到有效会话令牌");
+    }
+    return next.accessToken;
+  };
+
+  const refreshSessionAccessToken = async () => {
+    const refreshToken = String(
+      platformSessionRef.current?.refreshToken || "",
+    ).trim();
+    const normalizedOrigin = String(externalCtx.platformOrigin || "").replace(
+      /\/+$/,
+      "",
+    );
+    if (!normalizedOrigin || !refreshToken) {
+      return exchangeSessionAccessToken();
+    }
+    const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/session/refresh`;
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => "");
+      throw new Error(errText || `session refresh failed: ${resp.status}`);
+    }
+    const json = await resp.json().catch(() => null);
+    assertPlatformResponseSuccess(json, "标注会话刷新失败");
+    const payload = parseApiPayload(json) || {};
+    const next = {
+      sessionId: String(payload.sessionId || platformSessionRef.current.sessionId || ""),
+      accessToken: String(payload.accessToken || ""),
+      accessTokenExpiresAt: Number(payload.accessTokenExpiresAt || 0),
+      refreshToken: String(payload.refreshToken || ""),
+      refreshTokenExpiresAt: Number(payload.refreshTokenExpiresAt || 0),
+    };
+    platformSessionRef.current = next;
+    if (!next.accessToken) {
+      throw new Error("未获取到有效会话令牌");
+    }
+    return next.accessToken;
+  };
+
+  const resolvePlatformAccessToken = async (forceRefresh = false) => {
+    const now = Date.now();
+    const current = platformSessionRef.current || {};
+    const hasValidToken =
+      !forceRefresh &&
+      String(current.accessToken || "").trim() &&
+      Number(current.accessTokenExpiresAt || 0) > now + 30_000;
+    if (hasValidToken) return String(current.accessToken || "").trim();
+    if (sessionAuthInFlightRef.current) {
+      return sessionAuthInFlightRef.current;
+    }
+    const task = (async () => {
+      const hasRefreshToken =
+        String(platformSessionRef.current?.refreshToken || "").trim() &&
+        Number(platformSessionRef.current?.refreshTokenExpiresAt || 0) >
+          Date.now() + 10_000;
+      if (hasRefreshToken) {
+        try {
+          return await refreshSessionAccessToken();
+        } catch {
+          return exchangeSessionAccessToken();
+        }
+      }
+      return exchangeSessionAccessToken();
+    })()
+      .catch((error) => {
+        throw error;
+      })
+      .finally(() => {
+        sessionAuthInFlightRef.current = null;
+      });
+    sessionAuthInFlightRef.current = task;
+    return task;
+  };
+
+  const fetchWithAuthFallback = async (url, init = {}) => {
     const normalizedInit = { ...(init || {}) };
+    const usePlatformSessionAuth =
+      !!String(externalCtx.platformOrigin || "").trim() &&
+      (!!String(externalCtx.sessionCode || "").trim() ||
+        !!String(platformSessionRef.current?.refreshToken || "").trim() ||
+        !!String(platformSessionRef.current?.accessToken || "").trim());
+    if (!usePlatformSessionAuth) {
+      return fetch(url, normalizedInit);
+    }
+    const markPlatformSessionExpired = (detail = "") => {
+      setPlatformSessionExpired(true);
+      setTool("pan");
+      if (sessionExpiredPromptRef.current) return;
+      sessionExpiredPromptRef.current = true;
+      const text = detail
+        ? `会话已过期，请返回科研平台重新打开当前标注页面。${detail}`
+        : "会话已过期，请返回科研平台重新打开当前标注页面。";
+      Modal.warning({
+        title: "标注会话已过期",
+        content: text,
+        okText: "我知道了",
+        hideCancel: true,
+      });
+      Message.error("会话已过期，当前页面已锁定编辑");
+    };
+    if (platformSessionExpired) {
+      throw createPlatformSessionExpiredError(
+        "会话已过期，请返回科研平台重新打开",
+      );
+    }
+    let token = "";
+    try {
+      token = await resolvePlatformAccessToken(false);
+    } catch (error) {
+      markPlatformSessionExpired(String(error?.message || ""));
+      throw createPlatformSessionExpiredError(
+        "会话已过期，请返回科研平台重新打开",
+      );
+    }
     const firstHeaders = {
       ...(normalizedInit.headers || {}),
       ...buildAuthHeaders(token),
@@ -1828,18 +2003,28 @@ export default function App() {
       headers: firstHeaders,
     });
     if (firstResp.status !== 401) return firstResp;
-    const raw = String(token || "").trim();
-    if (!raw) return firstResp;
-    const plain = raw.replace(/^Bearer\s+/i, "").trim();
-    if (!plain) return firstResp;
+    const retryToken = await resolvePlatformAccessToken(true).catch(() => "");
+    if (!retryToken) {
+      markPlatformSessionExpired("刷新令牌失败。");
+      throw createPlatformSessionExpiredError(
+        "会话已过期，请返回科研平台重新打开",
+      );
+    }
     const retryHeaders = {
       ...(normalizedInit.headers || {}),
-      Authorization: plain,
+      ...buildAuthHeaders(retryToken),
     };
-    return fetch(url, {
+    const retryResp = await fetch(url, {
       ...normalizedInit,
       headers: retryHeaders,
     });
+    if (retryResp.status === 401) {
+      markPlatformSessionExpired("服务端返回鉴权失败。");
+      throw createPlatformSessionExpiredError(
+        "会话已过期，请返回科研平台重新打开",
+      );
+    }
+    return retryResp;
   };
 
   const activeLabel = useMemo(
@@ -2037,7 +2222,6 @@ export default function App() {
         const resp = await fetchWithAuthFallback(
           resolveRemoteUrl(url, externalCtx.platformOrigin),
           {},
-          externalCtx.token,
         );
         if (!resp.ok) {
           if (!cancelled) setWorkflowSchema(createEmptyWorkflowSchema());
@@ -2063,7 +2247,6 @@ export default function App() {
     externalCtx.customSchema,
     externalCtx.customSchemaUrl,
     externalCtx.platformOrigin,
-    externalCtx.token,
   ]);
 
   useEffect(() => {
@@ -2592,7 +2775,7 @@ export default function App() {
               if (topicId) params.set("topicId", String(topicId));
               return `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/downloadByImageId?${params.toString()}`;
             })();
-        const resp = await fetchWithAuthFallback(url, {}, externalCtx.token);
+        const resp = await fetchWithAuthFallback(url, {});
         if (!resp.ok) throw new Error(`download failed: ${resp.status}`);
 
         const blob = await resp.blob();
@@ -2930,7 +3113,7 @@ export default function App() {
     if (externalCtx.topicId) params.set("topicId", String(externalCtx.topicId));
     params.set("batchId", String(externalCtx.batchId));
     const endpoint = `${normalizedOrigin}/analysisPlatformService/api/v1/analysis/sample/image/getBatchImageQueue?${params.toString()}`;
-    const resp = await fetchWithAuthFallback(endpoint, {}, externalCtx.token);
+    const resp = await fetchWithAuthFallback(endpoint, {});
     if (!resp.ok) throw new Error(`get batch queue failed: ${resp.status}`);
     const json = await resp.json().catch(() => null);
     const payload = parseApiPayload(json);
@@ -3435,9 +3618,8 @@ export default function App() {
       }),
     );
 
-    const resp = await fetch(endpoint, {
+    const resp = await fetchWithAuthFallback(endpoint, {
       method: "POST",
-      headers: buildAuthHeaders(externalCtx.token),
       body: payload,
     });
     if (!resp.ok) {
@@ -3515,10 +3697,9 @@ export default function App() {
     }
     if (!items.length) return false;
 
-    const resp = await fetch(endpoint, {
+    const resp = await fetchWithAuthFallback(endpoint, {
       method: "POST",
       headers: {
-        ...buildAuthHeaders(externalCtx.token),
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -3542,6 +3723,10 @@ export default function App() {
   };
 
   const saveCurrentAnnotation = async () => {
+    if (platformSessionExpired) {
+      Message.error("会话已过期，请返回科研平台重新打开");
+      return false;
+    }
     if (!activeImage?.id) {
       Message.warning("当前没有可保存的影像");
       return false;
@@ -3634,6 +3819,9 @@ export default function App() {
       return true;
     } catch (error) {
       console.error(error);
+      if (isPlatformSessionExpiredError(error)) {
+        return false;
+      }
       Message.error("标注已本地保存，但科研平台同步失败");
       hasUnsavedChangesRef.current = false;
       localPersistDirtyRef.current = false;
@@ -3643,6 +3831,7 @@ export default function App() {
   };
 
   const onViewerEvent = (reason = "draw") => {
+    if (platformSessionExpired) return;
     if (reason === "curve-complete") {
       Message.success("标注成功");
     }
@@ -4923,6 +5112,10 @@ export default function App() {
   };
 
   const toggleAnnotationTool = (nextTool) => {
+    if (platformSessionExpired) {
+      Message.warning("会话已过期，无法继续编辑");
+      return;
+    }
     setTool((prev) => (prev === nextTool ? "pan" : nextTool));
     requestAnimationFrame(() => {
       viewerRef.current?.refreshOverlay?.();
@@ -4934,23 +5127,27 @@ export default function App() {
       key: "brush",
       name: "笔刷",
       active: tool === "brush",
+      disabled: platformSessionExpired,
       onClick: () => toggleAnnotationTool("brush"),
     },
     {
       key: "clearLabel",
       name: "橡皮擦",
       active: tool === "clearLabel",
+      disabled: platformSessionExpired,
       onClick: () => toggleAnnotationTool("clearLabel"),
     },
     {
       key: "freehand",
       name: "自由曲线",
       active: tool === "freehand",
+      disabled: platformSessionExpired,
       onClick: () => toggleAnnotationTool("freehand"),
     },
     {
       key: "undo",
       name: "撤销",
+      disabled: platformSessionExpired,
       onClick: () => {
         const handled = viewerRef.current?.undoToolAction?.();
         if (!handled) viewerRef.current?.undo?.();
@@ -4959,6 +5156,7 @@ export default function App() {
     {
       key: "clear",
       name: "清除标注",
+      disabled: platformSessionExpired,
       onClick: async () => {
         viewerRef.current?.clearAnnotations?.();
         await handleClear();
@@ -5449,7 +5647,9 @@ export default function App() {
               </span>
             </>
           )}
-          <Button onClick={saveCurrentAnnotation}>保存</Button>
+          <Button onClick={saveCurrentAnnotation} disabled={platformSessionExpired}>
+            保存
+          </Button>
           <Popover trigger="click" position="bl" content={exportMenuContent}>
             <Button type="primary">导出</Button>
           </Popover>
@@ -5480,6 +5680,7 @@ export default function App() {
                     <button
                       type="button"
                       className={`brush-shape-btn${brushShape === "circle" ? " active" : ""}`}
+                      disabled={platformSessionExpired}
                       onClick={() => setBrushShape("circle")}
                       title="圆形"
                     >
@@ -5497,6 +5698,7 @@ export default function App() {
                     <button
                       type="button"
                       className={`brush-shape-btn${brushShape === "square" ? " active" : ""}`}
+                      disabled={platformSessionExpired}
                       onClick={() => setBrushShape("square")}
                       title="方形"
                     >
@@ -5521,6 +5723,7 @@ export default function App() {
                     min="1"
                     max="50"
                     value={brushSize}
+                    disabled={platformSessionExpired}
                     onChange={(e) => setBrushSize(Number(e.target.value))}
                   />
                 </div>
@@ -5541,6 +5744,7 @@ export default function App() {
                       node?.parentElement || document.body
                     }
                     value={activeLabelId}
+                    disabled={platformSessionExpired}
                     onChange={(value) => setActiveLabelId(Number(value) || 1)}
                     aria-label="选择当前标注 Label"
                   >
@@ -5611,6 +5815,11 @@ export default function App() {
               onDrawingChange={onViewerEvent}
             />
           </Suspense>
+          {platformSessionExpired && (
+            <div className="viewer-session-expired-mask">
+              会话已过期，请返回科研平台重新打开当前标注页面
+            </div>
+          )}
         </Content>
 
         <Sider className="label-sidebar-placeholder" width={360}>

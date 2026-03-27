@@ -44,7 +44,7 @@ def _normalize_mask(mask_image: nib.Nifti1Image, image_shape: tuple[int, ...]) -
 
 def _normalize_annotations_json(raw: bytes) -> dict[str, Any]:
     if not raw:
-        return {"labels": [], "annotations": []}
+        return {"labels": [], "annotations": [], "customFields": {}}
     try:
         payload = json.loads(raw.decode("utf-8"))
     except Exception as exc:  # noqa: BLE001
@@ -54,10 +54,74 @@ def _normalize_annotations_json(raw: bytes) -> dict[str, Any]:
         raise ExportValidationError("annotations JSON must be an object")
     labels = payload.get("labels", [])
     annotations = payload.get("annotations", [])
+    custom_fields = payload.get("customFields", {})
     return {
         "labels": labels if isinstance(labels, list) else [],
         "annotations": annotations if isinstance(annotations, list) else [],
+        "customFields": custom_fields if isinstance(custom_fields, dict) else {},
     }
+
+
+def _strip_known_image_suffix(name: str) -> str:
+    value = (name or "").strip()
+    lower = value.lower()
+    if lower.endswith(".nii.gz"):
+        return value[:-7]
+    if lower.endswith(".nii"):
+        return value[:-4]
+    if "." in value:
+        return value.rsplit(".", 1)[0]
+    return value
+
+
+def _extract_label_value(annotations: dict[str, Any]) -> str:
+    custom_fields = annotations.get("customFields", {})
+    if not isinstance(custom_fields, dict):
+        return ""
+
+    direct = custom_fields.get("label")
+    if direct is not None and str(direct).strip():
+        return str(direct).strip()
+
+    workflow_raw = custom_fields.get("__workflow__")
+    workflow = None
+    if isinstance(workflow_raw, dict):
+        workflow = workflow_raw
+    elif isinstance(workflow_raw, str) and workflow_raw.strip():
+        try:
+            parsed = json.loads(workflow_raw)
+            if isinstance(parsed, dict):
+                workflow = parsed
+        except Exception:
+            workflow = None
+    if not isinstance(workflow, dict):
+        return ""
+
+    steps = workflow.get("steps")
+    if not isinstance(steps, dict):
+        return ""
+    for step_val in steps.values():
+        if not isinstance(step_val, dict):
+            continue
+        cards = step_val.get("cards")
+        if not isinstance(cards, list):
+            continue
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            main_category = card.get("mainCategory")
+            if main_category is not None and str(main_category).strip():
+                return str(main_category).strip()
+    return ""
+
+
+def _build_labels_csv(image_filename: str, label_value: str) -> bytes:
+    image_id = _strip_known_image_suffix(Path(image_filename or "image.nii.gz").name)
+    # CSV escaping for double quotes
+    safe_id = str(image_id).replace('"', '""')
+    safe_label = str(label_value or "").replace('"', '""')
+    csv_text = f'ID,label\n"{safe_id}","{safe_label}"\n'
+    return csv_text.encode("utf-8")
 
 
 def build_export_zip(
@@ -85,9 +149,11 @@ def build_export_zip(
     annotations["imageFile"] = f"img/{image_filename}"
     annotations["maskFile"] = "mask/mask.nii.gz"
     annotations["exportedAt"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    label_value = _extract_label_value(annotations)
 
     mask_payload = merged_mask.to_bytes()
     annotations_payload = json.dumps(annotations, ensure_ascii=False, indent=2).encode("utf-8")
+    labels_csv_payload = _build_labels_csv(image_filename, label_value)
 
     if storage_root:
         root = Path(storage_root).expanduser().resolve()
@@ -101,6 +167,7 @@ def build_export_zip(
         (mask_dir / "mask.nii.gz").write_bytes(mask_payload)
         (mask_dir / "annotations.json").write_bytes(annotations_payload)
         (mask_dir / "source_mask_filename.txt").write_text(mask_filename or "mask.nii.gz", encoding="utf-8")
+        (case_root / "labels.csv").write_bytes(labels_csv_payload)
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -108,6 +175,7 @@ def build_export_zip(
         zf.writestr("mask/mask.nii.gz", mask_payload)
         zf.writestr("mask/annotations.json", annotations_payload)
         zf.writestr("mask/source_mask_filename.txt", mask_filename or "mask.nii.gz")
+        zf.writestr("labels.csv", labels_csv_payload)
     zip_buffer.seek(0)
 
     timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")

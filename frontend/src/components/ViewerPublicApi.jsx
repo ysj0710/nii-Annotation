@@ -2421,6 +2421,18 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     }
   };
 
+  const applyPaneInterpolation = (nv) => {
+    if (!nv) return;
+    // Keep MPR display visually smooth. This only changes rendering interpolation,
+    // not the underlying label voxels.
+    if (typeof nv.setInterpolation === "function") {
+      nv.setInterpolation(false);
+    }
+    if (nv.opts) {
+      nv.opts.isNearestInterpolation = false;
+    }
+  };
+
   const initializePaneInstances = async () => {
     if (initializedRef.current) return;
     const canvasesReady = PANE_ORDER.every((key) => !!getPaneCanvas(key));
@@ -2439,6 +2451,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           forceDevicePixelRatio: perfProfile.forceDevicePixelRatio,
         });
         await nv.attachToCanvas(canvas);
+        applyPaneInterpolation(nv);
         nv.setIsOrientationTextVisible?.(true);
         nv.setShowAllOrientationMarkers?.(true);
         nv.setCornerOrientationText?.(false);
@@ -2549,6 +2562,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         paneVolume.cal_max = Number(windowRange.max);
       }
       nv.addVolume(paneVolume);
+      applyPaneInterpolation(nv);
       nv.setRadiologicalConvention(
         isRasterImageName(sourceName) ? true : !!radiological2D,
       );
