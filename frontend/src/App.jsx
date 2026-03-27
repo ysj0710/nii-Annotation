@@ -3638,7 +3638,17 @@ export default function App() {
     let saveLabelCsv = "";
     let saveLabelXlsxBuffer = null;
     let saveLabelXlsxBase64 = "";
+    let saveDirHandle = exportDirHandle;
     try {
+      if (
+        !saveDirHandle &&
+        typeof window !== "undefined" &&
+        typeof window.showDirectoryPicker === "function"
+      ) {
+        // 首次保存时引导选择一次输出目录，后续保存复用该目录写入辅助表。
+        saveDirHandle = await window.showDirectoryPicker();
+        setExportDirHandle(saveDirHandle);
+      }
       const allRecords = await getAllImages();
       saveTableRecords = externalCtx.batchId
         ? resolveBulkExportScope(allRecords)
@@ -3650,16 +3660,16 @@ export default function App() {
       saveLabelXlsxBase64 = saveLabelXlsxBuffer
         ? bufferToBase64(saveLabelXlsxBuffer)
         : "";
-      if (exportDirHandle && saveLabelCsv) {
-        const labelHandle = await exportDirHandle.getFileHandle("labels.csv", {
+      if (saveDirHandle && saveLabelCsv) {
+        const labelHandle = await saveDirHandle.getFileHandle("labels.csv", {
           create: true,
         });
         const labelWritable = await labelHandle.createWritable();
         await labelWritable.write(saveLabelCsv);
         await labelWritable.close();
       }
-      if (exportDirHandle && saveLabelXlsxBuffer) {
-        const xlsxHandle = await exportDirHandle.getFileHandle("labels.xlsx", {
+      if (saveDirHandle && saveLabelXlsxBuffer) {
+        const xlsxHandle = await saveDirHandle.getFileHandle("labels.xlsx", {
           create: true,
         });
         const xlsxWritable = await xlsxHandle.createWritable();
@@ -4844,14 +4854,32 @@ export default function App() {
     if (explicitLabel != null && String(explicitLabel).trim() !== "") {
       return String(explicitLabel).trim();
     }
+    const directMainCategory = custom?.main_category;
+    if (directMainCategory != null && String(directMainCategory).trim() !== "") {
+      return String(directMainCategory).trim();
+    }
     const workflow = parseJsonSafe(custom?.__workflow__, custom?.__workflow__) || {};
     const steps = workflow?.steps || {};
     for (const stepId of Object.keys(steps)) {
       const cards = Array.isArray(steps?.[stepId]?.cards) ? steps[stepId].cards : [];
-      const first = cards[0] || null;
-      const mainCategory = first?.mainCategory;
-      if (mainCategory != null && String(mainCategory).trim() !== "") {
-        return String(mainCategory).trim();
+      for (const card of cards) {
+        const mainCategory = card?.mainCategory;
+        if (mainCategory != null && String(mainCategory).trim() !== "") {
+          return String(mainCategory).trim();
+        }
+      }
+    }
+    for (const key of Object.keys(custom)) {
+      if (!key || typeof key !== "string") continue;
+      if (
+        key === "mainCategory" ||
+        key.endsWith("__mainCategory") ||
+        key.endsWith("__main_category")
+      ) {
+        const value = custom[key];
+        if (value != null && String(value).trim() !== "") {
+          return String(value).trim();
+        }
       }
     }
     return "";

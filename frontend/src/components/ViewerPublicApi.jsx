@@ -2521,7 +2521,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     for (const key of PANE_ORDER) {
       const nv = getPaneNv(key);
       if (!nv) continue;
-      const showCrosshair = key === "R" ? true : currentTool === "pan";
+      const showCrosshair =
+        key === "R" ? true : currentTool === "pan" || currentTool === "zoom";
       nv.setCrosshairVisible?.(showCrosshair);
       if (nv.opts) nv.opts.show3Dcrosshair = key === "R";
       if (
@@ -3488,37 +3489,32 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
       const onWheel = (event) => {
         const currentTool = toolRef.current;
+        if (currentTool === "zoom") {
+          // 缩放工具：滚轮仅缩放，不做切层/联动。
+          if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
+          return;
+        }
+        // 非缩放工具下统一禁用滚轮缩放。
+        event?.preventDefault?.();
         if (currentTool === "pan") {
-          if (isDisplayedAsSinglePane(paneKey)) {
-            // 单视口 2D：滚轮仅用于缩放，不参与辅助线联动/切层。
-            if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
-            return;
-          }
-          const isZoomModifier = !!(event?.ctrlKey || event?.metaKey);
-          if (!isZoomModifier) {
-            // 普通滚轮改为切层并联动，避免与缩放冲突。
-            event?.preventDefault?.();
-            const nv = getPaneNv(paneKey);
-            const fixedAxis = Number(paneCfg?.fixedAxis);
-            const dimLen = Number(nv?.back?.dims?.[fixedAxis + 1] || 0);
-            const currentSlice = getPaneCurrentSliceIndex(paneKey);
-            if (
-              nv?.scene?.crosshairPos &&
-              Number.isInteger(fixedAxis) &&
-              fixedAxis >= 0 &&
-              dimLen > 1 &&
-              Number.isInteger(currentSlice)
-            ) {
-              const direction = Number(event?.deltaY || 0) > 0 ? 1 : -1;
-              const nextSlice = clamp(currentSlice + direction, 0, dimLen - 1);
-              nv.scene.crosshairPos[fixedAxis] =
-                nextSlice / Math.max(1, dimLen - 1);
-              nv.drawScene?.();
-              scheduleCrosshairSync(paneKey);
-            }
-          } else {
-            // Ctrl/⌘+滚轮：保留 Niivue 默认缩放，再同步联动状态。
-            requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
+          // pan 工具：滚轮仅切层并联动，完全不做缩放。
+          const nv = getPaneNv(paneKey);
+          const fixedAxis = Number(paneCfg?.fixedAxis);
+          const dimLen = Number(nv?.back?.dims?.[fixedAxis + 1] || 0);
+          const currentSlice = getPaneCurrentSliceIndex(paneKey);
+          if (
+            nv?.scene?.crosshairPos &&
+            Number.isInteger(fixedAxis) &&
+            fixedAxis >= 0 &&
+            dimLen > 1 &&
+            Number.isInteger(currentSlice)
+          ) {
+            const direction = Number(event?.deltaY || 0) > 0 ? 1 : -1;
+            const nextSlice = clamp(currentSlice + direction, 0, dimLen - 1);
+            nv.scene.crosshairPos[fixedAxis] =
+              nextSlice / Math.max(1, dimLen - 1);
+            nv.drawScene?.();
+            scheduleCrosshairSync(paneKey);
           }
         } else {
           scheduleCrosshairSync(paneKey);
