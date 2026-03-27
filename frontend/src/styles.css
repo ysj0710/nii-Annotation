@@ -394,21 +394,6 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   background: #0b0f16;
 }
 
-.viewer-session-expired-mask {
-  position: absolute;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  text-align: center;
-  color: #f8fafc;
-  font-size: 16px;
-  font-weight: 600;
-  background: rgba(2, 6, 23, 0.72);
-  backdrop-filter: blur(2px);
-}
 .dicom-mode-toggle {
   position: absolute;
   top: 12px;
