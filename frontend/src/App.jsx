@@ -1525,7 +1525,14 @@ const isLesionCheckboxField = (field) => {
 const createEmptyWorkflowSchema = () => ({
   mainCategoryOptions: [],
   mainCategoryTitle: "主分类项",
-  steps: [],
+  steps: [
+    {
+      id: "lesion",
+      title: "病灶标注项",
+      scope: "lesion",
+      fields: [],
+    },
+  ],
 });
 
 const parseCustomWorkflowSchema = (raw) => {
@@ -5640,7 +5647,7 @@ export default function App() {
                 <div className="custom-field-item workflow-card active">
                   <div className="workflow-card-header">
                     <span className="workflow-card-status completed">
-                      {workflowSchema.mainCategoryTitle || activeStepDef?.title || "主分类项"}
+                      {activeStepDef?.title || "标注项"}
                     </span>
                   </div>
                   {(workflowSchema.mainCategoryOptions || []).length > 0 && (
