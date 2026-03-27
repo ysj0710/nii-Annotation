@@ -3188,15 +3188,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       };
 
       const onPointerDown = (event) => {
-        if (event.button !== 0) return;
+        const btn = Number(event?.button);
+        if (Number.isFinite(btn) && btn > 0) return;
         const currentTool = toolRef.current;
         if (currentTool === "pan") {
           requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
           return;
         }
         if (!isAnnotationTool(currentTool)) return;
-        const markerCanvas = getPaneMarkerCanvas(paneKey);
-        if (!markerCanvas) return;
+        const markerCanvas = getPaneMarkerCanvas(paneKey) || canvas;
         if (isDisplayedAsSinglePane(paneKey)) {
           syncPaneLayoutNow(paneKey);
         }
@@ -3319,8 +3319,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           )
             return;
           if (activePointerPaneKeyRef.current !== paneKey) return;
-          const markerCanvas = getPaneMarkerCanvas(paneKey);
-          if (!markerCanvas) return;
+          const markerCanvas = getPaneMarkerCanvas(paneKey) || canvas;
           syncMarkerCanvasSize(paneKey);
           const pos = getCanvasPos(event, markerCanvas);
           const currentSliceIndex = getPaneCurrentSliceIndex(paneKey);
@@ -3425,7 +3424,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           if (capturedId !== null && canvas.hasPointerCapture?.(capturedId)) {
             canvas.releasePointerCapture?.(capturedId);
           }
-          const markerCanvas = getPaneMarkerCanvas(paneKey);
+          const markerCanvas = getPaneMarkerCanvas(paneKey) || canvas;
           if (markerCanvas && annotationStepsRef.current.length > 0) {
             const nearClosed =
               annotationStepsRef.current.length > 2 &&
