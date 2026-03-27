@@ -66,8 +66,9 @@ const PLATFORM_SYNC_CHANNEL = "nii-annotation-sync";
 const PLATFORM_SYNC_STORAGE_KEY = "nii-annotation:sync";
 const QUEUE_PREFETCH_RADIUS = 2;
 const LOCAL_IMAGE_PAGE_SIZE = 20;
-const BATCH_PREFETCH_CONCURRENCY = 3;
-const ENABLE_NEARBY_PREFETCH = false;
+const BATCH_PREFETCH_CONCURRENCY = 1;
+const ENABLE_NEARBY_PREFETCH = true;
+const AUTO_PREFETCH_ALL_MAX_IMAGES = 8;
 
 const detectBrowserRuntimeEnv = () => {
   const nav = typeof navigator !== "undefined" ? navigator : {};
@@ -1746,6 +1747,7 @@ export default function App() {
   const processedFilesRef = useRef(new Set());
   const imageRecordCacheRef = useRef(new Map());
   const imageRecordPrefetchingRef = useRef(new Set());
+  const localListPageRef = useRef({ start: -1, ids: [] });
   const saveTimerRef = useRef(null);
   const saveIdleRef = useRef(null);
   const saveQueueRef = useRef(Promise.resolve(false));
@@ -2516,6 +2518,7 @@ export default function App() {
     const total = idOrder.length;
     if (total <= 0) {
       setImages([]);
+      localListPageRef.current = { start: -1, ids: [] };
       return { items: [], start: 0 };
     }
     const clampedStart = Math.max(
@@ -2531,6 +2534,10 @@ export default function App() {
     );
     const metas = await getImageMetasByIds(pageIds);
     setImages(metas.map(toListItem));
+    localListPageRef.current = {
+      start: clampedStart,
+      ids: pageIds.map((id) => String(id)),
+    };
     return { items: metas, start: clampedStart };
   };
 
@@ -2716,10 +2723,15 @@ export default function App() {
         const importBatchId = makeImportBatchId();
         const beforeCount = existing.length;
 
+        const importOptions = {
+          refreshUi: !skipUiRefresh,
+          activateImported: !skipUiRefresh,
+          generateThumbnail: !skipUiRefresh,
+        };
         if (isZipFile(file.name)) {
-          await importZipFile(file, hashSet, importBatchId);
+          await importZipFile(file, hashSet, importBatchId, importOptions);
         } else {
-          await importImageFile(file, hashSet, importBatchId);
+          await importImageFile(file, hashSet, importBatchId, importOptions);
         }
 
         const afterRecords = await getAllImages();
@@ -2816,9 +2828,6 @@ export default function App() {
               mappedRecord = patched || candidate;
             }
           }
-        }
-        if (!skipUiRefresh) {
-          void refreshImageList();
         }
         if (afterCount <= beforeCount) {
           if (!silent) Message.info("影像已存在，已直接加载本地记录");
@@ -3036,11 +3045,19 @@ export default function App() {
             }
             if (!batchPrefetchStartedRef.current) {
               batchPrefetchStartedRef.current = true;
-              void prefetchQueueImages(queue?.images || [], {
-                skipImageId: targetItem?.imageId,
-                scope: "all",
-                concurrency: BATCH_PREFETCH_CONCURRENCY,
-              });
+              const queueLength = Array.isArray(queue?.images)
+                ? queue.images.length
+                : 0;
+              if (
+                queueLength > 1 &&
+                queueLength <= AUTO_PREFETCH_ALL_MAX_IMAGES
+              ) {
+                void prefetchQueueImages(queue?.images || [], {
+                  skipImageId: targetItem?.imageId,
+                  scope: "all",
+                  concurrency: BATCH_PREFETCH_CONCURRENCY,
+                });
+              }
             }
           }
         } catch (error) {
@@ -3783,8 +3800,12 @@ export default function App() {
       reason === "curve-complete" ||
       reason === "load"
     ) {
+      const isLoadEvent = reason === "load";
       syncWorkflowCardsByAnnotations({
-        persist: reason === "curve-complete" || reason === "load",
+        // Avoid heavy voxel stats scan + IndexedDB write while switching images.
+        persist: reason === "curve-complete",
+        hasMaskStrokeHint: isLoadEvent ? hasAttachedMask(activeImage) : null,
+        skipMaskStats: isLoadEvent,
       });
     }
   };
@@ -3836,8 +3857,18 @@ export default function App() {
           pageStart,
           pageStart + LOCAL_IMAGE_PAGE_SIZE,
         );
-        const metas = await getImageMetasByIds(pageIds);
-        setImages(metas.map(toListItem));
+        const pageIdKeys = pageIds.map((item) => String(item));
+        const pageCache = localListPageRef.current || { start: -1, ids: [] };
+        const samePage =
+          Number(pageCache.start) === Number(pageStart) &&
+          Array.isArray(pageCache.ids) &&
+          pageCache.ids.length === pageIdKeys.length &&
+          pageCache.ids.every((item, idx) => item === pageIdKeys[idx]);
+        if (!samePage) {
+          const metas = await getImageMetasByIds(pageIds);
+          setImages(metas.map(toListItem));
+          localListPageRef.current = { start: pageStart, ids: pageIdKeys };
+        }
       }
     }
 
@@ -4207,7 +4238,16 @@ export default function App() {
 
   const isDuplicateHash = (hash, hashSet) => hashSet.has(hash);
 
-  const importDicomItems = async (items, hashSet, importBatchId = null) => {
+  const importDicomItems = async (
+    items,
+    hashSet,
+    importBatchId = null,
+    {
+      refreshUi = true,
+      activateImported = true,
+      generateThumbnail = true,
+    } = {},
+  ) => {
     if (!Array.isArray(items) || items.length === 0) return;
     try {
       const niivueDicomLoader = await loadNiivueDicomLoader();
@@ -4236,7 +4276,9 @@ export default function App() {
           const hash = await hashBuffer(content);
           if (isDuplicateHash(hash, hashSet)) continue;
 
-          const thumbnail = await createThumbnail(content, name);
+          const thumbnail = generateThumbnail
+            ? await createThumbnail(content, name)
+            : "";
           const seriesNameParts = [];
           if (group.seriesNumber > 0)
             seriesNameParts.push(`S${group.seriesNumber}`);
@@ -4271,9 +4313,11 @@ export default function App() {
 
       if (newRecords.length > 0) {
         await saveImages(newRecords);
-        await refreshImageList();
-        const first = newRecords[0];
-        activateImportedRecordIfAllowed(first, { dicom: true });
+        if (refreshUi) await refreshImageList();
+        if (activateImported) {
+          const first = newRecords[0];
+          activateImportedRecordIfAllowed(first, { dicom: true });
+        }
       }
     } catch (error) {
       console.error("DICOM 导入失败", error);
@@ -4281,13 +4325,23 @@ export default function App() {
     }
   };
 
-  const importImageFile = async (file, hashSet, importBatchId = null) => {
+  const importImageFile = async (
+    file,
+    hashSet,
+    importBatchId = null,
+    {
+      refreshUi = true,
+      activateImported = true,
+      generateThumbnail = true,
+    } = {},
+  ) => {
     const originalBuffer = await file.arrayBuffer();
     if (isDicomFile(file.name) || isDicomContentBuffer(originalBuffer)) {
       await importDicomItems(
         [{ name: file.name || "dicom_slice", data: originalBuffer }],
         hashSet,
         importBatchId,
+        { refreshUi, activateImported, generateThumbnail },
       );
       return;
     }
@@ -4321,9 +4375,11 @@ export default function App() {
 
     if (isDuplicateHash(hash, hashSet)) return;
 
-    const thumbnail = await createThumbnail(buffer, internalName, {
-      isMask: isMaskOnly,
-    });
+    const thumbnail = generateThumbnail
+      ? await createThumbnail(buffer, internalName, {
+          isMask: isMaskOnly,
+        })
+      : "";
     const record = createImageRecord(internalName, buffer, hash, thumbnail, {
       displayName: effectiveName,
       isMaskOnly,
@@ -4338,11 +4394,20 @@ export default function App() {
     await saveImages([record]);
     hashSet.add(hash);
 
-    await refreshImageList();
-    activateImportedRecordIfAllowed(record);
+    if (refreshUi) await refreshImageList();
+    if (activateImported) activateImportedRecordIfAllowed(record);
   };
 
-  const importZipFile = async (file, hashSet, importBatchId = null) => {
+  const importZipFile = async (
+    file,
+    hashSet,
+    importBatchId = null,
+    {
+      refreshUi = true,
+      activateImported = true,
+      generateThumbnail = true,
+    } = {},
+  ) => {
     const buffer = await file.arrayBuffer();
     const zip = await JSZip.loadAsync(buffer);
 
@@ -4386,7 +4451,11 @@ export default function App() {
       dicomInputs.push({ name: entry.name, data: content });
     }
     if (dicomInputs.length > 0) {
-      await importDicomItems(dicomInputs, hashSet, importBatchId);
+      await importDicomItems(dicomInputs, hashSet, importBatchId, {
+        refreshUi,
+        activateImported,
+        generateThumbnail,
+      });
     } else if (imageEntries.length === 0 && maskEntries.length === 0) {
       Message.warning("zip 内未识别到可导入的 NIfTI 或 DICOM 文件");
     }
@@ -4448,7 +4517,9 @@ export default function App() {
       const maskMatch =
         maskByBase.get(baseName) || maskByBase.get(stripMaskTokens(baseName));
       if (maskMatch) maskMatch.used = true;
-      const thumbnail = await createThumbnail(content, internalName);
+      const thumbnail = generateThumbnail
+        ? await createThumbnail(content, internalName)
+        : "";
       const record = createImageRecord(internalName, content, hash, thumbnail, {
         displayName: name,
         sourceMask: maskMatch?.buffer || null,
@@ -4477,9 +4548,11 @@ export default function App() {
       const internalName = toInternalNiftiName(displayName);
       const hash = await hashBuffer(maskItem.buffer);
       if (isDuplicateHash(hash, hashSet)) continue;
-      const thumbnail = await createThumbnail(maskItem.buffer, internalName, {
-        isMask: true,
-      });
+      const thumbnail = generateThumbnail
+        ? await createThumbnail(maskItem.buffer, internalName, {
+            isMask: true,
+          })
+        : "";
       const record = createImageRecord(
         internalName,
         maskItem.buffer,
@@ -4503,9 +4576,11 @@ export default function App() {
 
     if (newRecords.length > 0) {
       await saveImages(newRecords);
-      await refreshImageList();
-      const first = newRecords[0];
-      activateImportedRecordIfAllowed(first);
+      if (refreshUi) await refreshImageList();
+      if (activateImported) {
+        const first = newRecords[0];
+        activateImportedRecordIfAllowed(first);
+      }
     }
   };
 
@@ -5338,14 +5413,21 @@ export default function App() {
   const syncWorkflowCardsByAnnotations = ({
     persist = false,
     returnNextState = false,
+    hasMaskStrokeHint = null,
+    skipMaskStats = false,
   } = {}) => {
     const annotations = Array.isArray(viewerRef.current?.exportAnnotations?.())
       ? viewerRef.current.exportAnnotations()
       : [];
-    const labelStats = viewerRef.current?.getLabelStats?.() || {};
-    const hasMaskStroke = Object.entries(labelStats).some(
-      ([label, count]) => Number(label) > 0 && Number(count || 0) > 0,
-    );
+    let hasMaskStroke = false;
+    if (typeof hasMaskStrokeHint === "boolean") {
+      hasMaskStroke = hasMaskStrokeHint;
+    } else if (!skipMaskStats) {
+      const labelStats = viewerRef.current?.getLabelStats?.() || {};
+      hasMaskStroke = Object.entries(labelStats).some(
+        ([label, count]) => Number(label) > 0 && Number(count || 0) > 0,
+      );
+    }
     const annotationCount = Math.max(
       0,
       annotations.length,
