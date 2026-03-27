@@ -1539,10 +1539,17 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return changed;
   };
 
-  const drawAnnotation = (ctx, canvas, annotation, paneKey) => {
+  const drawAnnotation = (
+    ctx,
+    canvas,
+    annotation,
+    paneKey,
+    { preferRawPx = false } = {},
+  ) => {
     const points = (annotation?.points || [])
       .map((p) => {
         if (
+          preferRawPx &&
           annotation?.closed !== true &&
           Number.isFinite(Number(p?.px)) &&
           Number.isFinite(Number(p?.py))
@@ -1721,7 +1728,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         )
           continue;
         if (annotation?.renderOnMarker === false) continue;
-        drawAnnotation(ctx, markerCanvas, annotation, paneKey);
+        drawAnnotation(ctx, markerCanvas, annotation, paneKey, {
+          preferRawPx: false,
+        });
       }
       const draft = annotationDraftRef.current;
       if (draft && AX_COR_SAG_TO_PANE[Number(draft?.axCorSag)] === paneKey) {
@@ -1732,7 +1741,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           !Number.isInteger(currentSlice) ||
           currentSlice === sliceIndex
         ) {
-          drawAnnotation(ctx, markerCanvas, draft, paneKey);
+          drawAnnotation(ctx, markerCanvas, draft, paneKey, {
+            preferRawPx: true,
+          });
         }
       }
       drawSelectedLesionOutline(ctx, markerCanvas, paneKey);
