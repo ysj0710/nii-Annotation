@@ -1,6 +1,7 @@
-const DB_NAME = 'nii-annotation'
+const DB_BASE_NAME = 'nii-annotation'
 const DB_VERSION = 2
 const STORE_NAME = 'images'
+let DB_NAMESPACE = 'default'
 
 const toImageMeta = (record) => {
   if (!record) return null
@@ -30,9 +31,21 @@ const toImageMeta = (record) => {
   }
 }
 
+const sanitizeNamespace = (value = '') =>
+  String(value || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9:_-]+/g, '_')
+    .slice(0, 160) || 'default'
+
+const resolveDbName = () => `${DB_BASE_NAME}__${sanitizeNamespace(DB_NAMESPACE)}`
+
+export const setImageStoreNamespace = (namespace) => {
+  DB_NAMESPACE = sanitizeNamespace(namespace)
+}
+
 const openDB = () =>
   new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION)
+    const request = indexedDB.open(resolveDbName(), DB_VERSION)
     request.onupgradeneeded = () => {
       const db = request.result
       if (!db.objectStoreNames.contains(STORE_NAME)) {

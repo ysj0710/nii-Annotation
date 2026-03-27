@@ -2033,6 +2033,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const ny = Number(dims?.[2] || 0);
     const nz = Math.max(1, Number(dims?.[3] || 1));
     if (nx < 1 || ny < 1 || nz < 1) return false;
+    const axisSizes = [nx, ny, nz];
+    const inPlaneAxes = [0, 1, 2].filter((axis) => axis !== paneCfg.fixedAxis);
+    const hAxis = inPlaneAxes[0];
+    const vAxis = inPlaneAxes[1];
 
     const fillLabel = Math.max(
       1,
@@ -2095,6 +2099,129 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     };
 
     ensureBaseSnapshot(nv.drawBitmap);
+    const rasterizeByVoxelPlane = () => {
+      const voxelPoints = normPoints
+        .map((pt) => toVoxPoint(pt, paneKey))
+        .filter((vox) => Array.isArray(vox) && vox.length >= 3)
+        .map((vox) => [
+          clamp(Math.round(Number(vox[0] || 0)), 0, nx - 1),
+          clamp(Math.round(Number(vox[1] || 0)), 0, ny - 1),
+          clamp(Math.round(Number(vox[2] || 0)), 0, nz - 1),
+        ]);
+      if (voxelPoints.length < 3) return false;
+
+      const projected = [];
+      for (const vox of voxelPoints) {
+        const u = Number(vox[hAxis] || 0);
+        const v = Number(vox[vAxis] || 0);
+        if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+        const prev = projected[projected.length - 1];
+        if (prev && prev.u === u && prev.v === v) continue;
+        projected.push({ u, v });
+      }
+      if (projected.length < 3) return false;
+      const firstPoint = projected[0];
+      const lastPoint = projected[projected.length - 1];
+      if (firstPoint.u !== lastPoint.u || firstPoint.v !== lastPoint.v) {
+        projected.push({ ...firstPoint });
+      }
+      if (projected.length < 4) return false;
+
+      let minU = Number.POSITIVE_INFINITY;
+      let maxU = Number.NEGATIVE_INFINITY;
+      let minV = Number.POSITIVE_INFINITY;
+      let maxV = Number.NEGATIVE_INFINITY;
+      for (const p of projected) {
+        minU = Math.min(minU, p.u);
+        maxU = Math.max(maxU, p.u);
+        minV = Math.min(minV, p.v);
+        maxV = Math.max(maxV, p.v);
+      }
+      if (
+        !Number.isFinite(minU) ||
+        !Number.isFinite(maxU) ||
+        !Number.isFinite(minV) ||
+        !Number.isFinite(maxV)
+      ) {
+        return false;
+      }
+
+      const uMin = clamp(Math.floor(minU), 0, Math.max(0, axisSizes[hAxis] - 1));
+      const uMax = clamp(Math.ceil(maxU), 0, Math.max(0, axisSizes[hAxis] - 1));
+      const vMin = clamp(Math.floor(minV), 0, Math.max(0, axisSizes[vAxis] - 1));
+      const vMax = clamp(Math.ceil(maxV), 0, Math.max(0, axisSizes[vAxis] - 1));
+      if (uMax < uMin || vMax < vMin) return false;
+      const area = (uMax - uMin + 1) * (vMax - vMin + 1);
+      if (area > 1500000) return false;
+
+      const setVoxelByUV = (u, v) => {
+        const full = [0, 0, 0];
+        full[paneCfg.fixedAxis] = Number.isInteger(currentSliceIndex)
+          ? currentSliceIndex
+          : 0;
+        full[hAxis] = u;
+        full[vAxis] = v;
+        setVoxelAt(full);
+      };
+
+      const drawVoxelLine = (from, to) => {
+        const du = Number(to.u || 0) - Number(from.u || 0);
+        const dv = Number(to.v || 0) - Number(from.v || 0);
+        const steps = Math.max(Math.abs(du), Math.abs(dv));
+        if (steps <= 0) {
+          setVoxelByUV(
+            clamp(Math.round(Number(from.u || 0)), 0, axisSizes[hAxis] - 1),
+            clamp(Math.round(Number(from.v || 0)), 0, axisSizes[vAxis] - 1),
+          );
+          return;
+        }
+        for (let i = 0; i <= steps; i += 1) {
+          const t = i / steps;
+          const u = clamp(
+            Math.round(Number(from.u || 0) + du * t),
+            0,
+            axisSizes[hAxis] - 1,
+          );
+          const v = clamp(
+            Math.round(Number(from.v || 0) + dv * t),
+            0,
+            axisSizes[vAxis] - 1,
+          );
+          setVoxelByUV(u, v);
+        }
+      };
+
+      for (let i = 0; i < projected.length - 1; i += 1) {
+        drawVoxelLine(projected[i], projected[i + 1]);
+      }
+
+      const pointInPolygon = (u, v) => {
+        let inside = false;
+        for (let i = 0, j = projected.length - 1; i < projected.length; j = i++) {
+          const pi = projected[i];
+          const pj = projected[j];
+          const yiAbove = Number(pi.v) > v;
+          const yjAbove = Number(pj.v) > v;
+          if (yiAbove === yjAbove) continue;
+          const intersectU =
+            Number(pj.u) +
+            ((v - Number(pj.v)) * (Number(pi.u) - Number(pj.u))) /
+              (Number(pi.v) - Number(pj.v) || 1e-6);
+          if (u < intersectU) inside = !inside;
+        }
+        return inside;
+      };
+
+      for (let v = vMin; v <= vMax; v += 1) {
+        const testV = v + 0.5;
+        for (let u = uMin; u <= uMax; u += 1) {
+          if (!pointInPolygon(u + 0.5, testV)) continue;
+          setVoxelByUV(u, v);
+        }
+      }
+      return true;
+    };
+
     const rasterizeByCanvas = () => {
       // Use the exact screen-space polygon the user drew, then map filled pixels
       // back through Niivue's canvas->frac->vox conversion. This stays faithful
@@ -2235,7 +2362,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       return true;
     };
 
-    if (!rasterizeByCanvas()) return false;
+    const voxelRasterized = rasterizeByVoxelPlane();
+    if (!voxelRasterized && !rasterizeByCanvas()) return false;
 
     if (!changed) return false;
     if (isViewerDebugEnabled()) {
@@ -2998,6 +3126,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const onPointerDown = (event) => {
         if (event.button !== 0) return;
         const currentTool = toolRef.current;
+        if (currentTool === "pan") {
+          requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
+          return;
+        }
         if (!isAnnotationTool(currentTool)) return;
         const paneCfg = PANE_CONFIGS[paneKey];
         const markerCanvas = getPaneMarkerCanvas(paneKey);
@@ -3111,6 +3243,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
       const onPointerMove = (event) => {
         const currentTool = toolRef.current;
+        if (currentTool === "pan") {
+          scheduleCrosshairSync(paneKey);
+          return;
+        }
         if (currentTool === "freehand") {
           if (!freehandDrawingRef.current) return;
           const perfProfile = getViewerPerfProfile();
@@ -3208,6 +3344,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
       const onPointerUp = (event) => {
         const currentTool = toolRef.current;
+        if (currentTool === "pan") {
+          requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
+          return;
+        }
         if (currentTool === "freehand") {
           if (!freehandDrawingRef.current) return;
           if (
@@ -3285,6 +3425,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       };
 
       const onWheel = () => {
+        scheduleCrosshairSync(paneKey);
         if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
       };
 

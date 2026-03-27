@@ -24,6 +24,7 @@ import {
   clearAllImages,
   getImageIdOrder,
   getImageMetasByIds,
+  setImageStoreNamespace,
 } from "./utils/imageStore.js";
 import { resolveAutoWindowRange } from "./utils/windowPresets.js";
 
@@ -1815,6 +1816,35 @@ export default function App() {
       .replace(/\/+$/, "");
     return ctxOrigin || envOrigin || "http://192.168.110.88:8010";
   }, [externalCtx.annotationBackendOrigin]);
+
+  const imageStoreScope = useMemo(() => {
+    const platformOrigin = String(externalCtx.platformOrigin || "")
+      .trim()
+      .replace(/\/+$/, "");
+    const topicId = String(externalCtx.topicId || "").trim();
+    const batchId = String(externalCtx.batchId || "").trim();
+    const imageId = String(externalCtx.imageId || "").trim();
+    const imageUrl = String(externalCtx.imageUrl || "").trim();
+    const hasRemoteContext = !!(platformOrigin || topicId || batchId || imageId || imageUrl);
+    if (!hasRemoteContext) return "local-default";
+    return [
+      "remote",
+      platformOrigin || "no-origin",
+      topicId || "no-topic",
+      batchId || "no-batch",
+      imageId || imageUrl || "no-image",
+    ].join("::");
+  }, [
+    externalCtx.platformOrigin,
+    externalCtx.topicId,
+    externalCtx.batchId,
+    externalCtx.imageId,
+    externalCtx.imageUrl,
+  ]);
+
+  useEffect(() => {
+    setImageStoreNamespace(imageStoreScope);
+  }, [imageStoreScope]);
 
   const resolveRuntimePlatformToken = (fallbackToken = "") => {
     const rawFallback = String(fallbackToken || "").trim();
