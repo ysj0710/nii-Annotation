@@ -1848,7 +1848,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         if (rebound) {
           for (const key of targetKeys) redrawPaneDrawing(key);
         }
-        if (redrawMarkers) drawStrokeMarkers(true);
+        if (redrawMarkers) {
+          drawStrokeMarkers(true);
+          // Run a deferred pass after viewport/layout settles so marker
+          // projection does not require an extra user click to catch up.
+          scheduleMarkerRedraw(2);
+        }
       });
     });
   };
@@ -2879,10 +2884,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         return focusedPlane;
       const next = focusedPlane === normalized ? null : normalized;
       setFocusedPlane(next);
-      requestAnimationFrame(() => {
-        for (const key of getVisiblePaneKeys()) syncMarkerCanvasSize(key);
-        drawStrokeMarkers(true);
-      });
       return next;
     },
     getFocusedPlane: () => focusedPlane,
@@ -3652,6 +3653,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     clearFreehandDraft();
     clearStrokeState();
     schedulePaneLayoutSync(getVisiblePaneKeys(), { redrawMarkers: true });
+    scheduleMarkerRedraw(3);
   }, [panesReady, focusedPlane, visiblePaneKeys]);
 
   const canShowPlaneSwitch = !!image && canFocusPlanes;
