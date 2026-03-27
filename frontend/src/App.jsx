@@ -3431,6 +3431,7 @@ export default function App() {
   const syncActiveAnnotationToPlatform = async (
     workflowSnapshot = null,
     labelCsv = "",
+    labelXlsxBase64 = "",
   ) => {
     const remoteImageId = String(
       activeImage?.remoteImageId || externalCtx?.imageId || "",
@@ -3479,6 +3480,7 @@ export default function App() {
       }),
     );
     if (labelCsv) payload.append("labelCsv", labelCsv);
+    if (labelXlsxBase64) payload.append("labelXlsxBase64", labelXlsxBase64);
 
     const resp = await fetchWithAuthFallback(endpoint, {
       method: "POST",
@@ -3497,6 +3499,7 @@ export default function App() {
     activeImageId = "",
     activeWorkflowSnapshot = null,
     labelCsv = "",
+    labelXlsxBase64 = "",
   } = {}) => {
     if (!externalCtx?.batchId || !externalCtx?.platformOrigin) return false;
     const normalizedOrigin = String(externalCtx.platformOrigin || "").replace(
@@ -3570,6 +3573,7 @@ export default function App() {
         topicId: externalCtx.topicId ? String(externalCtx.topicId) : null,
         clientEnv: clientEnvReport,
         labelCsv: labelCsv || "",
+        labelXlsxBase64: labelXlsxBase64 || "",
         items,
       }),
     });
@@ -3632,6 +3636,8 @@ export default function App() {
 
     let saveTableRecords = [];
     let saveLabelCsv = "";
+    let saveLabelXlsxBuffer = null;
+    let saveLabelXlsxBase64 = "";
     try {
       const allRecords = await getAllImages();
       saveTableRecords = externalCtx.batchId
@@ -3640,6 +3646,10 @@ export default function App() {
             (record) => String(record?.id || "") === String(activeImage?.id || ""),
           );
       saveLabelCsv = buildLabelCsv(saveTableRecords);
+      saveLabelXlsxBuffer = await buildLabelXlsxBuffer(saveTableRecords);
+      saveLabelXlsxBase64 = saveLabelXlsxBuffer
+        ? bufferToBase64(saveLabelXlsxBuffer)
+        : "";
       if (exportDirHandle && saveLabelCsv) {
         const labelHandle = await exportDirHandle.getFileHandle("labels.csv", {
           create: true,
@@ -3648,8 +3658,16 @@ export default function App() {
         await labelWritable.write(saveLabelCsv);
         await labelWritable.close();
       }
+      if (exportDirHandle && saveLabelXlsxBuffer) {
+        const xlsxHandle = await exportDirHandle.getFileHandle("labels.xlsx", {
+          create: true,
+        });
+        const xlsxWritable = await xlsxHandle.createWritable();
+        await xlsxWritable.write(saveLabelXlsxBuffer);
+        await xlsxWritable.close();
+      }
     } catch (error) {
-      console.warn("保存时写入 labels.csv 失败", error);
+      console.warn("保存时写入 labels.csv/xlsx 失败", error);
     }
 
     try {
@@ -3658,8 +3676,13 @@ export default function App() {
             activeImageId: String(activeImage?.id || ""),
             activeWorkflowSnapshot: workflowSnapshot,
             labelCsv: saveLabelCsv,
+            labelXlsxBase64: saveLabelXlsxBase64,
           })
-        : await syncActiveAnnotationToPlatform(workflowSnapshot, saveLabelCsv);
+        : await syncActiveAnnotationToPlatform(
+            workflowSnapshot,
+            saveLabelCsv,
+            saveLabelXlsxBase64,
+          );
       if (synced) {
         if (externalCtx.batchId && activeImage?.remoteImageId) {
           setBatchQueue((prev) => {
@@ -4848,7 +4871,100 @@ export default function App() {
     return lines.join("\n");
   };
 
-  const writeExportEntriesToFolder = async (entries = [], labelCsv = "") => {
+  const buildLabelRows = (records = []) => {
+    const rows = [{ id: "ID", label: "label" }];
+    for (const record of records) {
+      if (!record || record.isMaskOnly) continue;
+      const sourceName = String(
+        record.sourceName || record.displayName || record.name || "",
+      );
+      const idValue = fileStem(sourceName) || sourceName || String(record.id || "");
+      const labelValue = getRecordMainCategoryValue(record);
+      rows.push({
+        id: String(idValue || ""),
+        label: String(labelValue || ""),
+      });
+    }
+    return rows;
+  };
+
+  const escapeXml = (value = "") =>
+    String(value || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&apos;");
+
+  const excelCol = (index) => {
+    let n = Number(index || 0);
+    let out = "";
+    while (n >= 0) {
+      out = String.fromCharCode(65 + (n % 26)) + out;
+      n = Math.floor(n / 26) - 1;
+    }
+    return out || "A";
+  };
+
+  const buildLabelXlsxBuffer = async (records = []) => {
+    const rows = buildLabelRows(records);
+    const sheetRowsXml = rows
+      .map((row, rowIndex) => {
+        const r = rowIndex + 1;
+        const cells = [row.id, row.label]
+          .map((cell, colIndex) => {
+            const ref = `${excelCol(colIndex)}${r}`;
+            return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(cell)}</t></is></c>`;
+          })
+          .join("");
+        return `<row r="${r}">${cells}</row>`;
+      })
+      .join("");
+
+    const sheetXml =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
+      `<sheetData>${sheetRowsXml}</sheetData>` +
+      `</worksheet>`;
+    const workbookXml =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ` +
+      `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+      `<sheets><sheet name="labels" sheetId="1" r:id="rId1"/></sheets>` +
+      `</workbook>`;
+    const contentTypesXml =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+      `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+      `<Default Extension="xml" ContentType="application/xml"/>` +
+      `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>` +
+      `<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>` +
+      `</Types>`;
+    const rootRelsXml =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>` +
+      `</Relationships>`;
+    const workbookRelsXml =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>` +
+      `</Relationships>`;
+
+    const zip = new JSZip();
+    zip.file("[Content_Types].xml", contentTypesXml);
+    zip.folder("_rels")?.file(".rels", rootRelsXml);
+    zip.folder("xl")?.file("workbook.xml", workbookXml);
+    zip.folder("xl")?.folder("_rels")?.file("workbook.xml.rels", workbookRelsXml);
+    zip.folder("xl")?.folder("worksheets")?.file("sheet1.xml", sheetXml);
+    return zip.generateAsync({ type: "arraybuffer" });
+  };
+
+  const writeExportEntriesToFolder = async (
+    entries = [],
+    labelCsv = "",
+    labelXlsxBuffer = null,
+  ) => {
     if (!exportDirHandle) return;
     try {
       const imgDir = await exportDirHandle.getDirectoryHandle("img", {
@@ -4880,6 +4996,14 @@ export default function App() {
         await labelWritable.write(labelCsv);
         await labelWritable.close();
       }
+      if (labelXlsxBuffer) {
+        const xlsxHandle = await exportDirHandle.getFileHandle("labels.xlsx", {
+          create: true,
+        });
+        const xlsxWritable = await xlsxHandle.createWritable();
+        await xlsxWritable.write(labelXlsxBuffer);
+        await xlsxWritable.close();
+      }
     } catch (error) {
       console.warn("导出到文件夹失败", error);
     }
@@ -4899,11 +5023,13 @@ export default function App() {
     const maskFolder = zip.folder("mask");
     const sourceRecords = entries.map((entry) => entry.record).filter(Boolean);
     const labelCsv = buildLabelCsv(sourceRecords);
+    const labelXlsxBuffer = await buildLabelXlsxBuffer(sourceRecords);
     for (const entry of entries) {
       imgFolder?.file(entry.imageName, entry.imageData);
       maskFolder?.file(entry.maskName, entry.maskData);
     }
     if (labelCsv) zip.file("labels.csv", labelCsv);
+    if (labelXlsxBuffer) zip.file("labels.xlsx", labelXlsxBuffer);
 
     const blob = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(blob);
@@ -4926,7 +5052,7 @@ export default function App() {
     document.body.removeChild(link);
     setTimeout(() => URL.revokeObjectURL(url), 200);
 
-    await writeExportEntriesToFolder(entries, labelCsv);
+    await writeExportEntriesToFolder(entries, labelCsv, labelXlsxBuffer);
   };
 
   const resolveBulkExportScope = (records = []) => {
@@ -5000,6 +5126,12 @@ export default function App() {
 
   const annotationMenuItems = [
     {
+      key: "zoom",
+      name: "缩放",
+      active: tool === "zoom",
+      onClick: () => toggleAnnotationTool("zoom"),
+    },
+    {
       key: "brush",
       name: "笔刷",
       active: tool === "brush",
@@ -5047,6 +5179,15 @@ export default function App() {
       "aria-hidden": true,
     };
     switch (key) {
+      case "zoom":
+        return (
+          <svg {...iconProps}>
+            <circle cx="11" cy="11" r="5.2" />
+            <path d="M15 15l4 4" />
+            <path d="M11 8.8v4.4" />
+            <path d="M8.8 11h4.4" />
+          </svg>
+        );
       case "brush":
         return (
           <svg {...iconProps}>
