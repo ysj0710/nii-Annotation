@@ -3428,7 +3428,10 @@ export default function App() {
     return true;
   };
 
-  const syncActiveAnnotationToPlatform = async (workflowSnapshot = null) => {
+  const syncActiveAnnotationToPlatform = async (
+    workflowSnapshot = null,
+    labelCsv = "",
+  ) => {
     const remoteImageId = String(
       activeImage?.remoteImageId || externalCtx?.imageId || "",
     );
@@ -3475,6 +3478,7 @@ export default function App() {
         clientEnv: clientEnvReport,
       }),
     );
+    if (labelCsv) payload.append("labelCsv", labelCsv);
 
     const resp = await fetchWithAuthFallback(endpoint, {
       method: "POST",
@@ -3492,6 +3496,7 @@ export default function App() {
   const syncBatchAnnotationsToPlatform = async ({
     activeImageId = "",
     activeWorkflowSnapshot = null,
+    labelCsv = "",
   } = {}) => {
     if (!externalCtx?.batchId || !externalCtx?.platformOrigin) return false;
     const normalizedOrigin = String(externalCtx.platformOrigin || "").replace(
@@ -3564,6 +3569,7 @@ export default function App() {
         batchId: String(externalCtx.batchId),
         topicId: externalCtx.topicId ? String(externalCtx.topicId) : null,
         clientEnv: clientEnvReport,
+        labelCsv: labelCsv || "",
         items,
       }),
     });
@@ -3623,13 +3629,37 @@ export default function App() {
           : prev,
       );
     }
+
+    let saveTableRecords = [];
+    let saveLabelCsv = "";
+    try {
+      const allRecords = await getAllImages();
+      saveTableRecords = externalCtx.batchId
+        ? resolveBulkExportScope(allRecords)
+        : allRecords.filter(
+            (record) => String(record?.id || "") === String(activeImage?.id || ""),
+          );
+      saveLabelCsv = buildLabelCsv(saveTableRecords);
+      if (exportDirHandle && saveLabelCsv) {
+        const labelHandle = await exportDirHandle.getFileHandle("labels.csv", {
+          create: true,
+        });
+        const labelWritable = await labelHandle.createWritable();
+        await labelWritable.write(saveLabelCsv);
+        await labelWritable.close();
+      }
+    } catch (error) {
+      console.warn("保存时写入 labels.csv 失败", error);
+    }
+
     try {
       const synced = externalCtx.batchId
         ? await syncBatchAnnotationsToPlatform({
             activeImageId: String(activeImage?.id || ""),
             activeWorkflowSnapshot: workflowSnapshot,
+            labelCsv: saveLabelCsv,
           })
-        : await syncActiveAnnotationToPlatform(workflowSnapshot);
+        : await syncActiveAnnotationToPlatform(workflowSnapshot, saveLabelCsv);
       if (synced) {
         if (externalCtx.batchId && activeImage?.remoteImageId) {
           setBatchQueue((prev) => {
