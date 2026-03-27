@@ -790,46 +790,22 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         sz += z;
         count += 1;
 
-        if (x > 0) {
-          const ni = idx - 1;
-          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
-            visited[ni] = 1;
-            queue.push(ni);
-          }
-        }
-        if (x + 1 < nx) {
-          const ni = idx + 1;
-          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
-            visited[ni] = 1;
-            queue.push(ni);
-          }
-        }
-        if (y > 0) {
-          const ni = idx - nx;
-          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
-            visited[ni] = 1;
-            queue.push(ni);
-          }
-        }
-        if (y + 1 < ny) {
-          const ni = idx + nx;
-          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
-            visited[ni] = 1;
-            queue.push(ni);
-          }
-        }
-        if (z > 0) {
-          const ni = idx - xy;
-          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
-            visited[ni] = 1;
-            queue.push(ni);
-          }
-        }
-        if (z + 1 < nz) {
-          const ni = idx + xy;
-          if (!visited[ni] && Number(bitmap[ni] || 0) === labelValue) {
-            visited[ni] = 1;
-            queue.push(ni);
+        for (let dz = -1; dz <= 1; dz += 1) {
+          const zz = z + dz;
+          if (zz < 0 || zz >= nz) continue;
+          for (let dy = -1; dy <= 1; dy += 1) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= ny) continue;
+            for (let dx = -1; dx <= 1; dx += 1) {
+              const xx = x + dx;
+              if (xx < 0 || xx >= nx) continue;
+              if (dx === 0 && dy === 0 && dz === 0) continue;
+              const ni = zz * xy + yy * nx + xx;
+              if (visited[ni]) continue;
+              if (Number(bitmap[ni] || 0) !== labelValue) continue;
+              visited[ni] = 1;
+              queue.push(ni);
+            }
           }
         }
       }
@@ -2046,6 +2022,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     let changed = false;
     let changedCount = 0;
     let lastTargetVox = null;
+    const touchedIndices = [];
 
     const setVoxelAt = (vox) => {
       if (!Array.isArray(vox) || vox.length < 3) return;
@@ -2066,6 +2043,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       nv.drawBitmap[idx] = fillLabel;
       changed = true;
       changedCount += 1;
+      touchedIndices.push(idx);
       lastTargetVox = [x, y, z];
     };
 
@@ -2366,11 +2344,96 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (!voxelRasterized && !rasterizeByCanvas()) return false;
 
     if (!changed) return false;
+    const cleanupTinyTouchedIslands = () => {
+      if (!Number.isInteger(currentSliceIndex)) return 0;
+      if (!Array.isArray(touchedIndices) || touchedIndices.length === 0) return 0;
+      const fixedAxis = Number(paneCfg.fixedAxis);
+      if (!Number.isInteger(fixedAxis) || fixedAxis < 0 || fixedAxis > 2)
+        return 0;
+      const uMax = Math.max(0, axisSizes[hAxis] - 1);
+      const vMax = Math.max(0, axisSizes[vAxis] - 1);
+      if (uMax < 0 || vMax < 0) return 0;
+      const touchedSet = new Set(touchedIndices);
+      const visited2d = new Uint8Array((uMax + 1) * (vMax + 1));
+      const planeIndex = (u, v) => v * (uMax + 1) + u;
+      const voxelToFlatIndex = (u, v) => {
+        const full = [0, 0, 0];
+        full[fixedAxis] = currentSliceIndex;
+        full[hAxis] = u;
+        full[vAxis] = v;
+        return full[2] * xy + full[1] * nx + full[0];
+      };
+      const touchedComponents = [];
+
+      for (let v = 0; v <= vMax; v += 1) {
+        for (let u = 0; u <= uMax; u += 1) {
+          const pIdx = planeIndex(u, v);
+          if (visited2d[pIdx]) continue;
+          const seedIdx = voxelToFlatIndex(u, v);
+          if (Number(nv.drawBitmap[seedIdx] || 0) !== fillLabel) {
+            visited2d[pIdx] = 1;
+            continue;
+          }
+          const queue = [[u, v]];
+          let q = 0;
+          visited2d[pIdx] = 1;
+          const members = [];
+          let touched = false;
+          while (q < queue.length) {
+            const [cu, cv] = queue[q];
+            q += 1;
+            const cFlat = voxelToFlatIndex(cu, cv);
+            members.push(cFlat);
+            if (touchedSet.has(cFlat)) touched = true;
+            for (let dv = -1; dv <= 1; dv += 1) {
+              for (let du = -1; du <= 1; du += 1) {
+                if (du === 0 && dv === 0) continue;
+                const nu = cu + du;
+                const nv2 = cv + dv;
+                if (nu < 0 || nu > uMax || nv2 < 0 || nv2 > vMax) continue;
+                const np = planeIndex(nu, nv2);
+                if (visited2d[np]) continue;
+                visited2d[np] = 1;
+                const nFlat = voxelToFlatIndex(nu, nv2);
+                if (Number(nv.drawBitmap[nFlat] || 0) !== fillLabel) continue;
+                queue.push([nu, nv2]);
+              }
+            }
+          }
+          if (touched) touchedComponents.push(members);
+        }
+      }
+
+      if (touchedComponents.length <= 1) return 0;
+      let touchedMax = 0;
+      for (const comp of touchedComponents) {
+        touchedMax = Math.max(touchedMax, Number(comp.length || 0));
+      }
+      if (touchedMax <= 0) return 0;
+      const threshold = Math.max(2, Math.floor(touchedMax * 0.08));
+      let removed = 0;
+      for (const comp of touchedComponents) {
+        const size = Number(comp.length || 0);
+        // Remove tiny speckles introduced by polygon quantization, keep the main body.
+        if (size >= threshold || size >= 48) continue;
+        for (const idx of comp) {
+          if (nv.drawBitmap[idx] !== fillLabel) continue;
+          nv.drawBitmap[idx] = 0;
+          removed += 1;
+        }
+      }
+      return removed;
+    };
+    const removedTiny = cleanupTinyTouchedIslands();
+    if (removedTiny > 0) {
+      changedCount = Math.max(0, changedCount - removedTiny);
+    }
     if (isViewerDebugEnabled()) {
       console.info("[Viewer2D] freehand-rasterize-result", {
         paneKey,
         changedCount,
         lastTargetVox,
+        removedTiny,
       });
     }
     invalidateLabelAnalysis();
@@ -3098,6 +3161,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     for (const paneKey of ["A", "C", "S"]) {
       const canvas = getPaneCanvas(paneKey);
       if (!canvas) continue;
+      const paneCfg = PANE_CONFIGS[paneKey];
       const getCanvasPos = (event, targetCanvas = canvas) => {
         const rect =
           targetCanvas?.getBoundingClientRect?.() ||
@@ -3131,7 +3195,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           return;
         }
         if (!isAnnotationTool(currentTool)) return;
-        const paneCfg = PANE_CONFIGS[paneKey];
         const markerCanvas = getPaneMarkerCanvas(paneKey);
         if (!markerCanvas) return;
         if (isDisplayedAsSinglePane(paneKey)) {
@@ -3424,8 +3487,43 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         drawStrokeMarkers(true);
       };
 
-      const onWheel = () => {
-        scheduleCrosshairSync(paneKey);
+      const onWheel = (event) => {
+        const currentTool = toolRef.current;
+        if (currentTool === "pan") {
+          if (isDisplayedAsSinglePane(paneKey)) {
+            // 单视口 2D：滚轮仅用于缩放，不参与辅助线联动/切层。
+            if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
+            return;
+          }
+          const isZoomModifier = !!(event?.ctrlKey || event?.metaKey);
+          if (!isZoomModifier) {
+            // 普通滚轮改为切层并联动，避免与缩放冲突。
+            event?.preventDefault?.();
+            const nv = getPaneNv(paneKey);
+            const fixedAxis = Number(paneCfg?.fixedAxis);
+            const dimLen = Number(nv?.back?.dims?.[fixedAxis + 1] || 0);
+            const currentSlice = getPaneCurrentSliceIndex(paneKey);
+            if (
+              nv?.scene?.crosshairPos &&
+              Number.isInteger(fixedAxis) &&
+              fixedAxis >= 0 &&
+              dimLen > 1 &&
+              Number.isInteger(currentSlice)
+            ) {
+              const direction = Number(event?.deltaY || 0) > 0 ? 1 : -1;
+              const nextSlice = clamp(currentSlice + direction, 0, dimLen - 1);
+              nv.scene.crosshairPos[fixedAxis] =
+                nextSlice / Math.max(1, dimLen - 1);
+              nv.drawScene?.();
+              scheduleCrosshairSync(paneKey);
+            }
+          } else {
+            // Ctrl/⌘+滚轮：保留 Niivue 默认缩放，再同步联动状态。
+            requestAnimationFrame(() => scheduleCrosshairSync(paneKey));
+          }
+        } else {
+          scheduleCrosshairSync(paneKey);
+        }
         if (hasVisibleMarkerWork()) scheduleMarkerRedraw(2);
       };
 
@@ -3433,7 +3531,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       canvas.addEventListener("pointermove", onPointerMove);
       canvas.addEventListener("pointerup", onPointerUp);
       canvas.addEventListener("pointercancel", onPointerCancel);
-      canvas.addEventListener("wheel", onWheel, { passive: true });
+      canvas.addEventListener("wheel", onWheel, { passive: false });
       cleanups.push(() => {
         canvas.removeEventListener("pointerdown", onPointerDown);
         canvas.removeEventListener("pointermove", onPointerMove);
