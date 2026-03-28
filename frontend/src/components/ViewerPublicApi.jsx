@@ -507,6 +507,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const [canFocusPlanes, setCanFocusPlanes] = useState(false);
   const [visiblePaneKeys, setVisiblePaneKeys] = useState([...PANE_ORDER]);
   const [threeDUpdatePending, setThreeDUpdatePending] = useState(false);
+  const [renderPaneAwaitingLoad, setRenderPaneAwaitingLoad] = useState(false);
 
   imageKeyRef.current = image?.id ? String(image.id) : "";
 
@@ -1890,6 +1891,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       syncSharedBitmapBindings({ include3D: true });
       refreshDrawingAcrossPanes({ reason: "manual-3d" });
       setThreeDUpdatePending(false);
+      setRenderPaneAwaitingLoad(false);
       return true;
     } catch (error) {
       console.error("3D 手动更新失败", error);
@@ -2934,7 +2936,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     configurePaneSync();
     applyDrawColormap();
     applyToolSettings(toolRef.current);
-    setThreeDUpdatePending(nextVisiblePaneKeys.includes("R"));
+    const shouldAwait3DManualLoad = nextVisiblePaneKeys.includes("R");
+    setThreeDUpdatePending(shouldAwait3DManualLoad);
+    setRenderPaneAwaitingLoad(shouldAwait3DManualLoad);
     refreshDrawingAcrossPanes({ reason: "load", sourcePaneKey: "A" });
     logViewerDiagnostics("after-load", {
       windowSource: windowRange?.preset
@@ -3315,6 +3319,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     let cancelled = false;
     const nextImageKey = String(image.id);
     setThreeDUpdatePending(false);
+    setRenderPaneAwaitingLoad(false);
     imageKeyRef.current = nextImageKey;
     lesionTrackingRef.current = {
       imageKey: nextImageKey,
@@ -3837,16 +3842,28 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
                   />
                 )}
                 {paneKey === "R" && (
-                  <div className="viewer-3d-update-wrap">
-                    <button
-                      type="button"
-                      className="viewer-3d-update-btn"
-                      onClick={applyManual3DUpdate}
-                      disabled={!threeDUpdatePending}
-                    >
-                      Update
-                    </button>
-                  </div>
+                  <>
+                    {renderPaneAwaitingLoad && (
+                      <div className="viewer-3d-guide-overlay" aria-hidden="true">
+                        <div className="viewer-3d-guide-line viewer-3d-guide-line-h" />
+                        <div className="viewer-3d-guide-line viewer-3d-guide-line-v" />
+                        <span className="viewer-3d-guide-label top">A</span>
+                        <span className="viewer-3d-guide-label bottom">P</span>
+                        <span className="viewer-3d-guide-label left">R</span>
+                        <span className="viewer-3d-guide-label right">L</span>
+                      </div>
+                    )}
+                    <div className="viewer-3d-update-wrap">
+                      <button
+                        type="button"
+                        className="viewer-3d-update-btn"
+                        onClick={applyManual3DUpdate}
+                        disabled={!threeDUpdatePending}
+                      >
+                        Update
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
             </div>
