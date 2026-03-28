@@ -485,6 +485,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const paneLayoutSyncRafRef = useRef(null);
   const crosshairSyncRafRef = useRef(null);
   const pendingCrosshairSyncRef = useRef(null);
+  const deferredPaneLoadRafRef = useRef(null);
   const syncingLocationRef = useRef(false);
   const renderPaneImageKeyRef = useRef("");
   const activePointerIdRef = useRef(null);
@@ -497,6 +498,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const refreshTelemetryRef = useRef({ last: null });
   const refreshPerfRef = useRef({ emaMs: 0, samples: 0 });
   const labelAnalysisRef = useRef({ dirty: true, stats: {}, centroids: {} });
+  const labelStatsWorkerRef = useRef(null);
+  const labelStatsRequestSeqRef = useRef(0);
+  const labelStatsPendingRef = useRef(new Map());
   const lesionAnalysisRef = useRef({ dirty: true, items: [] });
   const lesionTrackingRef = useRef({
     imageKey: "",
@@ -523,6 +527,15 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const getPaneMarkerCanvas = (key) =>
     paneMarkerCanvasRefs.current[key] || null;
   const getPaneNv = (key) => paneNvsRef.current[key] || null;
+  const paneHasLoadedVolume = (paneKey) => {
+    const nv = getPaneNv(paneKey);
+    return !!(
+      nv &&
+      Array.isArray(nv?.volumes) &&
+      nv.volumes.length > 0 &&
+      Array.isArray(nv?.back?.dims)
+    );
+  };
   const getVisiblePaneKeys = () =>
     visiblePaneKeysRef.current.filter((key) => !!getPaneNv(key));
   const getPrimaryPaneKey = () =>
@@ -794,6 +807,46 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return labelAnalysisRef.current;
   };
 
+  const getLabelStatsAsync = () => {
+    const bitmap = getSharedBitmap();
+    const dimsInfo = getDrawingDimsInfo();
+    if (!bitmap?.length || !dimsInfo?.voxelCount) return Promise.resolve({});
+    const nx = Number(dimsInfo.nx || 0);
+    const ny = Number(dimsInfo.ny || 0);
+    const nz = Number(dimsInfo.nz || 0);
+    if (nx < 1 || ny < 1 || nz < 1) return Promise.resolve({});
+
+    const worker = labelStatsWorkerRef.current;
+    if (!worker) {
+      return Promise.resolve({ ...(getLabelAnalysis().stats || {}) });
+    }
+    const expected = Math.min(Number(dimsInfo.voxelCount || 0), bitmap.length);
+    if (expected <= 0) return Promise.resolve({});
+
+    const snapshot = new Uint8Array(expected);
+    snapshot.set(bitmap.subarray(0, expected));
+    const requestId = Number(labelStatsRequestSeqRef.current || 0) + 1;
+    labelStatsRequestSeqRef.current = requestId;
+    return new Promise((resolve) => {
+      labelStatsPendingRef.current.set(requestId, resolve);
+      try {
+        worker.postMessage(
+          {
+            id: requestId,
+            nx,
+            ny,
+            nz,
+            buffer: snapshot.buffer,
+          },
+          [snapshot.buffer],
+        );
+      } catch {
+        labelStatsPendingRef.current.delete(requestId);
+        resolve({ ...(getLabelAnalysis().stats || {}) });
+      }
+    });
+  };
+
   const getLesionAnalysis = () => {
     if (!lesionAnalysisRef.current.dirty) return lesionAnalysisRef.current;
     const imageKey = String(getImageKey() || "");
@@ -951,7 +1004,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     for (const key of getVisiblePaneKeys()) {
       if (!include3D && key === "R") continue;
       const nv = getPaneNv(key);
-      if (!nv) continue;
+      if (!nv || !paneHasLoadedVolume(key)) continue;
       if (!nv.drawBitmap || nv.drawBitmap.length !== bitmap.length) {
         nv.createEmptyDrawing?.();
       }
@@ -976,7 +1029,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     for (const key of getVisiblePaneKeys()) {
       if (!include3D && key === "R") continue;
       const nv = getPaneNv(key);
-      if (!nv) continue;
+      if (!nv || !paneHasLoadedVolume(key)) continue;
       if (!nv.drawBitmap || nv.drawBitmap.length !== bitmap.length) {
         nv.createEmptyDrawing?.();
       }
@@ -2660,27 +2713,34 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     });
   };
 
+  const applyToolSettingsToPane = (
+    key,
+    currentTool,
+    { redraw = true } = {},
+  ) => {
+    const nv = getPaneNv(key);
+    if (!nv) return;
+    const showCrosshair = key === "R" ? true : currentTool === "pan";
+    nv.setCrosshairVisible?.(showCrosshair);
+    if (nv.opts) nv.opts.show3Dcrosshair = key === "R";
+    if (
+      typeof nv.setCrosshairWidth === "function" &&
+      Number.isFinite(crosshairWidthRef.current)
+    ) {
+      nv.setCrosshairWidth(showCrosshair ? crosshairWidthRef.current : 0);
+    }
+    nv.setDrawingEnabled?.(false);
+    if (currentTool === "pan") {
+      nv.setDragMode?.(key === "R" ? "slicer3D" : "pan");
+    } else {
+      nv.setDragMode?.("none");
+    }
+    if (redraw) nv.drawScene?.();
+  };
+
   const applyToolSettings = (currentTool) => {
     for (const key of PANE_ORDER) {
-      const nv = getPaneNv(key);
-      if (!nv) continue;
-      const showCrosshair =
-        key === "R" ? true : currentTool === "pan";
-      nv.setCrosshairVisible?.(showCrosshair);
-      if (nv.opts) nv.opts.show3Dcrosshair = key === "R";
-      if (
-        typeof nv.setCrosshairWidth === "function" &&
-        Number.isFinite(crosshairWidthRef.current)
-      ) {
-        nv.setCrosshairWidth(showCrosshair ? crosshairWidthRef.current : 0);
-      }
-      nv.setDrawingEnabled?.(false);
-      if (currentTool === "pan") {
-        nv.setDragMode?.(key === "R" ? "slicer3D" : "pan");
-      } else {
-        nv.setDragMode?.("none");
-      }
-      nv.drawScene?.();
+      applyToolSettingsToPane(key, currentTool);
     }
   };
 
@@ -2836,6 +2896,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const loadImageIntoPanes = async () => {
     imageLoadGenerationRef.current += 1;
     const generation = Number(imageLoadGenerationRef.current || 0);
+    if (deferredPaneLoadRafRef.current !== null) {
+      cancelAnimationFrame(deferredPaneLoadRafRef.current);
+      deferredPaneLoadRafRef.current = null;
+    }
     pruneTemplateCache();
     const targetImage = image;
     const imageBuffer = toArrayBuffer(targetImage?.data);
@@ -2870,6 +2934,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const is2D = isSingleSliceVolume(hdr);
     const nextVisiblePaneKeys = is2D ? ["A"] : [...PANE_ORDER];
     const visiblePaneSet = new Set(nextVisiblePaneKeys);
+    const primaryPaneKey = getPrimaryPaneKey() || nextVisiblePaneKeys[0] || "A";
+    const immediatePaneKeys = new Set([primaryPaneKey]);
+    if (nextVisiblePaneKeys.includes("R")) immediatePaneKeys.add("R");
+    const deferredPaneKeys = nextVisiblePaneKeys.filter(
+      (key) => !immediatePaneKeys.has(key),
+    );
     visiblePaneKeysRef.current = nextVisiblePaneKeys;
     setVisiblePaneKeys(nextVisiblePaneKeys);
     setCanFocusPlanes(!is2D);
@@ -2877,6 +2947,52 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (is2D && focusedPlane) {
       setFocusedPlane(null);
     }
+
+    const loadPaneBaseVolume = (
+      paneKey,
+      { reusePrimaryTemplate = false } = {},
+    ) => {
+      const nv = getPaneNv(paneKey);
+      if (!nv) return false;
+      if (nv.volumes?.length) {
+        for (const vol of [...nv.volumes]) nv.removeVolume(vol);
+      }
+      nv.closeDrawing?.();
+      const paneVolume = reusePrimaryTemplate ? baseTemplate : baseTemplate.clone();
+      if (windowRange) {
+        paneVolume.cal_min = Number(windowRange.min);
+        paneVolume.cal_max = Number(windowRange.max);
+      }
+      nv.addVolume(paneVolume);
+      applyPaneInterpolation(nv);
+      nv.setRadiologicalConvention(
+        isRasterImageName(sourceName) ? true : !!radiological2D,
+      );
+      nv.setSliceType(getPaneSliceType(nv, paneKey));
+      nv.setSliceMM?.(false);
+      applyPaneBounds(paneKey);
+      if (PANE_CONFIGS[paneKey]?.is2D) {
+        nv.setPan2Dxyzmm?.([...DEFAULT_PAN2D_VIEW]);
+      }
+      if (paneKey === "R" && !targetImage?.isMaskOnly) {
+        nv.setOpacity?.(0, renderMaskOnly3DRef.current ? 0 : 1);
+      } else {
+        nv.setOpacity?.(0, 1);
+      }
+      if (targetImage?.isMaskOnly && typeof nv.setColormap === "function") {
+        nv.setColormap("itksnap");
+      }
+      if (paneKey === "R") {
+        // 3D 仍保持“手动 Update 才上标注阴影”，这里仅加载底图。
+        nv.createEmptyDrawing?.();
+        renderPaneImageKeyRef.current = String(
+          targetImage?.id || targetImage?.name || "",
+        );
+      }
+      applyToolSettingsToPane(paneKey, toolRef.current, { redraw: false });
+      nv.drawScene?.();
+      return true;
+    };
 
     for (const key of PANE_ORDER) {
       const nv = getPaneNv(key);
@@ -2889,68 +3005,22 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         nv.drawScene?.();
         continue;
       }
-      if (key === "R") {
-        // 3D 视口随切图加载底图和坐标线；标注阴影仍保持手动 Update 才同步。
+      if (!immediatePaneKeys.has(key)) {
+        // 将次要 2D 视口延迟到后续帧加载，优先保证首屏切图速度。
         if (nv.volumes?.length) {
           for (const vol of [...nv.volumes]) nv.removeVolume(vol);
         }
         nv.closeDrawing?.();
-        const renderVolume = baseTemplate.clone();
-        if (windowRange) {
-          renderVolume.cal_min = Number(windowRange.min);
-          renderVolume.cal_max = Number(windowRange.max);
-        }
-        nv.addVolume(renderVolume);
-        applyPaneInterpolation(nv);
-        nv.setRadiologicalConvention(
-          isRasterImageName(sourceName) ? true : !!radiological2D,
-        );
-        nv.setSliceType(getPaneSliceType(nv, key));
-        nv.setSliceMM?.(false);
         applyPaneBounds(key);
-        if (!targetImage?.isMaskOnly) {
-          nv.setOpacity?.(0, renderMaskOnly3DRef.current ? 0 : 1);
-        } else {
-          nv.setOpacity?.(0, 1);
-        }
-        if (targetImage?.isMaskOnly && typeof nv.setColormap === "function") {
-          nv.setColormap("itksnap");
-        }
-        nv.createEmptyDrawing?.();
         nv.drawScene?.();
-        renderPaneImageKeyRef.current = String(targetImage?.id || targetImage?.name || "");
-        continue;
-      }
-      if (nv.volumes?.length) {
-        for (const vol of [...nv.volumes]) nv.removeVolume(vol);
-      }
-      nv.closeDrawing?.();
-      const paneVolume =
-        key === getPrimaryPaneKey() ? baseTemplate : baseTemplate.clone();
-      if (windowRange) {
-        paneVolume.cal_min = Number(windowRange.min);
-        paneVolume.cal_max = Number(windowRange.max);
-      }
-      nv.addVolume(paneVolume);
-      applyPaneInterpolation(nv);
-      nv.setRadiologicalConvention(
-        isRasterImageName(sourceName) ? true : !!radiological2D,
-      );
-      nv.setSliceType(getPaneSliceType(nv, key));
-      nv.setSliceMM?.(false);
-      applyPaneBounds(key);
-      if (PANE_CONFIGS[key]?.is2D) {
-        nv.setPan2Dxyzmm?.([...DEFAULT_PAN2D_VIEW]);
-      }
-      nv.setOpacity?.(0, 1);
-      if (targetImage?.isMaskOnly && typeof nv.setColormap === "function") {
-        nv.setColormap("itksnap");
+      } else {
+        loadPaneBaseVolume(key, { reusePrimaryTemplate: key === primaryPaneKey });
       }
     }
     if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
 
     const primary = getPrimaryNv();
-    if (!primary) return;
+    if (!primary || !paneHasLoadedVolume(primaryPaneKey)) return;
     primary.createEmptyDrawing?.();
 
     const dimsInfo = getDrawingDimsInfo(primary);
@@ -2976,6 +3046,36 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           : "none",
     });
     emitDrawingChange("load");
+
+    if (deferredPaneKeys.length > 0) {
+      let deferredIndex = 0;
+      const loadNextDeferredPane = () => {
+        if (Number(imageLoadGenerationRef.current || 0) !== generation) {
+          deferredPaneLoadRafRef.current = null;
+          return;
+        }
+        const key = deferredPaneKeys[deferredIndex];
+        if (!key) {
+          deferredPaneLoadRafRef.current = null;
+          return;
+        }
+        loadPaneBaseVolume(key, { reusePrimaryTemplate: false });
+        if (PANE_CONFIGS[key]?.is2D) {
+          syncSharedBitmapBindings({ include3D: false });
+          redrawPaneDrawing(key);
+        }
+        deferredIndex += 1;
+        if (deferredIndex < deferredPaneKeys.length) {
+          deferredPaneLoadRafRef.current =
+            requestAnimationFrame(loadNextDeferredPane);
+        } else {
+          deferredPaneLoadRafRef.current = null;
+          drawStrokeMarkers(true);
+          scheduleMarkerRedraw(1);
+        }
+      };
+      deferredPaneLoadRafRef.current = requestAnimationFrame(loadNextDeferredPane);
+    }
 
     const hasAttachedMask =
       !targetImage?.isMaskOnly &&
@@ -3184,6 +3284,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     getRefreshDiagnostics: () => ({ ...(refreshTelemetryRef.current || {}) }),
     getAnnotationCount: () => getCurrentAnnotations().length,
     getLabelStats: () => ({ ...(getLabelAnalysis().stats || {}) }),
+    getLabelStatsAsync: () => getLabelStatsAsync(),
     getLesionCount: () => getLesionAnalysis().items.length,
     clearAnalysisCache: ({ clearSelection = false } = {}) => {
       labelAnalysisRef.current = { dirty: true, stats: {}, centroids: {} };
@@ -3271,6 +3372,32 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   }));
 
   useEffect(() => {
+    let worker = null;
+    if (typeof Worker !== "undefined") {
+      try {
+        worker = new Worker(
+          new URL("../workers/labelStats.worker.js", import.meta.url),
+          { type: "module" },
+        );
+        worker.onmessage = (event) => {
+          const data = event?.data || {};
+          const requestId = Number(data?.id || 0);
+          if (!requestId) return;
+          const resolve = labelStatsPendingRef.current.get(requestId);
+          if (!resolve) return;
+          labelStatsPendingRef.current.delete(requestId);
+          resolve({ ...(data?.stats || {}) });
+        };
+        worker.onerror = () => {
+          const pending = Array.from(labelStatsPendingRef.current.values());
+          labelStatsPendingRef.current.clear();
+          for (const resolve of pending) resolve({});
+        };
+        labelStatsWorkerRef.current = worker;
+      } catch {
+        labelStatsWorkerRef.current = null;
+      }
+    }
     initializePaneInstances().catch((error) => {
       console.error("Viewer 初始化失败", error);
     });
@@ -3279,6 +3406,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         cancelAnimationFrame(paneLayoutSyncRafRef.current);
       if (crosshairSyncRafRef.current !== null)
         cancelAnimationFrame(crosshairSyncRafRef.current);
+      if (deferredPaneLoadRafRef.current !== null)
+        cancelAnimationFrame(deferredPaneLoadRafRef.current);
       if (markerRedrawRafRef.current !== null)
         cancelAnimationFrame(markerRedrawRafRef.current);
       if (markerDrawRafRef.current !== null)
@@ -3286,6 +3415,11 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       for (const observer of Object.values(paneResizeObserversRef.current)) {
         observer?.disconnect?.();
       }
+      const pending = Array.from(labelStatsPendingRef.current.values());
+      labelStatsPendingRef.current.clear();
+      for (const resolve of pending) resolve({});
+      labelStatsWorkerRef.current?.terminate?.();
+      labelStatsWorkerRef.current = null;
       volumeTemplateCacheRef.current.clear();
     };
   }, []);

@@ -1757,6 +1757,7 @@ export default function App() {
   const runtimeEnvRef = useRef(null);
   const statsTimerRef = useRef(null);
   const statsIdleRef = useRef(null);
+  const statsRequestSeqRef = useRef(0);
   const lesionItemsTimerRef = useRef(null);
   const dicomWheelSwitchAtRef = useRef(0);
   const autoImportedRef = useRef(false);
@@ -2371,11 +2372,33 @@ export default function App() {
       180,
       Number(runtimeEnvRef.current?.viewerProfile?.labelStatsDelayMs || 320),
     );
+    const requestSeq = Number(statsRequestSeqRef.current || 0) + 1;
+    statsRequestSeqRef.current = requestSeq;
+    const targetImageId = String(activeImageIdRef.current || activeImage?.id || "");
     statsTimerRef.current = setTimeout(() => {
       const run = () => {
         statsIdleRef.current = null;
+        const applyStats = (stats) => {
+          if (Number(statsRequestSeqRef.current || 0) !== requestSeq) return;
+          if (
+            String(activeImageIdRef.current || activeImage?.id || "") !==
+            targetImageId
+          )
+            return;
+          setLabelStats(stats || {});
+        };
+        const asyncStats = viewerRef.current?.getLabelStatsAsync?.();
+        if (asyncStats && typeof asyncStats.then === "function") {
+          asyncStats
+            .then((stats) => applyStats(stats || {}))
+            .catch(() => {
+              const fallback = viewerRef.current?.getLabelStats?.() || {};
+              applyStats(fallback);
+            });
+          return;
+        }
         const stats = viewerRef.current?.getLabelStats?.() || {};
-        setLabelStats(stats);
+        applyStats(stats);
       };
       if (
         typeof window !== "undefined" &&
@@ -2906,6 +2929,7 @@ export default function App() {
     if (!remoteImageId) return false;
     const existing = await findLocalByRemoteImageId(remoteImageId);
     if (existing) {
+      cacheImageRecord(existing);
       await selectImage(existing.id);
       return true;
     }
@@ -2921,6 +2945,7 @@ export default function App() {
       useAutoGuard: false,
     });
     if (!imported?.id) return false;
+    cacheImageRecord(imported);
     await selectImage(imported.id);
     return true;
   };
@@ -3882,6 +3907,7 @@ export default function App() {
 
   const selectImage = async (id) => {
     if (activeImage?.id === id) return;
+    const recordPromise = getImageRecordFast(id);
     if (hasUnsavedChangesRef.current || localPersistDirtyRef.current) {
       const allowSwitch = await new Promise((resolve) => {
         Modal.confirm({
@@ -3927,14 +3953,17 @@ export default function App() {
           pageCache.ids.length === pageIdKeys.length &&
           pageCache.ids.every((item, idx) => item === pageIdKeys[idx]);
         if (!samePage) {
-          const metas = await getImageMetasByIds(pageIds);
-          setImages(metas.map(toListItem));
           localListPageRef.current = { start: pageStart, ids: pageIdKeys };
+          void getImageMetasByIds(pageIds)
+            .then((metas) => {
+              setImages(metas.map(toListItem));
+            })
+            .catch(() => {});
         }
       }
     }
 
-    const record = (await getImageById(id)) || (await getImageRecordFast(id));
+    const record = await recordPromise;
     if (!record) return;
     cacheImageRecord(record);
     activeImageIdRef.current = String(record.id);
