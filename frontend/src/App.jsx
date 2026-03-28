@@ -18,6 +18,7 @@ import dicomParser from "dicom-parser";
 import {
   getAllImages,
   getImageById,
+  getImagesByHash,
   getImagesByRemoteImageId,
   saveImages,
   updateImage,
@@ -1741,6 +1742,7 @@ export default function App() {
   });
   const [workflowErrors, setWorkflowErrors] = useState({});
   const [selectedLesionId, setSelectedLesionId] = useState("");
+  const [lesionItems, setLesionItems] = useState([]);
 
   const viewerRef = useRef(null);
   const viewerHostRef = useRef(null);
@@ -1755,6 +1757,7 @@ export default function App() {
   const runtimeEnvRef = useRef(null);
   const statsTimerRef = useRef(null);
   const statsIdleRef = useRef(null);
+  const lesionItemsTimerRef = useRef(null);
   const dicomWheelSwitchAtRef = useRef(0);
   const autoImportedRef = useRef(false);
   const initializedRef = useRef(false);
@@ -2033,26 +2036,6 @@ export default function App() {
     );
     return cards[index] || null;
   }, [activeStepState]);
-  const lesionItems = useMemo(() => {
-    const lesions = Array.isArray(viewerRef.current?.exportLesionItems?.())
-      ? viewerRef.current.exportLesionItems()
-      : Array.isArray(viewerRef.current?.exportAnnotations?.())
-        ? viewerRef.current.exportAnnotations()
-        : [];
-    return lesions.map((annotation, idx) => {
-      const coord = resolveAnnotationAnchorForCard(annotation);
-      const lesionId = String(annotation?.lesionId || "");
-      return {
-        key: lesionId || `lesion-${Math.random().toString(16).slice(2)}`,
-        lesionId,
-        name: formatLesionNameBySeq(idx),
-        labelValue: Number(annotation?.labelValue || 0),
-        labelName: String(annotation?.labelName || ""),
-        voxelCount: Number(annotation?.voxelCount || 0),
-        coord,
-      };
-    });
-  }, [activeImage?.id, activeImage?.maskVersion, workflowState, labelStats]);
   useEffect(() => {
     if (!selectedLesionId) return;
     if (!lesionItems.some((item) => item.lesionId === selectedLesionId)) {
@@ -2243,6 +2226,8 @@ export default function App() {
     hasUnsavedChangesRef.current = false;
     localPersistDirtyRef.current = false;
     setSelectedLesionId("");
+    setLesionItems([]);
+    clearLesionItemsSchedule();
   }, [activeImage?.id]);
 
   useEffect(() => {
@@ -2266,6 +2251,48 @@ export default function App() {
       }
       statsIdleRef.current = null;
     }
+  };
+
+  const clearLesionItemsSchedule = () => {
+    if (lesionItemsTimerRef.current !== null) {
+      clearTimeout(lesionItemsTimerRef.current);
+      lesionItemsTimerRef.current = null;
+    }
+  };
+
+  const computeLesionItems = () => {
+    const lesions = Array.isArray(viewerRef.current?.exportLesionItems?.())
+      ? viewerRef.current.exportLesionItems()
+      : Array.isArray(viewerRef.current?.exportAnnotations?.())
+        ? viewerRef.current.exportAnnotations()
+        : [];
+    return lesions.map((annotation, idx) => {
+      const coord = resolveAnnotationAnchorForCard(annotation);
+      const lesionId = String(annotation?.lesionId || "");
+      return {
+        key: lesionId || `lesion-${Math.random().toString(16).slice(2)}`,
+        lesionId,
+        name: formatLesionNameBySeq(idx),
+        labelValue: Number(annotation?.labelValue || 0),
+        labelName: String(annotation?.labelName || ""),
+        voxelCount: Number(annotation?.voxelCount || 0),
+        coord,
+      };
+    });
+  };
+
+  const refreshLesionItemsNow = () => {
+    const nextItems = computeLesionItems();
+    setLesionItems(nextItems);
+    return nextItems;
+  };
+
+  const scheduleLesionItemsRefresh = (delayMs = 180) => {
+    clearLesionItemsSchedule();
+    lesionItemsTimerRef.current = setTimeout(() => {
+      lesionItemsTimerRef.current = null;
+      refreshLesionItemsNow();
+    }, Math.max(0, Number(delayMs || 0)));
   };
 
   const getMaxImageRecordCacheSize = () => {
@@ -2716,124 +2743,127 @@ export default function App() {
           type: blob.type || "application/octet-stream",
         });
 
-        const existing = await getAllImages();
-        const hashSet = new Set(
-          existing.map((item) => item.hash).filter(Boolean),
-        );
         const importBatchId = makeImportBatchId();
-        const beforeCount = existing.length;
-
         const importOptions = {
           refreshUi: !skipUiRefresh,
           activateImported: !skipUiRefresh,
           generateThumbnail: !skipUiRefresh,
         };
-        if (isZipFile(file.name)) {
-          await importZipFile(file, hashSet, importBatchId, importOptions);
-        } else {
-          await importImageFile(file, hashSet, importBatchId, importOptions);
-        }
-
-        const afterRecords = await getAllImages();
-        const afterCount = afterRecords.length;
-        const imported = afterRecords.filter(
-          (record) =>
-            record.importBatchId === importBatchId && !record.isMaskOnly,
-        );
-        if (imported.length > 0 && imageId) {
-          for (const record of imported) {
-            await updateImage(record.id, {
-              remoteImageId: String(imageId),
-              remoteBatchId: String(remoteBatchId || ""),
-              updatedAt: Date.now(),
-            });
-          }
-        }
-        let mappedRecord =
-          (await findLocalByRemoteImageId(imageId)) ||
-          imported[0] ||
-          afterRecords.find(
-            (record) =>
-              !record.isMaskOnly && record.importBatchId === importBatchId,
-          ) ||
-          null;
-
-        if (!mappedRecord && imageId) {
-          const expectedBase = normalizeBaseName(normalizedName);
-          const byName = afterRecords.find(
-            (record) =>
-              !record.isMaskOnly &&
-              normalizeBaseName(
-                record.sourceName || record.displayName || record.name,
-              ) === expectedBase,
+        const pickNewestNonMask = (records = []) => {
+          const candidates = (Array.isArray(records) ? records : []).filter(
+            (record) => record && !record.isMaskOnly,
           );
-          const byHash = afterRecords.find(
-            (record) =>
-              !record.isMaskOnly &&
-              String(record.hash || "") === String(downloadedHash || ""),
-          );
-          const candidate = byName || byHash || null;
+          if (!candidates.length) return null;
+          candidates.sort((a, b) => {
+            const aUpdated = Number(a?.updatedAt || 0);
+            const bUpdated = Number(b?.updatedAt || 0);
+            if (aUpdated !== bUpdated) return bUpdated - aUpdated;
+            const aCreated = Number(a?.createdAt || 0);
+            const bCreated = Number(b?.createdAt || 0);
+            return bCreated - aCreated;
+          });
+          return candidates[0] || null;
+        };
 
-          if (candidate) {
-            if (
-              candidate.remoteImageId &&
-              String(candidate.remoteImageId) !== String(imageId)
-            ) {
-              // 后端返回了重复影像内容时，为当前 imageId 建立别名记录，避免批次切换失败。
-              const alias = createImageRecord(
-                candidate.name || normalizedName,
-                candidate.data,
-                candidate.hash || downloadedHash,
-                candidate.thumbnail || "",
-                {
-                  displayName: candidate.displayName || normalizedName,
-                  maskBuffer: candidate.mask || null,
-                  maskName: candidate.maskName || null,
-                  sourceMask: candidate.sourceMask || null,
-                  sourceMaskName: candidate.sourceMaskName || null,
-                  maskAttached: candidate.maskAttached !== false,
-                  isMaskOnly: !!candidate.isMaskOnly,
-                  rasterHFlipNormalized: !!candidate.rasterHFlipNormalized,
-                  spatialMeta: candidate.spatialMeta || null,
-                  rasterConversionVersion: Number(
-                    candidate.rasterConversionVersion || 0,
-                  ),
-                  importBatchId,
-                  sourceName: candidate.sourceName || normalizedName,
-                  sourceData: candidate.sourceData || candidate.data,
-                  modifiedByUser: false,
-                  sourceFormat: candidate.sourceFormat || "nifti",
-                  dicomSourceCount: Number(candidate.dicomSourceCount || 0),
-                  dicomStudyUID: candidate.dicomStudyUID || "",
-                  dicomStudyID: candidate.dicomStudyID || "",
-                  dicomSeriesUID: candidate.dicomSeriesUID || "",
-                  dicomSeriesDescription:
-                    candidate.dicomSeriesDescription || "",
-                  dicomSeriesNumber: Number(candidate.dicomSeriesNumber || 0),
-                  dicomSeriesOrder: Number(candidate.dicomSeriesOrder || 0),
-                  dicomAccessionNumber: candidate.dicomAccessionNumber || "",
-                  customFields: parseJsonSafe(candidate.customFields, {}) || {},
-                  remoteImageId: String(imageId),
-                  remoteBatchId: String(remoteBatchId || ""),
-                },
-              );
-              await saveImages([alias]);
-              mappedRecord = alias;
-            } else {
-              const patched = await updateImage(candidate.id, {
+        const mapRecordToRemote = async (candidate) => {
+          if (!candidate || candidate.isMaskOnly) return null;
+          if (!imageId) return candidate;
+          if (
+            candidate.remoteImageId &&
+            String(candidate.remoteImageId) !== String(imageId)
+          ) {
+            // 相同影像内容映射到不同 remote imageId 时，创建别名保证批次切图稳定。
+            const alias = createImageRecord(
+              candidate.name || normalizedName,
+              candidate.data,
+              candidate.hash || downloadedHash,
+              candidate.thumbnail || "",
+              {
+                displayName: candidate.displayName || normalizedName,
+                maskBuffer: candidate.mask || null,
+                maskName: candidate.maskName || null,
+                sourceMask: candidate.sourceMask || null,
+                sourceMaskName: candidate.sourceMaskName || null,
+                maskAttached: candidate.maskAttached !== false,
+                isMaskOnly: !!candidate.isMaskOnly,
+                rasterHFlipNormalized: !!candidate.rasterHFlipNormalized,
+                spatialMeta: candidate.spatialMeta || null,
+                rasterConversionVersion: Number(
+                  candidate.rasterConversionVersion || 0,
+                ),
+                importBatchId,
+                sourceName: candidate.sourceName || normalizedName,
+                sourceData: candidate.sourceData || candidate.data,
+                modifiedByUser: false,
+                sourceFormat: candidate.sourceFormat || "nifti",
+                dicomSourceCount: Number(candidate.dicomSourceCount || 0),
+                dicomStudyUID: candidate.dicomStudyUID || "",
+                dicomStudyID: candidate.dicomStudyID || "",
+                dicomSeriesUID: candidate.dicomSeriesUID || "",
+                dicomSeriesDescription: candidate.dicomSeriesDescription || "",
+                dicomSeriesNumber: Number(candidate.dicomSeriesNumber || 0),
+                dicomSeriesOrder: Number(candidate.dicomSeriesOrder || 0),
+                dicomAccessionNumber: candidate.dicomAccessionNumber || "",
+                customFields: parseJsonSafe(candidate.customFields, {}) || {},
                 remoteImageId: String(imageId),
                 remoteBatchId: String(remoteBatchId || ""),
-                updatedAt: Date.now(),
-              });
-              mappedRecord = patched || candidate;
-            }
+              },
+            );
+            await saveImages([alias]);
+            return alias;
           }
-        }
-        if (afterCount <= beforeCount) {
+          const patched = await updateImage(candidate.id, {
+            remoteImageId: String(imageId),
+            remoteBatchId: String(remoteBatchId || ""),
+            updatedAt: Date.now(),
+          });
+          return patched || candidate;
+        };
+
+        const hashMatchedLocal = pickNewestNonMask(
+          await getImagesByHash(downloadedHash),
+        );
+        if (hashMatchedLocal) {
+          const mappedExisting = await mapRecordToRemote(hashMatchedLocal);
+          if (!skipUiRefresh && mappedExisting) {
+            void refreshImageList();
+          }
           if (!silent) Message.info("影像已存在，已直接加载本地记录");
-          return mappedRecord;
+          return mappedExisting;
         }
-        if (!silent) Message.success("已自动接收科研平台影像");
+
+        const hashSet = new Set();
+        let importedRecord = null;
+        if (isZipFile(file.name)) {
+          importedRecord = await importZipFile(
+            file,
+            hashSet,
+            importBatchId,
+            importOptions,
+          );
+        } else {
+          importedRecord = await importImageFile(
+            file,
+            hashSet,
+            importBatchId,
+            importOptions,
+          );
+        }
+
+        let mappedRecord = await mapRecordToRemote(importedRecord);
+        if (!mappedRecord && imageId) {
+          mappedRecord = await findLocalByRemoteImageId(imageId);
+        }
+        if (!mappedRecord) {
+          mappedRecord = await mapRecordToRemote(
+            pickNewestNonMask(await getImagesByHash(downloadedHash)),
+          );
+        }
+        if (!mappedRecord) return null;
+        if (!silent) {
+          if (importedRecord?.id) Message.success("已自动接收科研平台影像");
+          else Message.info("影像已存在，已直接加载本地记录");
+        }
         return mappedRecord;
       } catch (error) {
         console.error(error);
@@ -3793,6 +3823,17 @@ export default function App() {
     if (
       reason === "draw" ||
       reason === "brush-stroke-complete" ||
+      reason === "undo" ||
+      reason === "redo" ||
+      reason === "clear" ||
+      reason === "load" ||
+      reason === "curve-complete"
+    ) {
+      scheduleLesionItemsRefresh(reason === "load" ? 40 : 180);
+    }
+    if (
+      reason === "draw" ||
+      reason === "brush-stroke-complete" ||
       reason === "annotate" ||
       reason === "undo" ||
       reason === "redo" ||
@@ -3814,6 +3855,7 @@ export default function App() {
     () => () => {
       clearAutoSaveSchedule();
       clearLabelStatsSchedule();
+      clearLesionItemsSchedule();
     },
     [],
   );
@@ -4248,13 +4290,13 @@ export default function App() {
       generateThumbnail = true,
     } = {},
   ) => {
-    if (!Array.isArray(items) || items.length === 0) return;
+    if (!Array.isArray(items) || items.length === 0) return null;
     try {
       const niivueDicomLoader = await loadNiivueDicomLoader();
       const groupedSeries = groupDicomInputsBySeries(items);
       if (!groupedSeries.length) {
         Message.warning("未识别到有效 DICOM 序列");
-        return;
+        return null;
       }
 
       const newRecords = [];
@@ -4308,7 +4350,7 @@ export default function App() {
 
       if (!newRecords.length) {
         Message.warning("未从 DICOM 中解析出可用影像");
-        return;
+        return null;
       }
 
       if (newRecords.length > 0) {
@@ -4318,10 +4360,13 @@ export default function App() {
           const first = newRecords[0];
           activateImportedRecordIfAllowed(first, { dicom: true });
         }
+        return newRecords[0] || null;
       }
+      return null;
     } catch (error) {
       console.error("DICOM 导入失败", error);
       Message.error("DICOM 导入失败，请确认文件完整并重试");
+      return null;
     }
   };
 
@@ -4337,25 +4382,24 @@ export default function App() {
   ) => {
     const originalBuffer = await file.arrayBuffer();
     if (isDicomFile(file.name) || isDicomContentBuffer(originalBuffer)) {
-      await importDicomItems(
+      return importDicomItems(
         [{ name: file.name || "dicom_slice", data: originalBuffer }],
         hashSet,
         importBatchId,
         { refreshUi, activateImported, generateThumbnail },
       );
-      return;
     }
     if (isImageFile(file.name)) {
       Message.warning(
         "已移除 JPG/PNG 等原始图片导入，请先转换为 NIfTI(.nii/.nii.gz)",
       );
-      return;
+      return null;
     }
-    if (!isSupportedImageFile(file.name)) return;
+    if (!isSupportedImageFile(file.name)) return null;
     const effectiveName = file.name;
     if (isNiftiFile(effectiveName) && !isNiftiBuffer(originalBuffer)) {
       Message.error(`下载内容不是有效 NIfTI：${effectiveName}`);
-      return;
+      return null;
     }
 
     let buffer = originalBuffer;
@@ -4373,7 +4417,7 @@ export default function App() {
 
     const hash = await hashBuffer(buffer);
 
-    if (isDuplicateHash(hash, hashSet)) return;
+    if (isDuplicateHash(hash, hashSet)) return null;
 
     const thumbnail = generateThumbnail
       ? await createThumbnail(buffer, internalName, {
@@ -4396,6 +4440,7 @@ export default function App() {
 
     if (refreshUi) await refreshImageList();
     if (activateImported) activateImportedRecordIfAllowed(record);
+    return record;
   };
 
   const importZipFile = async (
@@ -4410,6 +4455,7 @@ export default function App() {
   ) => {
     const buffer = await file.arrayBuffer();
     const zip = await JSZip.loadAsync(buffer);
+    let firstImportedRecord = null;
 
     const imageEntries = [];
     const maskEntries = [];
@@ -4451,11 +4497,19 @@ export default function App() {
       dicomInputs.push({ name: entry.name, data: content });
     }
     if (dicomInputs.length > 0) {
-      await importDicomItems(dicomInputs, hashSet, importBatchId, {
-        refreshUi,
-        activateImported,
-        generateThumbnail,
-      });
+      const dicomImported = await importDicomItems(
+        dicomInputs,
+        hashSet,
+        importBatchId,
+        {
+          refreshUi,
+          activateImported,
+          generateThumbnail,
+        },
+      );
+      if (dicomImported && !firstImportedRecord) {
+        firstImportedRecord = dicomImported;
+      }
     } else if (imageEntries.length === 0 && maskEntries.length === 0) {
       Message.warning("zip 内未识别到可导入的 NIfTI 或 DICOM 文件");
     }
@@ -4577,11 +4631,14 @@ export default function App() {
     if (newRecords.length > 0) {
       await saveImages(newRecords);
       if (refreshUi) await refreshImageList();
+      const first =
+        newRecords.find((record) => !record?.isMaskOnly) || newRecords[0] || null;
+      if (!firstImportedRecord && first) firstImportedRecord = first;
       if (activateImported) {
-        const first = newRecords[0];
-        activateImportedRecordIfAllowed(first);
+        if (first) activateImportedRecordIfAllowed(first);
       }
     }
+    return firstImportedRecord;
   };
 
   const handleUploadChange = async (fileList) => {
@@ -6024,7 +6081,24 @@ export default function App() {
                       ) : null}
                     </div>
                   ))}
-                  <div className="workflow-section-title">病灶列表（{lesionItems.length}）</div>
+                  <div
+                    className="workflow-section-title"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                    }}
+                  >
+                    <span>病灶列表（{lesionItems.length}）</span>
+                    <Button
+                      size="mini"
+                      type="secondary"
+                      onClick={() => refreshLesionItemsNow()}
+                    >
+                      刷新
+                    </Button>
+                  </div>
                   {lesionItems.length === 0 ? (
                     <div className="custom-field-empty">暂无病灶，请先使用笔刷或自由曲线标注病灶区域</div>
                   ) : (

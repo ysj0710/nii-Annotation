@@ -1,5 +1,5 @@
 const DB_BASE_NAME = 'nii-annotation'
-const DB_VERSION = 2
+const DB_VERSION = 3
 const STORE_NAME = 'images'
 let DB_NAMESPACE = 'default'
 
@@ -52,6 +52,7 @@ const openDB = () =>
         const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' })
         store.createIndex('createdAt', 'createdAt')
         store.createIndex('remoteImageId', 'remoteImageId')
+        store.createIndex('hash', 'hash')
         return
       }
       const tx = request.transaction
@@ -61,6 +62,9 @@ const openDB = () =>
       }
       if (store && !store.indexNames.contains('remoteImageId')) {
         store.createIndex('remoteImageId', 'remoteImageId')
+      }
+      if (store && !store.indexNames.contains('hash')) {
+        store.createIndex('hash', 'hash')
       }
     }
     request.onsuccess = () => resolve(request.result)
@@ -111,6 +115,21 @@ export const getImagesByRemoteImageId = async (remoteImageId) =>
     new Promise((resolve, reject) => {
       const index = store.index('remoteImageId')
       const request = index.getAll(String(remoteImageId || ''))
+      request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : [])
+      request.onerror = () => reject(request.error)
+    })
+  )
+
+export const getImagesByHash = async (hash) =>
+  withStore('readonly', (store) =>
+    new Promise((resolve, reject) => {
+      const value = String(hash || '')
+      if (!value) {
+        resolve([])
+        return
+      }
+      const index = store.index('hash')
+      const request = index.getAll(value)
       request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : [])
       request.onerror = () => reject(request.error)
     })
