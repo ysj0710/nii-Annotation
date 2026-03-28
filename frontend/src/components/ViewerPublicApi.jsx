@@ -3845,12 +3845,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
                   <>
                     {renderPaneAwaitingLoad && (
                       <div className="viewer-3d-guide-overlay" aria-hidden="true">
-                        <div className="viewer-3d-guide-line viewer-3d-guide-line-h" />
-                        <div className="viewer-3d-guide-line viewer-3d-guide-line-v" />
-                        <span className="viewer-3d-guide-label top">A</span>
-                        <span className="viewer-3d-guide-label bottom">P</span>
-                        <span className="viewer-3d-guide-label left">R</span>
-                        <span className="viewer-3d-guide-label right">L</span>
+                        <svg
+                          className="viewer-3d-guide-axis"
+                          viewBox="0 0 100 100"
+                          preserveAspectRatio="none"
+                        >
+                          <line className="axis-line axis-main" x1="50" y1="10" x2="50" y2="90" />
+                          <line className="axis-line axis-main" x1="14" y1="56" x2="86" y2="51" />
+                          <line className="axis-line axis-secondary" x1="50" y1="53" x2="64" y2="61" />
+                          <line className="axis-line axis-secondary" x1="50" y1="53" x2="37" y2="46" />
+                        </svg>
                       </div>
                     )}
                     <div className="viewer-3d-update-wrap">

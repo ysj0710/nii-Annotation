@@ -526,61 +526,30 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   inset: 0;
   z-index: 7;
   pointer-events: none;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
 }
 
-.viewer-3d-guide-line {
-  position: absolute;
-  background: rgba(49, 149, 255, 0.9);
-  box-shadow: 0 0 0 1px rgba(2, 6, 23, 0.35);
+.viewer-3d-guide-axis {
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 0 2px rgba(37, 99, 235, 0.32));
 }
 
-.viewer-3d-guide-line-h {
-  left: 8%;
-  right: 8%;
-  top: 50%;
-  height: 1px;
-  transform: translateY(-0.5px);
+.viewer-3d-guide-axis .axis-line {
+  fill: none;
+  stroke: rgba(49, 149, 255, 0.95);
+  stroke-linecap: round;
 }
 
-.viewer-3d-guide-line-v {
-  top: 8%;
-  bottom: 8%;
-  left: 50%;
-  width: 1px;
-  transform: translateX(-0.5px);
+.viewer-3d-guide-axis .axis-main {
+  stroke-width: 0.45;
 }
 
-.viewer-3d-guide-label {
-  position: absolute;
-  color: rgba(191, 219, 254, 0.95);
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1;
-  text-shadow: 0 0 6px rgba(2, 6, 23, 0.72);
-}
-
-.viewer-3d-guide-label.top {
-  top: calc(8% - 8px);
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.viewer-3d-guide-label.bottom {
-  bottom: calc(8% - 8px);
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.viewer-3d-guide-label.left {
-  left: calc(8% - 10px);
-  top: 50%;
-  transform: translateY(-50%);
-}
-
-.viewer-3d-guide-label.right {
-  right: calc(8% - 10px);
-  top: 50%;
-  transform: translateY(-50%);
+.viewer-3d-guide-axis .axis-secondary {
+  stroke-width: 0.55;
+  opacity: 0.95;
 }
 
 .viewer-3d-update-btn {
