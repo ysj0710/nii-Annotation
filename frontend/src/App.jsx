@@ -2335,18 +2335,29 @@ export default function App() {
     return record ? cacheImageRecord(record) : null;
   };
 
+  const prewarmViewerImageRecord = (record) => {
+    if (!record?.data) return;
+    const prewarm = viewerRef.current?.prewarmImage;
+    if (typeof prewarm !== "function") return;
+    void prewarm(record, { includeMask: true }).catch(() => {});
+  };
+
   const prefetchImageRecord = (id) => {
     const key = String(id || "");
-    if (
-      !key ||
-      getCachedImageRecord(key) ||
-      imageRecordPrefetchingRef.current.has(key)
-    )
+    if (!key) return;
+    const cached = getCachedImageRecord(key);
+    if (cached) {
+      prewarmViewerImageRecord(cached);
       return;
+    }
+    if (imageRecordPrefetchingRef.current.has(key)) return;
     imageRecordPrefetchingRef.current.add(key);
     void getImageById(key)
       .then((record) => {
-        if (record) cacheImageRecord(record);
+        if (record) {
+          cacheImageRecord(record);
+          prewarmViewerImageRecord(record);
+        }
       })
       .catch(() => {})
       .finally(() => {
@@ -2647,6 +2658,9 @@ export default function App() {
     skipUiRefresh = false,
   } = {}) => {
     const remoteKey = String(imageId || imageUrl || "").trim();
+    const isRemoteBatchImport = !!String(
+      remoteBatchId || currentBatchId || "",
+    ).trim();
     if (remoteKey && remoteImportInFlightRef.current.has(remoteKey)) {
       return remoteImportInFlightRef.current.get(remoteKey);
     }
@@ -2747,7 +2761,7 @@ export default function App() {
         const importOptions = {
           refreshUi: !skipUiRefresh,
           activateImported: !skipUiRefresh,
-          generateThumbnail: !skipUiRefresh,
+          generateThumbnail: !skipUiRefresh && !isRemoteBatchImport,
         };
         const pickNewestNonMask = (records = []) => {
           const candidates = (Array.isArray(records) ? records : []).filter(
@@ -2915,7 +2929,10 @@ export default function App() {
     const remoteImageId = String(queueItem?.imageId || "");
     if (!remoteImageId) return false;
     const existing = await findLocalByRemoteImageId(remoteImageId);
-    if (existing) return false;
+    if (existing) {
+      prewarmViewerImageRecord(existing);
+      return false;
+    }
     const imported = await fetchAndImportByImageId({
       imageId: remoteImageId,
       imageUrl: queueItem?.imageUrl || queueItem?.downloadUrl || "",
@@ -2929,7 +2946,11 @@ export default function App() {
       silent: true,
       skipUiRefresh: true,
     });
-    return !!imported?.id;
+    if (imported?.id) {
+      prewarmViewerImageRecord(imported);
+      return true;
+    }
+    return false;
   };
 
   const pickQueuePrefetchCandidates = (
@@ -3826,10 +3847,9 @@ export default function App() {
       reason === "undo" ||
       reason === "redo" ||
       reason === "clear" ||
-      reason === "load" ||
       reason === "curve-complete"
     ) {
-      scheduleLesionItemsRefresh(reason === "load" ? 40 : 180);
+      scheduleLesionItemsRefresh(180);
     }
     if (
       reason === "draw" ||
@@ -4644,6 +4664,7 @@ export default function App() {
   const handleUploadChange = async (fileList) => {
     if (!fileList?.length) return;
     const importBatchId = makeImportBatchId();
+    const generateThumbnail = !isBatchMode;
     const existing = await getAllImages();
     const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean));
 
@@ -4657,7 +4678,9 @@ export default function App() {
       processedFilesRef.current.add(key);
 
       if (isZipFile(originFile.name)) {
-        await importZipFile(originFile, hashSet, importBatchId);
+        await importZipFile(originFile, hashSet, importBatchId, {
+          generateThumbnail,
+        });
       } else {
         regularFiles.push(originFile);
       }
@@ -4671,11 +4694,15 @@ export default function App() {
           continue;
         }
       }
-      await importImageFile(file, hashSet, importBatchId);
+      await importImageFile(file, hashSet, importBatchId, {
+        generateThumbnail,
+      });
     }
 
     if (dicomInputs.length > 0) {
-      await importDicomItems(dicomInputs, hashSet, importBatchId);
+      await importDicomItems(dicomInputs, hashSet, importBatchId, {
+        generateThumbnail,
+      });
     }
   };
 
@@ -4683,6 +4710,7 @@ export default function App() {
     if (!window.showDirectoryPicker) return;
     const dirHandle = await window.showDirectoryPicker();
     setExportDirHandle(dirHandle);
+    const generateThumbnail = !isBatchMode;
 
     const imgHandle = await dirHandle
       .getDirectoryHandle("img", { create: false })
@@ -4718,7 +4746,9 @@ export default function App() {
     }
 
     if (dicomInputs.length > 0) {
-      await importDicomItems(dicomInputs, hashSet, importBatchId);
+      await importDicomItems(dicomInputs, hashSet, importBatchId, {
+        generateThumbnail,
+      });
     }
 
     const masks = [];
@@ -4767,7 +4797,9 @@ export default function App() {
       const maskMatch =
         maskByBase.get(baseName) || maskByBase.get(stripMaskTokens(baseName));
       if (maskMatch) maskMatch.used = true;
-      const thumbnail = await createThumbnail(content, internalName);
+      const thumbnail = generateThumbnail
+        ? await createThumbnail(content, internalName)
+        : "";
       const record = createImageRecord(internalName, content, hash, thumbnail, {
         displayName: file.name,
         sourceMask: maskMatch?.buffer || null,
@@ -4795,9 +4827,11 @@ export default function App() {
       const internalName = toInternalNiftiName(mask.name);
       const hash = await hashBuffer(mask.buffer);
       if (isDuplicateHash(hash, hashSet)) continue;
-      const thumbnail = await createThumbnail(mask.buffer, internalName, {
-        isMask: true,
-      });
+      const thumbnail = generateThumbnail
+        ? await createThumbnail(mask.buffer, internalName, {
+            isMask: true,
+          })
+        : "";
       const record = createImageRecord(
         internalName,
         mask.buffer,

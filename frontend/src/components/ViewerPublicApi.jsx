@@ -553,8 +553,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       reason === "clear"
     ) {
       setThreeDUpdatePending(true);
-    } else if (reason === "load") {
-      setThreeDUpdatePending(false);
     }
     const notify = onDrawingChangeRef.current;
     if (typeof notify === "function") notify(reason);
@@ -704,6 +702,45 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       pruneTemplateCache();
     }
     return loaded;
+  };
+
+  const getImageTemplateCacheKey = (targetImage = image) =>
+    `image:${String(targetImage?.id || targetImage?.name || "")}`;
+
+  const getMaskTemplateCacheKey = (targetImage = image) =>
+    `mask:${String(targetImage?.id || targetImage?.name || "")}:${String(targetImage?.maskVersion || 0)}`;
+
+  const prewarmImageTemplates = async (
+    targetImage,
+    { includeMask = true, generation = 0 } = {},
+  ) => {
+    if (!targetImage?.data) return false;
+    const imageBuffer = toArrayBuffer(targetImage.data);
+    if (!imageBuffer) return false;
+    await loadVolumeTemplate({
+      cacheKey: getImageTemplateCacheKey(targetImage),
+      buffer: imageBuffer,
+      name: targetImage.name,
+      imageMeta: targetImage,
+      context: "base",
+      allowCache: true,
+      generation,
+    });
+    if (includeMask && targetImage?.mask && targetImage?.maskAttached !== false) {
+      const maskBuffer = toArrayBuffer(targetImage.mask);
+      if (maskBuffer) {
+        await loadVolumeTemplate({
+          cacheKey: getMaskTemplateCacheKey(targetImage),
+          buffer: maskBuffer,
+          name: targetImage.maskName || targetImage.name,
+          imageMeta: targetImage,
+          context: "mask",
+          allowCache: true,
+          generation,
+        });
+      }
+    }
+    return true;
   };
 
   const invalidateLabelAnalysis = () => {
@@ -897,6 +934,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       reason = "commit",
       sourcePaneKey = null,
       targetVox = null,
+      include3D = false,
     } = {},
   ) => {
     if (!bitmap) return false;
@@ -910,6 +948,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       primary.drawBitmap = bitmap;
     }
     for (const key of getVisiblePaneKeys()) {
+      if (!include3D && key === "R") continue;
       const nv = getPaneNv(key);
       if (!nv) continue;
       if (!nv.drawBitmap || nv.drawBitmap.length !== bitmap.length) {
@@ -929,11 +968,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return true;
   };
 
-  const syncSharedBitmapBindings = () => {
+  const syncSharedBitmapBindings = ({ include3D = false } = {}) => {
     const bitmap = getSharedBitmap();
     if (!bitmap) return false;
     let rebound = false;
     for (const key of getVisiblePaneKeys()) {
+      if (!include3D && key === "R") continue;
       const nv = getPaneNv(key);
       if (!nv) continue;
       if (!nv.drawBitmap || nv.drawBitmap.length !== bitmap.length) {
@@ -1805,13 +1845,56 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     return true;
   };
 
-  const applyManual3DUpdate = () => {
+  const applyManual3DUpdate = async () => {
     const renderNv = getPaneNv("R");
     if (!renderNv) return false;
-    syncSharedBitmapBindings();
-    refreshDrawingAcrossPanes({ reason: "manual-3d" });
-    setThreeDUpdatePending(false);
-    return true;
+    const targetImage = image;
+    const generation = Number(imageLoadGenerationRef.current || 0);
+    try {
+      if (targetImage?.data) {
+        const imageBuffer = toArrayBuffer(targetImage.data);
+        if (imageBuffer) {
+          const baseTemplate = await loadVolumeTemplate({
+            cacheKey: getImageTemplateCacheKey(targetImage),
+            buffer: imageBuffer,
+            name: targetImage.name,
+            imageMeta: targetImage,
+            context: "base",
+            allowCache: true,
+            generation,
+          });
+          if (Number(imageLoadGenerationRef.current || 0) !== generation) {
+            return false;
+          }
+          if (renderNv.volumes?.length) {
+            for (const vol of [...renderNv.volumes]) renderNv.removeVolume(vol);
+          }
+          renderNv.addVolume(baseTemplate);
+          applyPaneInterpolation(renderNv);
+          renderNv.setRadiologicalConvention(
+            isRasterImageName(
+              targetImage?.displayName || targetImage?.sourceName || targetImage?.name,
+            )
+              ? true
+              : !!radiological2D,
+          );
+          renderNv.setSliceType(getPaneSliceType(renderNv, "R"));
+          renderNv.setSliceMM?.(false);
+          applyPaneBounds("R");
+          renderNv.setOpacity?.(0, renderMaskOnly3DRef.current ? 0 : 1);
+          if (targetImage?.isMaskOnly && typeof renderNv.setColormap === "function") {
+            renderNv.setColormap("itksnap");
+          }
+        }
+      }
+      syncSharedBitmapBindings({ include3D: true });
+      refreshDrawingAcrossPanes({ reason: "manual-3d" });
+      setThreeDUpdatePending(false);
+      return true;
+    } catch (error) {
+      console.error("3D 手动更新失败", error);
+      return false;
+    }
   };
 
   const syncPaneLayoutNow = (paneKey) => {
@@ -1820,7 +1903,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     nv.resizeListener?.();
     syncMarkerCanvasSize(paneKey);
     applyPaneBounds(paneKey);
-    const rebound = syncSharedBitmapBindings();
+    const rebound = syncSharedBitmapBindings({ include3D: false });
     if (rebound && hasRefreshableDrawingBitmap(nv)) {
       nv.refreshDrawing?.(false);
     }
@@ -1844,7 +1927,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       paneLayoutSyncRafRef.current = requestAnimationFrame(() => {
         paneLayoutSyncRafRef.current = null;
         for (const key of targetKeys) syncPaneLayoutNow(key);
-        const rebound = syncSharedBitmapBindings();
+        const rebound = syncSharedBitmapBindings({ include3D: false });
         if (rebound) {
           for (const key of targetKeys) redrawPaneDrawing(key);
         }
@@ -1912,7 +1995,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       effectiveMaxTier = Math.min(effectiveMaxTier, 2);
     const tiers = [];
     const visibleKeys = getVisiblePaneKeys();
-    const allow3DRedraw = reason === "load" || reason === "manual-3d";
+    const allow3DRedraw = reason === "manual-3d";
     let redrawKeys = visibleKeys.filter(
       (key) => PANE_CONFIGS[key]?.is2D || (allow3DRedraw && key === "R"),
     );
@@ -2746,37 +2829,39 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     imageLoadGenerationRef.current += 1;
     const generation = Number(imageLoadGenerationRef.current || 0);
     pruneTemplateCache();
-    const imageBuffer = toArrayBuffer(image?.data);
+    const targetImage = image;
+    const imageBuffer = toArrayBuffer(targetImage?.data);
     if (!imageBuffer) return;
     for (const key of PANE_ORDER) {
       const nv = getPaneNv(key);
       nv?.broadcastTo?.([], {});
     }
-    const imageCacheKey = `image:${String(image?.id || image?.name || "")}`;
     const baseTemplate = await loadVolumeTemplate({
-      cacheKey: imageCacheKey,
+      cacheKey: getImageTemplateCacheKey(targetImage),
       buffer: imageBuffer,
-      name: image.name,
-      imageMeta: image,
+      name: targetImage?.name,
+      imageMeta: targetImage,
       context: "base",
       allowCache: true,
       generation,
     });
+    if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
 
-    const sourceName = image?.displayName || image?.sourceName || image?.name;
-    const windowRange = !image?.isMaskOnly
+    const sourceName =
+      targetImage?.displayName || targetImage?.sourceName || targetImage?.name;
+    const windowRange = !targetImage?.isMaskOnly
       ? resolveAutoWindowRange({
           volume: baseTemplate,
           imageMeta: {
             name: sourceName,
-            seriesDescription: image?.dicomSeriesDescription || "",
+            seriesDescription: targetImage?.dicomSeriesDescription || "",
           },
         })
       : null;
     const hdr = baseTemplate?.hdr;
-    const dims = hdr?.dims;
     const is2D = isSingleSliceVolume(hdr);
     const nextVisiblePaneKeys = is2D ? ["A"] : [...PANE_ORDER];
+    const visiblePaneSet = new Set(nextVisiblePaneKeys);
     visiblePaneKeysRef.current = nextVisiblePaneKeys;
     setVisiblePaneKeys(nextVisiblePaneKeys);
     setCanFocusPlanes(!is2D);
@@ -2787,18 +2872,28 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     for (const key of PANE_ORDER) {
       const nv = getPaneNv(key);
       if (!nv) continue;
-      if (nv.volumes?.length) {
-        for (const vol of [...nv.volumes]) nv.removeVolume(vol);
-      }
-      nv.closeDrawing?.();
       nv.scene.crosshairPos[0] = 0.5;
       nv.scene.crosshairPos[1] = 0.5;
       nv.scene.crosshairPos[2] = 0.5;
-      if (!nextVisiblePaneKeys.includes(key)) {
+      if (!visiblePaneSet.has(key)) {
         applyPaneBounds(key);
         nv.drawScene?.();
         continue;
       }
+      if (key === "R") {
+        // 3D 视口改为懒更新：切换上下张不自动重建，只在手动 Update 时刷新。
+        if (nv.volumes?.length) {
+          for (const vol of [...nv.volumes]) nv.removeVolume(vol);
+        }
+        nv.closeDrawing?.();
+        applyPaneBounds(key);
+        nv.drawScene?.();
+        continue;
+      }
+      if (nv.volumes?.length) {
+        for (const vol of [...nv.volumes]) nv.removeVolume(vol);
+      }
+      nv.closeDrawing?.();
       const paneVolume =
         key === getPrimaryPaneKey() ? baseTemplate : baseTemplate.clone();
       if (windowRange) {
@@ -2816,50 +2911,30 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       if (PANE_CONFIGS[key]?.is2D) {
         nv.setPan2Dxyzmm?.([...DEFAULT_PAN2D_VIEW]);
       }
-      if (key === "R" && !image?.isMaskOnly) {
-        nv.setOpacity?.(0, renderMaskOnly3DRef.current ? 0 : 1);
-      } else {
-        nv.setOpacity?.(0, 1);
-      }
-      if (image?.isMaskOnly && typeof nv.setColormap === "function") {
+      nv.setOpacity?.(0, 1);
+      if (targetImage?.isMaskOnly && typeof nv.setColormap === "function") {
         nv.setColormap("itksnap");
       }
     }
+    if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
 
     const primary = getPrimaryNv();
     if (!primary) return;
-    if (!image?.isMaskOnly && image?.mask && image?.maskAttached !== false) {
-      const maskBuffer = toArrayBuffer(image.mask);
-      if (maskBuffer) {
-        const maskTemplate = await loadVolumeTemplate({
-          cacheKey: `mask:${String(image?.id || image?.name || "")}:${String(image?.maskVersion || 0)}`,
-          buffer: maskBuffer,
-          name: image.maskName || image.name,
-          imageMeta: image,
-          context: "mask",
-          allowCache: true,
-          generation,
-        });
-        primary.loadDrawing(maskTemplate);
-      } else {
-        primary.createEmptyDrawing?.();
-      }
-    } else {
-      primary.createEmptyDrawing?.();
-    }
+    primary.createEmptyDrawing?.();
 
     const dimsInfo = getDrawingDimsInfo(primary);
     const sharedBitmap =
       primary.drawBitmap?.length === dimsInfo?.voxelCount
         ? new Uint8Array(primary.drawBitmap)
         : new Uint8Array(dimsInfo?.voxelCount || 0);
-    applySharedBitmap(sharedBitmap, { refresh: false });
+    applySharedBitmap(sharedBitmap, { refresh: false, include3D: false });
     historyRef.current = { stack: [], index: -1 };
     actionHistoryRef.current = [];
     ensureBaseSnapshot(sharedBitmap);
     configurePaneSync();
     applyDrawColormap();
     applyToolSettings(toolRef.current);
+    setThreeDUpdatePending(nextVisiblePaneKeys.includes("R"));
     refreshDrawingAcrossPanes({ reason: "load", sourcePaneKey: "A" });
     logViewerDiagnostics("after-load", {
       windowSource: windowRange?.preset
@@ -2869,9 +2944,65 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           : "none",
     });
     emitDrawingChange("load");
+
+    const hasAttachedMask =
+      !targetImage?.isMaskOnly &&
+      targetImage?.mask &&
+      targetImage?.maskAttached !== false;
+    const maskBuffer = hasAttachedMask ? toArrayBuffer(targetImage.mask) : null;
+    if (!maskBuffer) return;
+    const imageKeyAtLoad = String(targetImage?.id || "");
+    void (async () => {
+      try {
+        const maskTemplate = await loadVolumeTemplate({
+          cacheKey: getMaskTemplateCacheKey(targetImage),
+          buffer: maskBuffer,
+          name: targetImage.maskName || targetImage.name,
+          imageMeta: targetImage,
+          context: "mask",
+          allowCache: true,
+          generation,
+        });
+        if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
+        if (String(imageKeyRef.current || "") !== imageKeyAtLoad) return;
+        const history = historyRef.current || { stack: [], index: -1 };
+        if (history.stack.length > 1 || Number(history.index || 0) > 0) {
+          return;
+        }
+        const latestPrimary = getPrimaryNv();
+        if (!latestPrimary) return;
+        latestPrimary.loadDrawing(maskTemplate);
+        const nextDimsInfo = getDrawingDimsInfo(latestPrimary);
+        const maskedBitmap =
+          latestPrimary.drawBitmap?.length === nextDimsInfo?.voxelCount
+            ? new Uint8Array(latestPrimary.drawBitmap)
+            : new Uint8Array(nextDimsInfo?.voxelCount || 0);
+        applySharedBitmap(maskedBitmap, { refresh: false, include3D: false });
+        historyRef.current = { stack: [], index: -1 };
+        actionHistoryRef.current = [];
+        ensureBaseSnapshot(maskedBitmap);
+        refreshDrawingAcrossPanes({ reason: "load", sourcePaneKey: "A" });
+        emitDrawingChange("load");
+      } catch (error) {
+        if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
+        console.error("异步加载 mask 失败", error);
+      }
+    })();
   };
 
   useImperativeHandle(ref, () => ({
+    prewarmImage: async (targetImage, { includeMask = true } = {}) => {
+      if (!targetImage?.data) return false;
+      const generation = Number(imageLoadGenerationRef.current || 0);
+      try {
+        return await prewarmImageTemplates(targetImage, {
+          includeMask,
+          generation,
+        });
+      } catch {
+        return false;
+      }
+    },
     refreshOverlay: () => {
       drawStrokeMarkers();
       return true;
