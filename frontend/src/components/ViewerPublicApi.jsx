@@ -486,6 +486,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const crosshairSyncRafRef = useRef(null);
   const pendingCrosshairSyncRef = useRef(null);
   const syncingLocationRef = useRef(false);
+  const renderPaneImageKeyRef = useRef("");
   const activePointerIdRef = useRef(null);
   const activePointerPaneKeyRef = useRef(null);
   const freehandDrawingRef = useRef(false);
@@ -507,7 +508,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const [canFocusPlanes, setCanFocusPlanes] = useState(false);
   const [visiblePaneKeys, setVisiblePaneKeys] = useState([...PANE_ORDER]);
   const [threeDUpdatePending, setThreeDUpdatePending] = useState(false);
-  const [renderPaneAwaitingLoad, setRenderPaneAwaitingLoad] = useState(false);
 
   imageKeyRef.current = image?.id ? String(image.id) : "";
 
@@ -1851,8 +1851,14 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     if (!renderNv) return false;
     const targetImage = image;
     const generation = Number(imageLoadGenerationRef.current || 0);
+    const targetRenderImageKey = String(
+      targetImage?.id || targetImage?.name || "",
+    );
     try {
-      if (targetImage?.data) {
+      const needsReloadBaseVolume =
+        !renderNv.volumes?.length ||
+        String(renderPaneImageKeyRef.current || "") !== targetRenderImageKey;
+      if (targetImage?.data && needsReloadBaseVolume) {
         const imageBuffer = toArrayBuffer(targetImage.data);
         if (imageBuffer) {
           const baseTemplate = await loadVolumeTemplate({
@@ -1886,12 +1892,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           if (targetImage?.isMaskOnly && typeof renderNv.setColormap === "function") {
             renderNv.setColormap("itksnap");
           }
+          renderPaneImageKeyRef.current = targetRenderImageKey;
         }
       }
       syncSharedBitmapBindings({ include3D: true });
       refreshDrawingAcrossPanes({ reason: "manual-3d" });
       setThreeDUpdatePending(false);
-      setRenderPaneAwaitingLoad(false);
       return true;
     } catch (error) {
       console.error("3D 手动更新失败", error);
@@ -2867,6 +2873,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     visiblePaneKeysRef.current = nextVisiblePaneKeys;
     setVisiblePaneKeys(nextVisiblePaneKeys);
     setCanFocusPlanes(!is2D);
+    renderPaneImageKeyRef.current = "";
     if (is2D && focusedPlane) {
       setFocusedPlane(null);
     }
@@ -2883,13 +2890,35 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         continue;
       }
       if (key === "R") {
-        // 3D 视口改为懒更新：切换上下张不自动重建，只在手动 Update 时刷新。
+        // 3D 视口随切图加载底图和坐标线；标注阴影仍保持手动 Update 才同步。
         if (nv.volumes?.length) {
           for (const vol of [...nv.volumes]) nv.removeVolume(vol);
         }
         nv.closeDrawing?.();
+        const renderVolume = baseTemplate.clone();
+        if (windowRange) {
+          renderVolume.cal_min = Number(windowRange.min);
+          renderVolume.cal_max = Number(windowRange.max);
+        }
+        nv.addVolume(renderVolume);
+        applyPaneInterpolation(nv);
+        nv.setRadiologicalConvention(
+          isRasterImageName(sourceName) ? true : !!radiological2D,
+        );
+        nv.setSliceType(getPaneSliceType(nv, key));
+        nv.setSliceMM?.(false);
         applyPaneBounds(key);
+        if (!targetImage?.isMaskOnly) {
+          nv.setOpacity?.(0, renderMaskOnly3DRef.current ? 0 : 1);
+        } else {
+          nv.setOpacity?.(0, 1);
+        }
+        if (targetImage?.isMaskOnly && typeof nv.setColormap === "function") {
+          nv.setColormap("itksnap");
+        }
+        nv.createEmptyDrawing?.();
         nv.drawScene?.();
+        renderPaneImageKeyRef.current = String(targetImage?.id || targetImage?.name || "");
         continue;
       }
       if (nv.volumes?.length) {
@@ -2938,7 +2967,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     applyToolSettings(toolRef.current);
     const shouldAwait3DManualLoad = nextVisiblePaneKeys.includes("R");
     setThreeDUpdatePending(shouldAwait3DManualLoad);
-    setRenderPaneAwaitingLoad(shouldAwait3DManualLoad);
     refreshDrawingAcrossPanes({ reason: "load", sourcePaneKey: "A" });
     logViewerDiagnostics("after-load", {
       windowSource: windowRange?.preset
@@ -3319,7 +3347,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     let cancelled = false;
     const nextImageKey = String(image.id);
     setThreeDUpdatePending(false);
-    setRenderPaneAwaitingLoad(false);
     imageKeyRef.current = nextImageKey;
     lesionTrackingRef.current = {
       imageKey: nextImageKey,
@@ -3842,32 +3869,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
                   />
                 )}
                 {paneKey === "R" && (
-                  <>
-                    {renderPaneAwaitingLoad && (
-                      <div className="viewer-3d-guide-overlay" aria-hidden="true">
-                        <svg
-                          className="viewer-3d-guide-axis"
-                          viewBox="0 0 100 100"
-                          preserveAspectRatio="none"
-                        >
-                          <line className="axis-line axis-main" x1="50" y1="10" x2="50" y2="90" />
-                          <line className="axis-line axis-main" x1="14" y1="56" x2="86" y2="51" />
-                          <line className="axis-line axis-secondary" x1="50" y1="53" x2="64" y2="61" />
-                          <line className="axis-line axis-secondary" x1="50" y1="53" x2="37" y2="46" />
-                        </svg>
-                      </div>
-                    )}
-                    <div className="viewer-3d-update-wrap">
-                      <button
-                        type="button"
-                        className="viewer-3d-update-btn"
-                        onClick={applyManual3DUpdate}
-                        disabled={!threeDUpdatePending}
-                      >
-                        Update
-                      </button>
-                    </div>
-                  </>
+                  <div className="viewer-3d-update-wrap">
+                    <button
+                      type="button"
+                      className="viewer-3d-update-btn"
+                      onClick={applyManual3DUpdate}
+                      disabled={!threeDUpdatePending}
+                    >
+                      Update
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

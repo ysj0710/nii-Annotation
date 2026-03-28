@@ -521,37 +521,6 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   z-index: 10;
 }
 
-.viewer-3d-guide-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 7;
-  pointer-events: none;
-  display: flex;
-  align-items: stretch;
-  justify-content: stretch;
-}
-
-.viewer-3d-guide-axis {
-  width: 100%;
-  height: 100%;
-  filter: drop-shadow(0 0 2px rgba(37, 99, 235, 0.32));
-}
-
-.viewer-3d-guide-axis .axis-line {
-  fill: none;
-  stroke: rgba(49, 149, 255, 0.95);
-  stroke-linecap: round;
-}
-
-.viewer-3d-guide-axis .axis-main {
-  stroke-width: 0.45;
-}
-
-.viewer-3d-guide-axis .axis-secondary {
-  stroke-width: 0.55;
-  opacity: 0.95;
-}
-
 .viewer-3d-update-btn {
   min-width: 86px;
   height: 30px;
