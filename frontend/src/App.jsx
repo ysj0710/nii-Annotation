@@ -67,9 +67,28 @@ const PLATFORM_SYNC_CHANNEL = "nii-annotation-sync";
 const PLATFORM_SYNC_STORAGE_KEY = "nii-annotation:sync";
 const QUEUE_PREFETCH_RADIUS = 2;
 const LOCAL_IMAGE_PAGE_SIZE = 20;
-const BATCH_PREFETCH_CONCURRENCY = 1;
+const BATCH_PREFETCH_CONCURRENCY = 2;
 const ENABLE_NEARBY_PREFETCH = true;
 const AUTO_PREFETCH_ALL_MAX_IMAGES = 8;
+
+const getNowMs = () => {
+  if (typeof performance !== "undefined" && typeof performance.now === "function")
+    return performance.now();
+  return Date.now();
+};
+
+const toPerfMs = (value) => {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+};
+
+const logSwitchPerf = (stage, payload = {}) => {
+  console.info("[SwitchPerf][App]", {
+    stage,
+    ...payload,
+  });
+};
 
 const detectBrowserRuntimeEnv = () => {
   const nav = typeof navigator !== "undefined" ? navigator : {};
@@ -1771,6 +1790,7 @@ export default function App() {
   const remoteImportInFlightRef = useRef(new Map());
   const batchPrefetchStartedRef = useRef(false);
   const platformBroadcastRef = useRef(null);
+  const switchPerfRef = useRef({ token: 0, current: null });
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {};
@@ -2329,10 +2349,18 @@ export default function App() {
     return record;
   };
 
-  const getImageRecordFast = async (id) => {
+  const getImageRecordFast = async (id, { trace = null } = {}) => {
     const cached = getCachedImageRecord(id);
-    if (cached) return cached;
+    if (cached) {
+      if (trace) trace.recordSource = "memory-cache";
+      return cached;
+    }
+    const dbLookupStartedAt = getNowMs();
     const record = await getImageById(id);
+    if (trace) {
+      trace.recordSource = "indexeddb";
+      trace.dbLookupMs = toPerfMs(getNowMs() - dbLookupStartedAt);
+    }
     return record ? cacheImageRecord(record) : null;
   };
 
@@ -2340,7 +2368,8 @@ export default function App() {
     if (!record?.data) return;
     const prewarm = viewerRef.current?.prewarmImage;
     if (typeof prewarm !== "function") return;
-    void prewarm(record, { includeMask: true }).catch(() => {});
+    // 切图关键路径优先预热原图模板，mask 仍按需异步加载，避免后台预热占满主线程。
+    void prewarm(record, { includeMask: false }).catch(() => {});
   };
 
   const prefetchImageRecord = (id) => {
@@ -2927,12 +2956,24 @@ export default function App() {
   const ensureQueueImageLoaded = async (queueItem) => {
     const remoteImageId = String(queueItem?.imageId || "");
     if (!remoteImageId) return false;
+    const startedAt = getNowMs();
+    const localLookupStartedAt = getNowMs();
     const existing = await findLocalByRemoteImageId(remoteImageId);
+    const localLookupMs = toPerfMs(getNowMs() - localLookupStartedAt);
     if (existing) {
       cacheImageRecord(existing);
+      const selectStartedAt = getNowMs();
       await selectImage(existing.id);
+      logSwitchPerf("queue-switch-local-hit", {
+        remoteImageId,
+        localImageId: String(existing.id || ""),
+        localLookupMs,
+        selectImageMs: toPerfMs(getNowMs() - selectStartedAt),
+        totalMs: toPerfMs(getNowMs() - startedAt),
+      });
       return true;
     }
+    const importStartedAt = getNowMs();
     const imported = await fetchAndImportByImageId({
       imageId: remoteImageId,
       imageUrl: queueItem?.imageUrl || queueItem?.downloadUrl || "",
@@ -2944,9 +2985,27 @@ export default function App() {
       topicId: externalCtx.topicId,
       useAutoGuard: false,
     });
-    if (!imported?.id) return false;
+    const importMs = toPerfMs(getNowMs() - importStartedAt);
+    if (!imported?.id) {
+      logSwitchPerf("queue-switch-import-failed", {
+        remoteImageId,
+        localLookupMs,
+        importMs,
+        totalMs: toPerfMs(getNowMs() - startedAt),
+      });
+      return false;
+    }
     cacheImageRecord(imported);
+    const selectStartedAt = getNowMs();
     await selectImage(imported.id);
+    logSwitchPerf("queue-switch-imported", {
+      remoteImageId,
+      localImageId: String(imported.id || ""),
+      localLookupMs,
+      importMs,
+      selectImageMs: toPerfMs(getNowMs() - selectStartedAt),
+      totalMs: toPerfMs(getNowMs() - startedAt),
+    });
     return true;
   };
 
@@ -3841,6 +3900,31 @@ export default function App() {
   };
 
   const onViewerEvent = (reason = "draw") => {
+    if (reason === "load") {
+      const trace = switchPerfRef.current?.current || null;
+      const activeId = String(activeImageIdRef.current || activeImage?.id || "");
+      if (
+        trace &&
+        !trace.loadLogged &&
+        String(trace.activeImageId || trace.targetId || "") === activeId
+      ) {
+        const now = getNowMs();
+        const activatedAt = Number(trace.activatedAt || trace.startedAt || now);
+        const startedAt = Number(trace.startedAt || now);
+        const viewerPerf = viewerRef.current?.getImageLoadPerf?.() || null;
+        logSwitchPerf("viewer-load-event", {
+          token: Number(trace.token || 0),
+          targetId: activeId,
+          viewerStageMs: toPerfMs(now - activatedAt),
+          endToEndMs: toPerfMs(now - startedAt),
+          viewerPerf,
+        });
+        switchPerfRef.current.current = {
+          ...trace,
+          loadLogged: true,
+        };
+      }
+    }
     if (reason === "curve-complete") {
       Message.success("标注成功");
     }
@@ -3907,8 +3991,20 @@ export default function App() {
 
   const selectImage = async (id) => {
     if (activeImage?.id === id) return;
-    const recordPromise = getImageRecordFast(id);
+    const trace = {
+      token: Number(switchPerfRef.current?.token || 0) + 1,
+      targetId: String(id || ""),
+      startedAt: getNowMs(),
+      mode: isBatchMode || queueImages.length > 0 ? "queue-or-batch" : "local",
+      recordSource: "unknown",
+      dbLookupMs: 0,
+      unsavedGuardMs: 0,
+    };
+    switchPerfRef.current.token = trace.token;
+    switchPerfRef.current.current = { ...trace };
+    const recordPromise = getImageRecordFast(id, { trace });
     if (hasUnsavedChangesRef.current || localPersistDirtyRef.current) {
+      const unsavedGuardStartedAt = getNowMs();
       const allowSwitch = await new Promise((resolve) => {
         Modal.confirm({
           title: "存在未保存标注",
@@ -3923,7 +4019,18 @@ export default function App() {
           unmountOnExit: true,
         });
       });
-      if (!allowSwitch) return;
+      trace.unsavedGuardMs = toPerfMs(getNowMs() - unsavedGuardStartedAt);
+      if (!allowSwitch) {
+        logSwitchPerf("cancelled-unsaved", {
+          token: Number(trace.token || 0),
+          targetId: trace.targetId,
+          elapsedMs: toPerfMs(getNowMs() - Number(trace.startedAt || 0)),
+        });
+        if (Number(switchPerfRef.current?.current?.token || 0) === trace.token) {
+          switchPerfRef.current.current = null;
+        }
+        return;
+      }
     }
 
     clearAutoSaveSchedule();
@@ -3954,23 +4061,63 @@ export default function App() {
           pageCache.ids.every((item, idx) => item === pageIdKeys[idx]);
         if (!samePage) {
           localListPageRef.current = { start: pageStart, ids: pageIdKeys };
+          const pageMetaStartedAt = getNowMs();
           void getImageMetasByIds(pageIds)
             .then((metas) => {
               setImages(metas.map(toListItem));
+              logSwitchPerf("list-page-meta-ready", {
+                token: Number(trace.token || 0),
+                targetId: trace.targetId,
+                pageStart: Number(pageStart || 0),
+                pageSize: pageIds.length,
+                resolvedCount: Array.isArray(metas) ? metas.length : 0,
+                elapsedMs: toPerfMs(getNowMs() - pageMetaStartedAt),
+              });
             })
             .catch(() => {});
         }
       }
     }
 
+    const recordAwaitStartedAt = getNowMs();
     const record = await recordPromise;
-    if (!record) return;
+    trace.recordAwaitMs = toPerfMs(getNowMs() - recordAwaitStartedAt);
+    if (!record) {
+      logSwitchPerf("record-missing", {
+        token: Number(trace.token || 0),
+        targetId: trace.targetId,
+        elapsedMs: toPerfMs(getNowMs() - Number(trace.startedAt || 0)),
+      });
+      if (Number(switchPerfRef.current?.current?.token || 0) === trace.token) {
+        switchPerfRef.current.current = null;
+      }
+      return;
+    }
     cacheImageRecord(record);
     activeImageIdRef.current = String(record.id);
     setActiveImage({
       ...record,
       maskVersion: resolveMaskVersion(record),
     });
+    trace.activeImageId = String(record.id);
+    trace.activatedAt = getNowMs();
+    trace.loadLogged = false;
+    logSwitchPerf("active-image-set", {
+      token: Number(trace.token || 0),
+      targetId: trace.targetId,
+      activeImageId: trace.activeImageId,
+      mode: trace.mode,
+      recordSource: trace.recordSource,
+      dbLookupMs: Number(trace.dbLookupMs || 0),
+      recordAwaitMs: Number(trace.recordAwaitMs || 0),
+      unsavedGuardMs: Number(trace.unsavedGuardMs || 0),
+      preViewerTotalMs: toPerfMs(
+        Number(trace.activatedAt || 0) - Number(trace.startedAt || 0),
+      ),
+    });
+    if (Number(switchPerfRef.current?.current?.token || 0) === trace.token) {
+      switchPerfRef.current.current = { ...trace };
+    }
   };
 
   const switchQueueImage = async (direction = 1) => {

@@ -91,6 +91,18 @@ const safeInt = (value, fallback = 0) => {
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
+const getNowMs = () => {
+  if (typeof performance !== "undefined" && typeof performance.now === "function")
+    return performance.now();
+  return Date.now();
+};
+
+const toPerfMs = (value) => {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+};
+
 const isViewerDebugEnabled = () => {
   try {
     return (
@@ -486,6 +498,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const crosshairSyncRafRef = useRef(null);
   const pendingCrosshairSyncRef = useRef(null);
   const deferredPaneLoadRafRef = useRef(null);
+  const deferredPaneLoadTimerRef = useRef(null);
+  const deferredPaneLoadIdleRef = useRef(null);
   const syncingLocationRef = useRef(false);
   const renderPaneImageKeyRef = useRef("");
   const activePointerIdRef = useRef(null);
@@ -497,6 +511,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const brushStrokeDirtyRef = useRef(false);
   const refreshTelemetryRef = useRef({ last: null });
   const refreshPerfRef = useRef({ emaMs: 0, samples: 0 });
+  const imageLoadPerfRef = useRef({ seq: 0, active: null, last: null });
   const labelAnalysisRef = useRef({ dirty: true, stats: {}, centroids: {} });
   const labelStatsWorkerRef = useRef(null);
   const labelStatsRequestSeqRef = useRef(0);
@@ -650,6 +665,114 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     };
   };
 
+  const beginImageLoadPerfTrace = (targetImage, generation) => {
+    const state = imageLoadPerfRef.current || { seq: 0, active: null, last: null };
+    const seq = Number(state.seq || 0) + 1;
+    const trace = {
+      seq,
+      generation: Number(generation || 0),
+      imageId: String(targetImage?.id || ""),
+      imageName: targetImage?.displayName || targetImage?.name || "",
+      startedAt: getNowMs(),
+      steps: {},
+      paneMs: {},
+      deferredPaneMs: {},
+      cache: {
+        baseTemplateHit: false,
+        maskTemplateHit: false,
+      },
+    };
+    state.seq = seq;
+    state.active = trace;
+    imageLoadPerfRef.current = state;
+    return trace;
+  };
+
+  const markImageLoadPerfStep = (trace, stepKey, startedAt) => {
+    if (!trace || !stepKey) return;
+    trace.steps[stepKey] = toPerfMs(getNowMs() - Number(startedAt || 0));
+  };
+
+  const logImageLoadPerf = (trace, stage, extra = {}) => {
+    if (!trace) return null;
+    const payload = {
+      stage,
+      seq: Number(trace.seq || 0),
+      generation: Number(trace.generation || 0),
+      imageId: String(trace.imageId || ""),
+      imageName: trace.imageName || "",
+      totalMs: toPerfMs(getNowMs() - Number(trace.startedAt || 0)),
+      steps: { ...(trace.steps || {}) },
+      paneMs: { ...(trace.paneMs || {}) },
+      deferredPaneMs: { ...(trace.deferredPaneMs || {}) },
+      cache: { ...(trace.cache || {}) },
+      ...extra,
+    };
+    imageLoadPerfRef.current = {
+      ...(imageLoadPerfRef.current || {}),
+      last: payload,
+    };
+    console.info("[SwitchPerf][Viewer]", payload);
+    return payload;
+  };
+
+  const clearDeferredPaneLoadSchedule = () => {
+    if (deferredPaneLoadRafRef.current !== null) {
+      cancelAnimationFrame(deferredPaneLoadRafRef.current);
+      deferredPaneLoadRafRef.current = null;
+    }
+    if (deferredPaneLoadTimerRef.current !== null) {
+      clearTimeout(deferredPaneLoadTimerRef.current);
+      deferredPaneLoadTimerRef.current = null;
+    }
+    if (deferredPaneLoadIdleRef.current !== null) {
+      if (
+        typeof window !== "undefined" &&
+        typeof window.cancelIdleCallback === "function"
+      ) {
+        window.cancelIdleCallback(deferredPaneLoadIdleRef.current);
+      }
+      deferredPaneLoadIdleRef.current = null;
+    }
+  };
+
+  const scheduleDeferredPaneLoadTask = (task, { delayMs = 0 } = {}) => {
+    if (typeof task !== "function") return;
+    if (deferredPaneLoadTimerRef.current !== null) {
+      clearTimeout(deferredPaneLoadTimerRef.current);
+      deferredPaneLoadTimerRef.current = null;
+    }
+    if (deferredPaneLoadIdleRef.current !== null) {
+      if (
+        typeof window !== "undefined" &&
+        typeof window.cancelIdleCallback === "function"
+      ) {
+        window.cancelIdleCallback(deferredPaneLoadIdleRef.current);
+      }
+      deferredPaneLoadIdleRef.current = null;
+    }
+    deferredPaneLoadTimerRef.current = setTimeout(() => {
+      deferredPaneLoadTimerRef.current = null;
+      const runTask = () => {
+        deferredPaneLoadIdleRef.current = null;
+        task();
+      };
+      if (
+        typeof window !== "undefined" &&
+        typeof window.requestIdleCallback === "function"
+      ) {
+        deferredPaneLoadIdleRef.current = window.requestIdleCallback(runTask, {
+          timeout: 1200,
+        });
+        return;
+      }
+      deferredPaneLoadRafRef.current = requestAnimationFrame(() => {
+        deferredPaneLoadRafRef.current = null;
+        runTask();
+      });
+    }, Math.max(0, Number(delayMs || 0)));
+  };
+
   const touchTemplateCacheEntry = (cacheKey) => {
     const cache = volumeTemplateCacheRef.current;
     const entry = cache.get(cacheKey);
@@ -674,11 +797,12 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         ? 3 * 60 * 1000
         : 6 * 60 * 1000;
     const currentGeneration = Number(imageLoadGenerationRef.current || 0);
+    const maxGenerationGap = Math.max(8, maxEntries * 2);
     for (const [key, entry] of cache.entries()) {
       const updatedAt = Number(entry?.updatedAt || 0);
       const generation = Number(entry?.generation || 0);
       const expired = !updatedAt || now - updatedAt > maxAgeMs;
-      const staleGeneration = currentGeneration - generation > 2;
+      const staleGeneration = currentGeneration - generation > maxGenerationGap;
       if (expired || staleGeneration) cache.delete(key);
     }
     while (cache.size > maxEntries) {
@@ -2896,20 +3020,29 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const loadImageIntoPanes = async () => {
     imageLoadGenerationRef.current += 1;
     const generation = Number(imageLoadGenerationRef.current || 0);
-    if (deferredPaneLoadRafRef.current !== null) {
-      cancelAnimationFrame(deferredPaneLoadRafRef.current);
-      deferredPaneLoadRafRef.current = null;
-    }
+    const loadPerf = beginImageLoadPerfTrace(image, generation);
+    clearDeferredPaneLoadSchedule();
     pruneTemplateCache();
     const targetImage = image;
+    if (!targetImage?.id && !targetImage?.name) {
+      logImageLoadPerf(loadPerf, "aborted-invalid-image-meta");
+      return;
+    }
+    const baseTemplateCacheKey = getImageTemplateCacheKey(targetImage);
+    loadPerf.cache.baseTemplateHit =
+      volumeTemplateCacheRef.current.has(baseTemplateCacheKey);
     const imageBuffer = toArrayBuffer(targetImage?.data);
-    if (!imageBuffer) return;
+    if (!imageBuffer) {
+      logImageLoadPerf(loadPerf, "aborted-no-image-buffer");
+      return;
+    }
     for (const key of PANE_ORDER) {
       const nv = getPaneNv(key);
       nv?.broadcastTo?.([], {});
     }
+    const baseTemplateStartedAt = getNowMs();
     const baseTemplate = await loadVolumeTemplate({
-      cacheKey: getImageTemplateCacheKey(targetImage),
+      cacheKey: baseTemplateCacheKey,
       buffer: imageBuffer,
       name: targetImage?.name,
       imageMeta: targetImage,
@@ -2917,7 +3050,13 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       allowCache: true,
       generation,
     });
-    if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
+    markImageLoadPerfStep(loadPerf, "baseTemplateMs", baseTemplateStartedAt);
+    if (Number(imageLoadGenerationRef.current || 0) !== generation) {
+      logImageLoadPerf(loadPerf, "aborted-generation-changed", {
+        at: "after-base-template",
+      });
+      return;
+    }
 
     const sourceName =
       targetImage?.displayName || targetImage?.sourceName || targetImage?.name;
@@ -2940,6 +3079,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const deferredPaneKeys = nextVisiblePaneKeys.filter(
       (key) => !immediatePaneKeys.has(key),
     );
+    const deferredLoadStartedAt =
+      deferredPaneKeys.length > 0 ? getNowMs() : 0;
     visiblePaneKeysRef.current = nextVisiblePaneKeys;
     setVisiblePaneKeys(nextVisiblePaneKeys);
     setCanFocusPlanes(!is2D);
@@ -3014,15 +3155,30 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         applyPaneBounds(key);
         nv.drawScene?.();
       } else {
-        loadPaneBaseVolume(key, { reusePrimaryTemplate: key === primaryPaneKey });
+        const paneLoadStartedAt = getNowMs();
+        const loaded = loadPaneBaseVolume(key, {
+          reusePrimaryTemplate: key === primaryPaneKey,
+        });
+        if (loaded) {
+          loadPerf.paneMs[key] = toPerfMs(getNowMs() - paneLoadStartedAt);
+        }
       }
     }
-    if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
+    if (Number(imageLoadGenerationRef.current || 0) !== generation) {
+      logImageLoadPerf(loadPerf, "aborted-generation-changed", {
+        at: "after-immediate-pane-load",
+      });
+      return;
+    }
 
     const primary = getPrimaryNv();
-    if (!primary || !paneHasLoadedVolume(primaryPaneKey)) return;
+    if (!primary || !paneHasLoadedVolume(primaryPaneKey)) {
+      logImageLoadPerf(loadPerf, "aborted-primary-pane-missing");
+      return;
+    }
     primary.createEmptyDrawing?.();
 
+    const bitmapInitStartedAt = getNowMs();
     const dimsInfo = getDrawingDimsInfo(primary);
     const sharedBitmap =
       primary.drawBitmap?.length === dimsInfo?.voxelCount
@@ -3035,8 +3191,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     configurePaneSync();
     applyDrawColormap();
     applyToolSettings(toolRef.current);
+    markImageLoadPerfStep(loadPerf, "bitmapInitMs", bitmapInitStartedAt);
     const shouldAwait3DManualLoad = nextVisiblePaneKeys.includes("R");
     setThreeDUpdatePending(shouldAwait3DManualLoad);
+    const firstRefreshStartedAt = getNowMs();
     refreshDrawingAcrossPanes({ reason: "load", sourcePaneKey: "A" });
     logViewerDiagnostics("after-load", {
       windowSource: windowRange?.preset
@@ -3046,35 +3204,76 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           : "none",
     });
     emitDrawingChange("load");
+    markImageLoadPerfStep(loadPerf, "firstRefreshMs", firstRefreshStartedAt);
+    logImageLoadPerf(loadPerf, "first-ready", {
+      visiblePanes: [...nextVisiblePaneKeys],
+      immediatePanes: Array.from(immediatePaneKeys),
+      deferredPaneCount: deferredPaneKeys.length,
+    });
 
     if (deferredPaneKeys.length > 0) {
+      const perfProfile = getViewerPerfProfile();
+      const deferredStartDelayMs = perfProfile.lowPowerMode
+        ? 900
+        : perfProfile.mediumPowerMode
+          ? 650
+          : 350;
+      const deferredGapMs = perfProfile.lowPowerMode
+        ? 220
+        : perfProfile.mediumPowerMode
+          ? 140
+          : 90;
       let deferredIndex = 0;
       const loadNextDeferredPane = () => {
         if (Number(imageLoadGenerationRef.current || 0) !== generation) {
-          deferredPaneLoadRafRef.current = null;
+          clearDeferredPaneLoadSchedule();
+          logImageLoadPerf(loadPerf, "aborted-generation-changed", {
+            at: "deferred-pane-load",
+            deferredLoadedCount: deferredIndex,
+          });
           return;
         }
         const key = deferredPaneKeys[deferredIndex];
         if (!key) {
-          deferredPaneLoadRafRef.current = null;
+          clearDeferredPaneLoadSchedule();
           return;
         }
-        loadPaneBaseVolume(key, { reusePrimaryTemplate: false });
+        const paneLoadStartedAt = getNowMs();
+        const loaded = loadPaneBaseVolume(key, { reusePrimaryTemplate: false });
+        if (loaded) {
+          const paneCostMs = toPerfMs(getNowMs() - paneLoadStartedAt);
+          loadPerf.deferredPaneMs[key] = paneCostMs;
+          if (!Number.isFinite(Number(loadPerf.paneMs[key] || NaN))) {
+            loadPerf.paneMs[key] = paneCostMs;
+          }
+        }
         if (PANE_CONFIGS[key]?.is2D) {
           syncSharedBitmapBindings({ include3D: false });
           redrawPaneDrawing(key);
         }
         deferredIndex += 1;
         if (deferredIndex < deferredPaneKeys.length) {
-          deferredPaneLoadRafRef.current =
-            requestAnimationFrame(loadNextDeferredPane);
+          scheduleDeferredPaneLoadTask(loadNextDeferredPane, {
+            delayMs: deferredGapMs,
+          });
         } else {
-          deferredPaneLoadRafRef.current = null;
+          clearDeferredPaneLoadSchedule();
           drawStrokeMarkers(true);
           scheduleMarkerRedraw(1);
+          logImageLoadPerf(loadPerf, "deferred-ready", {
+            deferredTotalMs: toPerfMs(getNowMs() - deferredLoadStartedAt),
+            deferredLoadedCount: deferredPaneKeys.length,
+          });
         }
       };
-      deferredPaneLoadRafRef.current = requestAnimationFrame(loadNextDeferredPane);
+      logImageLoadPerf(loadPerf, "deferred-scheduled", {
+        deferredStartDelayMs,
+        deferredGapMs,
+        deferredPaneCount: deferredPaneKeys.length,
+      });
+      scheduleDeferredPaneLoadTask(loadNextDeferredPane, {
+        delayMs: deferredStartDelayMs,
+      });
     }
 
     const hasAttachedMask =
@@ -3083,11 +3282,16 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       targetImage?.maskAttached !== false;
     const maskBuffer = hasAttachedMask ? toArrayBuffer(targetImage.mask) : null;
     if (!maskBuffer) return;
+    const maskTemplateCacheKey = getMaskTemplateCacheKey(targetImage);
+    loadPerf.cache.maskTemplateHit =
+      volumeTemplateCacheRef.current.has(maskTemplateCacheKey);
+    const maskAsyncStartedAt = getNowMs();
     const imageKeyAtLoad = String(targetImage?.id || "");
     void (async () => {
       try {
+        const maskTemplateStartedAt = getNowMs();
         const maskTemplate = await loadVolumeTemplate({
-          cacheKey: getMaskTemplateCacheKey(targetImage),
+          cacheKey: maskTemplateCacheKey,
           buffer: maskBuffer,
           name: targetImage.maskName || targetImage.name,
           imageMeta: targetImage,
@@ -3095,14 +3299,28 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           allowCache: true,
           generation,
         });
-        if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
-        if (String(imageKeyRef.current || "") !== imageKeyAtLoad) return;
+        markImageLoadPerfStep(loadPerf, "maskTemplateMs", maskTemplateStartedAt);
+        if (Number(imageLoadGenerationRef.current || 0) !== generation) {
+          logImageLoadPerf(loadPerf, "aborted-generation-changed", {
+            at: "mask-template",
+          });
+          return;
+        }
+        if (String(imageKeyRef.current || "") !== imageKeyAtLoad) {
+          logImageLoadPerf(loadPerf, "mask-skip-image-changed");
+          return;
+        }
         const history = historyRef.current || { stack: [], index: -1 };
         if (history.stack.length > 1 || Number(history.index || 0) > 0) {
+          logImageLoadPerf(loadPerf, "mask-skip-history-changed");
           return;
         }
         const latestPrimary = getPrimaryNv();
-        if (!latestPrimary) return;
+        if (!latestPrimary) {
+          logImageLoadPerf(loadPerf, "mask-skip-primary-missing");
+          return;
+        }
+        const maskApplyStartedAt = getNowMs();
         latestPrimary.loadDrawing(maskTemplate);
         const nextDimsInfo = getDrawingDimsInfo(latestPrimary);
         const maskedBitmap =
@@ -3115,8 +3333,20 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         ensureBaseSnapshot(maskedBitmap);
         refreshDrawingAcrossPanes({ reason: "load", sourcePaneKey: "A" });
         emitDrawingChange("load");
+        markImageLoadPerfStep(loadPerf, "maskApplyMs", maskApplyStartedAt);
+        logImageLoadPerf(loadPerf, "mask-ready", {
+          maskTotalMs: toPerfMs(getNowMs() - maskAsyncStartedAt),
+        });
       } catch (error) {
-        if (Number(imageLoadGenerationRef.current || 0) !== generation) return;
+        if (Number(imageLoadGenerationRef.current || 0) !== generation) {
+          logImageLoadPerf(loadPerf, "aborted-generation-changed", {
+            at: "mask-error",
+          });
+          return;
+        }
+        logImageLoadPerf(loadPerf, "mask-error", {
+          error: String(error?.message || error || ""),
+        });
         console.error("异步加载 mask 失败", error);
       }
     })();
@@ -3282,6 +3512,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     },
     exportAnnotations: () => cloneAnnotations(getCurrentAnnotations()),
     getRefreshDiagnostics: () => ({ ...(refreshTelemetryRef.current || {}) }),
+    getImageLoadPerf: () => ({ ...(imageLoadPerfRef.current?.last || {}) }),
     getAnnotationCount: () => getCurrentAnnotations().length,
     getLabelStats: () => ({ ...(getLabelAnalysis().stats || {}) }),
     getLabelStatsAsync: () => getLabelStatsAsync(),
@@ -3406,8 +3637,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
         cancelAnimationFrame(paneLayoutSyncRafRef.current);
       if (crosshairSyncRafRef.current !== null)
         cancelAnimationFrame(crosshairSyncRafRef.current);
-      if (deferredPaneLoadRafRef.current !== null)
-        cancelAnimationFrame(deferredPaneLoadRafRef.current);
+      clearDeferredPaneLoadSchedule();
       if (markerRedrawRafRef.current !== null)
         cancelAnimationFrame(markerRedrawRafRef.current);
       if (markerDrawRafRef.current !== null)
