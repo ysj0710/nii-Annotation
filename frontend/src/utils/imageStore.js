@@ -8,8 +8,11 @@ let META_SYNC_QUEUE = Promise.resolve()
 const META_SYNC_TIMEOUT_MS = 4500
 const BLOB_SYNC_TIMEOUT_MS = 120000
 const BLOB_SYNC_BATCH_SIZE = 1
+const BLOB_REPAIR_COOLDOWN_MS = 30000
 
 const BLOB_KEYS = ['data', 'sourceData', 'mask', 'sourceMask']
+const blobRepairAtByImageId = new Map()
+const remoteRecordInflight = new Map()
 
 const resolveDefaultMetaBackendOrigin = () => {
   try {
@@ -725,7 +728,7 @@ const getImageMetasByIdsLocal = async (ids) =>
     ).then((items) => items.filter(Boolean))
   )
 
-const getRemoteRecordById = async (id, { remoteMeta = null, preferLocalIfFresh = false } = {}) => {
+const getRemoteRecordByIdInternal = async (id, { remoteMeta = null, preferLocalIfFresh = false } = {}) => {
   const imageId = String(id || '').trim()
   if (!imageId) return null
   const meta = remoteMeta || (await fetchRemoteMetaById(imageId))
@@ -744,10 +747,15 @@ const getRemoteRecordById = async (id, { remoteMeta = null, preferLocalIfFresh =
   const hydrated = applyBlobPayloadToRecord({ ...local, ...meta }, blob)
   if (!hydrated?.isMaskOnly && !hasRenderableImageData(hydrated)) {
     if (local && hasRenderableImageData(local)) {
-      void enqueueMetaSync(async () => {
-        await syncMetaUpsertBatch([local])
-        await syncBlobUpsertBatch([local])
-      })
+      const now = Date.now()
+      const lastRepairAt = Number(blobRepairAtByImageId.get(imageId) || 0)
+      if (now - lastRepairAt >= BLOB_REPAIR_COOLDOWN_MS) {
+        blobRepairAtByImageId.set(imageId, now)
+        void enqueueMetaSync(async () => {
+          await syncMetaUpsertBatch([local])
+          await syncBlobUpsertBatch([local])
+        })
+      }
       return local
     }
     return null
@@ -756,10 +764,31 @@ const getRemoteRecordById = async (id, { remoteMeta = null, preferLocalIfFresh =
   return hydrated
 }
 
-export const getAllImages = async () => {
-  if (!metaSyncEnabled()) return getAllImagesLocal()
+const getRemoteRecordById = async (id, options = {}) => {
+  const imageId = String(id || '').trim()
+  if (!imageId) return null
+  const metaUpdatedAt = Number(options?.remoteMeta?.updatedAt || 0)
+  const key = `${imageId}::${metaUpdatedAt}`
+  if (remoteRecordInflight.has(key)) {
+    return remoteRecordInflight.get(key)
+  }
+  const task = getRemoteRecordByIdInternal(imageId, options)
+    .catch((error) => {
+      throw error
+    })
+    .finally(() => {
+      remoteRecordInflight.delete(key)
+    })
+  remoteRecordInflight.set(key, task)
+  return task
+}
+
+export const getAllImages = async ({ forceRemote = false } = {}) => {
+  const localItems = await getAllImagesLocal()
+  if (!metaSyncEnabled()) return localItems
+  if (!forceRemote && localItems.length > 0) return localItems
   const ids = await fetchRemoteIdOrder().catch(() => null)
-  if (!Array.isArray(ids) || !ids.length) return getAllImagesLocal()
+  if (!Array.isArray(ids) || !ids.length) return localItems
   const metas = await fetchRemoteMetasByIds(ids).catch(() => null)
   const metaById =
     Array.isArray(metas) && metas.length
@@ -780,10 +809,7 @@ export const getAllImages = async () => {
 export const getImageById = async (id) => {
   const local = await getImageByIdLocal(id)
   if (!metaSyncEnabled()) return local
-  if (local && hasRenderableImageData(local)) {
-    void getRemoteRecordById(id, { preferLocalIfFresh: true }).catch(() => {})
-    return local
-  }
+  if (local && hasRenderableImageData(local)) return local
   const remote = await getRemoteRecordById(id, { preferLocalIfFresh: true })
   if (remote) return remote
   return local
@@ -792,10 +818,7 @@ export const getImageById = async (id) => {
 export const getImageByRemoteImageId = async (remoteImageId) => {
   const local = await getImageByRemoteImageIdLocal(remoteImageId)
   if (!metaSyncEnabled()) return local
-  if (local && hasRenderableImageData(local)) {
-    void fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
-    return local
-  }
+  if (local && hasRenderableImageData(local)) return local
   const metas = await fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
   const first = Array.isArray(metas) ? metas[0] : null
   if (first?.id) {
@@ -812,21 +835,17 @@ export const getImagesByRemoteImageId = async (remoteImageId) => {
   const localItems = await getImagesByRemoteImageIdLocal(remoteImageId)
   const localRenderable = localItems.filter((item) => hasRenderableImageData(item))
   if (!metaSyncEnabled()) return localItems
-  if (localRenderable.length > 0) {
-    void fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
-    return localRenderable
-  }
+  if (localRenderable.length > 0) return localRenderable
   const metas = await fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
   if (Array.isArray(metas) && metas.length > 0) {
-    const records = []
-    for (const meta of metas) {
-      const record = await getRemoteRecordById(meta?.id, {
-        remoteMeta: meta,
+    const first = metas[0]
+    if (first?.id) {
+      const record = await getRemoteRecordById(first.id, {
+        remoteMeta: first,
         preferLocalIfFresh: true
       })
-      if (record) records.push(record)
+      if (record) return [record]
     }
-    if (records.length > 0) return records
   }
   return localItems
 }
@@ -835,21 +854,17 @@ export const getImagesByHash = async (hash) => {
   const localItems = await getImagesByHashLocal(hash)
   const localRenderable = localItems.filter((item) => hasRenderableImageData(item))
   if (!metaSyncEnabled()) return localItems
-  if (localRenderable.length > 0) {
-    void fetchRemoteMetasByHash(hash).catch(() => null)
-    return localRenderable
-  }
+  if (localRenderable.length > 0) return localRenderable
   const metas = await fetchRemoteMetasByHash(hash).catch(() => null)
   if (Array.isArray(metas) && metas.length > 0) {
-    const records = []
-    for (const meta of metas) {
-      const record = await getRemoteRecordById(meta?.id, {
-        remoteMeta: meta,
+    const first = metas[0]
+    if (first?.id) {
+      const record = await getRemoteRecordById(first.id, {
+        remoteMeta: first,
         preferLocalIfFresh: true
       })
-      if (record) records.push(record)
+      if (record) return [record]
     }
-    if (records.length > 0) return records
   }
   return localItems
 }
@@ -885,7 +900,7 @@ export const updateImage = async (id, patch) =>
     if (updated && metaSyncEnabled()) {
       void enqueueMetaSync(async () => {
         await syncMetaPatch(id, patch, updated)
-        if (hasAnyBlobField(updated) || BLOB_KEYS.some((key) => Object.prototype.hasOwnProperty.call(patch || {}, key))) {
+        if (BLOB_KEYS.some((key) => Object.prototype.hasOwnProperty.call(patch || {}, key))) {
           const changedKeysById = new Map([
             [
               String(id || ''),

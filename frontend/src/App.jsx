@@ -22,6 +22,7 @@ import {
   getImagesByRemoteImageId,
   saveImages,
   updateImage,
+  deleteImage,
   clearAllImages,
   getImageIdOrder,
   getImageMetasByIds,
@@ -1350,6 +1351,76 @@ const getRawQueryParam = (name) => {
   }
 };
 
+const sanitizeScopeSegment = (value, fallback = "na", maxLength = 80) => {
+  const clean = String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9:_-]+/g, "_")
+    .slice(0, maxLength);
+  return clean || fallback;
+};
+
+const decodeJwtPayloadObject = (token) => {
+  const raw = String(token || "").trim();
+  if (!raw) return null;
+  const parts = raw.split(".");
+  if (parts.length < 2) return null;
+  const payloadSeg = String(parts[1] || "").trim();
+  if (!payloadSeg) return null;
+  try {
+    const b64 = payloadSeg.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = `${b64}${"=".repeat((4 - (b64.length % 4)) % 4)}`;
+    const jsonText = atob(padded);
+    const payload = JSON.parse(jsonText);
+    return payload && typeof payload === "object" ? payload : null;
+  } catch {
+    return null;
+  }
+};
+
+const resolveWorkspaceIdentity = (ctx = {}) => {
+  const pickText = (...values) => {
+    for (const value of values) {
+      const text = String(value || "").trim();
+      if (text) return text;
+    }
+    return "";
+  };
+
+  const explicit = pickText(
+    ctx.workspaceId,
+    ctx.userWorkspaceId,
+    ctx.userId,
+    ctx.uid,
+    ctx.operatorId,
+    ctx.username,
+    ctx.userName,
+    ctx.account,
+  );
+  if (explicit) return explicit;
+
+  const payload = decodeJwtPayloadObject(ctx.token);
+  const jwtDerived = pickText(
+    payload?.workspaceId,
+    payload?.userWorkspaceId,
+    payload?.userId,
+    payload?.uid,
+    payload?.sub,
+    payload?.username,
+    payload?.account,
+  );
+  if (jwtDerived) return jwtDerived;
+
+  const token = String(ctx.token || "").trim();
+  if (!token) return "anonymous";
+  return `token-${token.slice(-16)}`;
+};
+
+const buildRemoteRecordId = (remoteImageId) => {
+  const source = String(remoteImageId || "").trim();
+  if (!source) return "";
+  return `remote-${sanitizeScopeSegment(source, "unknown", 120)}`;
+};
+
 const assertPlatformResponseSuccess = (
   json,
   fallbackMessage = "平台返回失败",
@@ -1838,6 +1909,23 @@ export default function App() {
         "",
       customSchemaUrl:
         p.get("customSchemaUrl") || globalCtx.customSchemaUrl || "",
+      workspaceId: p.get("workspaceId") || globalCtx.workspaceId || "",
+      userWorkspaceId:
+        p.get("userWorkspaceId") || globalCtx.userWorkspaceId || "",
+      userId:
+        p.get("userId") ||
+        p.get("uid") ||
+        globalCtx.userId ||
+        globalCtx.uid ||
+        "",
+      operatorId: p.get("operatorId") || globalCtx.operatorId || "",
+      username:
+        p.get("username") ||
+        p.get("userName") ||
+        globalCtx.username ||
+        globalCtx.userName ||
+        "",
+      account: p.get("account") || globalCtx.account || "",
     };
   }, []);
   const localBackendOrigin = useMemo(() => {
@@ -1864,17 +1952,20 @@ export default function App() {
       .trim()
       .replace(/\/+$/, "");
     const topicId = String(externalCtx.topicId || "").trim();
-    const batchId = String(externalCtx.batchId || "").trim();
-    const imageId = String(externalCtx.imageId || "").trim();
-    const imageUrl = String(externalCtx.imageUrl || "").trim();
-    const hasRemoteContext = !!(platformOrigin || topicId || batchId || imageId || imageUrl);
+    const hasRemoteContext = !!(
+      platformOrigin ||
+      topicId ||
+      externalCtx.batchId ||
+      externalCtx.imageId ||
+      externalCtx.imageUrl
+    );
     if (!hasRemoteContext) return "local-default";
+    const workspaceIdentity = resolveWorkspaceIdentity(externalCtx);
     return [
       "remote",
-      platformOrigin || "no-origin",
-      topicId || "no-topic",
-      batchId || "no-batch",
-      imageId || imageUrl || "no-image",
+      sanitizeScopeSegment(platformOrigin, "no-origin"),
+      sanitizeScopeSegment(topicId, "no-topic"),
+      sanitizeScopeSegment(workspaceIdentity, "anonymous"),
     ].join("::");
   }, [
     externalCtx.platformOrigin,
@@ -1882,6 +1973,13 @@ export default function App() {
     externalCtx.batchId,
     externalCtx.imageId,
     externalCtx.imageUrl,
+    externalCtx.workspaceId,
+    externalCtx.userWorkspaceId,
+    externalCtx.userId,
+    externalCtx.operatorId,
+    externalCtx.username,
+    externalCtx.account,
+    externalCtx.token,
   ]);
 
   useEffect(() => {
@@ -2724,7 +2822,19 @@ export default function App() {
   };
 
   const findLocalByRemoteImageId = async (remoteImageId) => {
-    if (!remoteImageId) return null;
+    const remoteKey = String(remoteImageId || "").trim();
+    if (!remoteKey) return null;
+    const stableId = buildRemoteRecordId(remoteKey);
+    if (stableId) {
+      const direct = await getImageById(stableId);
+      if (
+        direct &&
+        !direct.isMaskOnly &&
+        hasRenderableImageBuffer(direct)
+      ) {
+        return direct;
+      }
+    }
     const records = await getImagesByRemoteImageId(String(remoteImageId));
     const candidates = records.filter(
       (record) =>
@@ -2741,7 +2851,29 @@ export default function App() {
       const bCreated = Number(b?.createdAt || 0);
       return bCreated - aCreated;
     });
-    return candidates[0] || null;
+    const picked = candidates[0] || null;
+    if (!picked) return null;
+    if (!stableId || String(picked.id || "") === stableId) return picked;
+
+    const canonicalExisting = await getImageById(stableId);
+    if (
+      canonicalExisting &&
+      !canonicalExisting.isMaskOnly &&
+      hasRenderableImageBuffer(canonicalExisting)
+    ) {
+      return canonicalExisting;
+    }
+
+    const migrated = {
+      ...picked,
+      id: stableId,
+      remoteImageId: remoteKey,
+      updatedAt: Date.now(),
+      createdAt: Number(picked?.createdAt || Date.now()),
+    };
+    await saveImages([migrated]);
+    await deleteImage(String(picked.id || "")).catch(() => null);
+    return migrated;
   };
 
   const fetchAndImportByImageId = async ({
@@ -2855,10 +2987,15 @@ export default function App() {
         });
 
         const importBatchId = makeImportBatchId();
+        const fixedRemoteRecordId = buildRemoteRecordId(imageId);
         const importOptions = {
           refreshUi: !skipUiRefresh,
           activateImported: !skipUiRefresh,
           generateThumbnail: !skipUiRefresh && !isRemoteBatchImport,
+          fixedRecordId: fixedRemoteRecordId,
+          forcedRemoteImageId: String(imageId || ""),
+          forcedRemoteBatchId: String(remoteBatchId || ""),
+          targetSourceName: fallbackName,
         };
         const pickNewestNonMask = (records = []) => {
           const candidates = (Array.isArray(records) ? records : []).filter(
@@ -2883,55 +3020,62 @@ export default function App() {
           if (!candidate || candidate.isMaskOnly) return null;
           if (!hasRenderableImageBuffer(candidate)) return null;
           if (!imageId) return candidate;
-          if (
-            candidate.remoteImageId &&
-            String(candidate.remoteImageId) !== String(imageId)
-          ) {
-            // 相同影像内容映射到不同 remote imageId 时，创建别名保证批次切图稳定。
-            const alias = createImageRecord(
-              candidate.name || normalizedName,
-              candidate.data,
-              candidate.hash || downloadedHash,
-              candidate.thumbnail || "",
-              {
-                displayName: candidate.displayName || normalizedName,
-                maskBuffer: candidate.mask || null,
-                maskName: candidate.maskName || null,
-                sourceMask: candidate.sourceMask || null,
-                sourceMaskName: candidate.sourceMaskName || null,
-                maskAttached: candidate.maskAttached !== false,
-                isMaskOnly: !!candidate.isMaskOnly,
-                rasterHFlipNormalized: !!candidate.rasterHFlipNormalized,
-                spatialMeta: candidate.spatialMeta || null,
-                rasterConversionVersion: Number(
-                  candidate.rasterConversionVersion || 0,
-                ),
-                importBatchId,
-                sourceName: candidate.sourceName || normalizedName,
-                sourceData: candidate.sourceData || candidate.data,
-                modifiedByUser: false,
-                sourceFormat: candidate.sourceFormat || "nifti",
-                dicomSourceCount: Number(candidate.dicomSourceCount || 0),
-                dicomStudyUID: candidate.dicomStudyUID || "",
-                dicomStudyID: candidate.dicomStudyID || "",
-                dicomSeriesUID: candidate.dicomSeriesUID || "",
-                dicomSeriesDescription: candidate.dicomSeriesDescription || "",
-                dicomSeriesNumber: Number(candidate.dicomSeriesNumber || 0),
-                dicomSeriesOrder: Number(candidate.dicomSeriesOrder || 0),
-                dicomAccessionNumber: candidate.dicomAccessionNumber || "",
-                customFields: parseJsonSafe(candidate.customFields, {}) || {},
-                remoteImageId: String(imageId),
-                remoteBatchId: String(remoteBatchId || ""),
-              },
-            );
-            await saveImages([alias]);
-            return alias;
+
+          const remoteId = String(imageId || "").trim();
+          const remoteRecordId = buildRemoteRecordId(remoteId);
+          if (!remoteRecordId) return candidate;
+          const nextBatchId = String(remoteBatchId || "");
+          const now = Date.now();
+          const bindRemoteFieldsIfNeeded = async (record) => {
+            if (!record) return null;
+            const sameRemoteImageId =
+              String(record.remoteImageId || "") === remoteId;
+            const sameRemoteBatchId =
+              String(record.remoteBatchId || "") === nextBatchId;
+            if (sameRemoteImageId && sameRemoteBatchId) return record;
+            const patched = await updateImage(String(record.id || ""), {
+              remoteImageId: remoteId,
+              remoteBatchId: nextBatchId,
+              updatedAt: now,
+            });
+            return patched || record;
+          };
+
+          const maybeDropEphemeralCandidate = async (record) => {
+            const recordId = String(record?.id || "").trim();
+            if (!recordId || recordId === remoteRecordId) return;
+            if (String(record?.importBatchId || "") !== String(importBatchId || ""))
+              return;
+            if (String(record?.remoteImageId || "").trim()) return;
+            await deleteImage(recordId).catch(() => null);
+          };
+
+          if (String(candidate.id || "") !== remoteRecordId) {
+            const existingCanonical = await getImageById(remoteRecordId);
+            if (
+              existingCanonical &&
+              !existingCanonical.isMaskOnly &&
+              hasRenderableImageBuffer(existingCanonical)
+            ) {
+              const patched = await bindRemoteFieldsIfNeeded(existingCanonical);
+              await maybeDropEphemeralCandidate(candidate);
+              return patched || existingCanonical;
+            }
+
+            const canonical = {
+              ...candidate,
+              id: remoteRecordId,
+              remoteImageId: remoteId,
+              remoteBatchId: nextBatchId,
+              createdAt: Number(candidate.createdAt || now),
+              updatedAt: now,
+            };
+            await saveImages([canonical]);
+            await maybeDropEphemeralCandidate(candidate);
+            return canonical;
           }
-          const patched = await updateImage(candidate.id, {
-            remoteImageId: String(imageId),
-            remoteBatchId: String(remoteBatchId || ""),
-            updatedAt: Date.now(),
-          });
+
+          const patched = await bindRemoteFieldsIfNeeded(candidate);
           return patched || candidate;
         };
 
@@ -4347,6 +4491,7 @@ export default function App() {
     hash,
     thumbnail,
     {
+      id = "",
       displayName = null,
       maskBuffer = null,
       maskName = null,
@@ -4381,8 +4526,9 @@ export default function App() {
     const finalSourceMaskName = sourceMaskName || maskName || null;
     const finalMaskAttached = finalSourceMask ? true : maskAttached;
 
+    const normalizedId = String(id || "").trim();
     return {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      id: normalizedId || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       name,
       displayName,
       baseName,
@@ -4626,6 +4772,9 @@ export default function App() {
       refreshUi = true,
       activateImported = true,
       generateThumbnail = true,
+      fixedRecordId = "",
+      forcedRemoteImageId = "",
+      forcedRemoteBatchId = "",
     } = {},
   ) => {
     const originalBuffer = await file.arrayBuffer();
@@ -4673,6 +4822,7 @@ export default function App() {
         })
       : "";
     const record = createImageRecord(internalName, buffer, hash, thumbnail, {
+      id: fixedRecordId,
       displayName: effectiveName,
       isMaskOnly,
       rasterHFlipNormalized: false,
@@ -4682,6 +4832,8 @@ export default function App() {
       sourceName: effectiveName,
       sourceData: buffer,
       modifiedByUser: false,
+      remoteImageId: forcedRemoteImageId,
+      remoteBatchId: forcedRemoteBatchId,
     });
     await saveImages([record]);
     hashSet.add(hash);
@@ -4699,13 +4851,21 @@ export default function App() {
       refreshUi = true,
       activateImported = true,
       generateThumbnail = true,
+      fixedRecordId = "",
+      forcedRemoteImageId = "",
+      forcedRemoteBatchId = "",
+      targetSourceName = "",
     } = {},
   ) => {
+    const remoteSingleMode = !!String(fixedRecordId || "").trim();
+    const targetBaseName = normalizeBaseName(
+      getLeafName(String(targetSourceName || "")),
+    );
     const buffer = await file.arrayBuffer();
     const zip = await JSZip.loadAsync(buffer);
     let firstImportedRecord = null;
 
-    const imageEntries = [];
+    let imageEntries = [];
     const maskEntries = [];
     const dicomEntries = [];
     const unknownEntries = [];
@@ -4777,6 +4937,21 @@ export default function App() {
       }
     }
 
+    if (remoteSingleMode && imageEntries.length > 1) {
+      const matched = targetBaseName
+        ? imageEntries.find((entry) => {
+            const base = normalizeBaseName(getLeafName(entry.name));
+            if (!base) return false;
+            return (
+              base === targetBaseName ||
+              stripMaskTokens(base) === stripMaskTokens(targetBaseName)
+            );
+          }) || null
+        : null;
+      const fallback = matched || imageEntries[0] || null;
+      imageEntries = fallback ? [fallback] : [];
+    }
+
     const maskByBase = new Map();
     const masks = [];
     for (const entry of maskEntries) {
@@ -4800,6 +4975,7 @@ export default function App() {
     const newRecords = [];
     const importedImageBaseSet = new Set();
 
+    let fixedIdConsumed = false;
     for (const entry of imageEntries) {
       const rawContent = await entry.async("arraybuffer");
       const name = entry.name.split("/").pop();
@@ -4822,7 +4998,13 @@ export default function App() {
       const thumbnail = generateThumbnail
         ? await createThumbnail(content, internalName)
         : "";
+      const assignedFixedId =
+        !fixedIdConsumed && String(fixedRecordId || "").trim()
+          ? String(fixedRecordId || "").trim()
+          : "";
+      if (assignedFixedId) fixedIdConsumed = true;
       const record = createImageRecord(internalName, content, hash, thumbnail, {
+        id: assignedFixedId,
         displayName: name,
         sourceMask: maskMatch?.buffer || null,
         sourceMaskName: maskMatch?.name || null,
@@ -4838,42 +5020,46 @@ export default function App() {
         sourceName: name,
         sourceData: isImageFile(name) ? rawContent : content,
         modifiedByUser: false,
+        remoteImageId: assignedFixedId ? forcedRemoteImageId : "",
+        remoteBatchId: assignedFixedId ? forcedRemoteBatchId : "",
       });
       newRecords.push(record);
       hashSet.add(hash);
       importedImageBaseSet.add(baseName);
     }
 
-    for (const maskItem of masks) {
-      if (maskItem.used) continue;
-      const displayName = maskItem.name;
-      const internalName = toInternalNiftiName(displayName);
-      const hash = await hashBuffer(maskItem.buffer);
-      if (isDuplicateHash(hash, hashSet)) continue;
-      const thumbnail = generateThumbnail
-        ? await createThumbnail(maskItem.buffer, internalName, {
-            isMask: true,
-          })
-        : "";
-      const record = createImageRecord(
-        internalName,
-        maskItem.buffer,
-        hash,
-        thumbnail,
-        {
-          displayName,
-          isMaskOnly: true,
-          rasterHFlipNormalized: false,
-          spatialMeta: null,
-          rasterConversionVersion: 0,
-          importBatchId,
-          sourceName: displayName,
-          sourceData: maskItem.buffer,
-          modifiedByUser: false,
-        },
-      );
-      newRecords.push(record);
-      hashSet.add(hash);
+    if (!remoteSingleMode) {
+      for (const maskItem of masks) {
+        if (maskItem.used) continue;
+        const displayName = maskItem.name;
+        const internalName = toInternalNiftiName(displayName);
+        const hash = await hashBuffer(maskItem.buffer);
+        if (isDuplicateHash(hash, hashSet)) continue;
+        const thumbnail = generateThumbnail
+          ? await createThumbnail(maskItem.buffer, internalName, {
+              isMask: true,
+            })
+          : "";
+        const record = createImageRecord(
+          internalName,
+          maskItem.buffer,
+          hash,
+          thumbnail,
+          {
+            displayName,
+            isMaskOnly: true,
+            rasterHFlipNormalized: false,
+            spatialMeta: null,
+            rasterConversionVersion: 0,
+            importBatchId,
+            sourceName: displayName,
+            sourceData: maskItem.buffer,
+            modifiedByUser: false,
+          },
+        );
+        newRecords.push(record);
+        hashSet.add(hash);
+      }
     }
 
     if (newRecords.length > 0) {

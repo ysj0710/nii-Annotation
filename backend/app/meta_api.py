@@ -368,6 +368,53 @@ def _apply_blob_upsert_payload(
     row.updated_at = incoming_updated_at if incoming_updated_at > 0 else now_ms
 
 
+def _purge_blob_ref(namespace: str, image_id: str, db: Session) -> None:
+    row = db.get(ImageBlobRef, (namespace, str(image_id)))
+    if not row:
+        return
+    if row.data_object_key:
+        delete_object(row.data_object_key)
+    if row.source_data_object_key:
+        delete_object(row.source_data_object_key)
+    if row.mask_object_key:
+        delete_object(row.mask_object_key)
+    if row.source_mask_object_key:
+        delete_object(row.source_mask_object_key)
+    db.delete(row)
+
+
+def _dedupe_meta_by_remote_image_id(
+    *,
+    namespace: str,
+    keep_id: str,
+    remote_image_id: str | None,
+    db: Session,
+) -> int:
+    remote_id = str(remote_image_id or "").strip()
+    if not remote_id:
+        return 0
+    rows = (
+        db.execute(
+            select(ImageMeta).where(
+                ImageMeta.namespace == namespace,
+                ImageMeta.remote_image_id == remote_id,
+                ImageMeta.id != str(keep_id),
+                ImageMeta.is_deleted.is_(False),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rows:
+        return 0
+    removed = 0
+    for row in rows:
+        _purge_blob_ref(namespace, str(row.id), db)
+        db.delete(row)
+        removed += 1
+    return removed
+
+
 def _apply_patch_payload(row: ImageMeta, payload: ImageMetaPatchPayload) -> None:
     data = payload.model_dump(by_alias=False, exclude_unset=True)
     if not data:
@@ -745,15 +792,7 @@ def delete_image_blob(
     row = db.get(ImageBlobRef, (ns, str(image_id)))
     if not row:
         return {"deleted": False}
-    if row.data_object_key:
-        delete_object(row.data_object_key)
-    if row.source_data_object_key:
-        delete_object(row.source_data_object_key)
-    if row.mask_object_key:
-        delete_object(row.mask_object_key)
-    if row.source_mask_object_key:
-        delete_object(row.source_mask_object_key)
-    db.delete(row)
+    _purge_blob_ref(ns, str(image_id), db)
     db.commit()
     return {"deleted": True}
 
@@ -780,6 +819,69 @@ def clear_image_blobs(
     return {"deleted": int(result.rowcount or 0)}
 
 
+@router.post("/images/dedupe")
+def dedupe_meta_images(
+    namespace: str = Query("local-default"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ns = _sanitize_namespace(namespace)
+    rows = (
+        db.execute(
+            select(ImageMeta)
+            .where(
+                ImageMeta.namespace == ns,
+                ImageMeta.is_deleted.is_(False),
+                ImageMeta.remote_image_id.is_not(None),
+                ImageMeta.remote_image_id != "",
+            )
+            .order_by(
+                ImageMeta.remote_image_id.asc(),
+                ImageMeta.updated_at.desc(),
+                ImageMeta.created_at.desc(),
+                ImageMeta.id.desc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    seen_remote_ids: set[str] = set()
+    removed_meta = 0
+    removed_blob_ref = 0
+    for row in rows:
+        remote_id = str(row.remote_image_id or "").strip()
+        if not remote_id:
+            continue
+        if remote_id in seen_remote_ids:
+            if db.get(ImageBlobRef, (ns, str(row.id))):
+                _purge_blob_ref(ns, str(row.id), db)
+                removed_blob_ref += 1
+            db.delete(row)
+            removed_meta += 1
+            continue
+        seen_remote_ids.add(remote_id)
+
+    blob_rows = (
+        db.execute(select(ImageBlobRef).where(ImageBlobRef.namespace == ns))
+        .scalars()
+        .all()
+    )
+    removed_orphan_blob_ref = 0
+    for blob_row in blob_rows:
+        linked_meta = db.get(ImageMeta, (ns, str(blob_row.id)))
+        if linked_meta and not linked_meta.is_deleted:
+            continue
+        _purge_blob_ref(ns, str(blob_row.id), db)
+        removed_orphan_blob_ref += 1
+
+    db.commit()
+    return {
+        "namespace": ns,
+        "removedMeta": removed_meta,
+        "removedBlobRefByMeta": removed_blob_ref,
+        "removedOrphanBlobRef": removed_orphan_blob_ref,
+    }
+
+
 @router.post("/images/upsert-batch")
 def upsert_meta_images_batch(
     request: UpsertBatchRequest,
@@ -790,6 +892,7 @@ def upsert_meta_images_batch(
         return {"namespace": ns, "upserted": 0}
     now_ms = int(time.time() * 1000)
     upserted = 0
+    deduped = 0
     for item in request.items:
         image_id = str(item.id or "").strip()
         if not image_id:
@@ -807,9 +910,15 @@ def upsert_meta_images_batch(
             row.is_deleted = False
             row.deleted_at = None
         _apply_upsert_payload(row, item)
+        deduped += _dedupe_meta_by_remote_image_id(
+            namespace=ns,
+            keep_id=image_id,
+            remote_image_id=row.remote_image_id,
+            db=db,
+        )
         upserted += 1
     db.commit()
-    return {"namespace": ns, "upserted": upserted}
+    return {"namespace": ns, "upserted": upserted, "deduped": deduped}
 
 
 @router.patch("/images/{image_id}")
@@ -824,6 +933,12 @@ def patch_meta_image(
     if not row or row.is_deleted:
         raise HTTPException(status_code=404, detail="meta image not found")
     _apply_patch_payload(row, payload)
+    _dedupe_meta_by_remote_image_id(
+        namespace=ns,
+        keep_id=str(row.id),
+        remote_image_id=row.remote_image_id,
+        db=db,
+    )
     db.commit()
     db.refresh(row)
     return {"item": _to_response_item(row)}
