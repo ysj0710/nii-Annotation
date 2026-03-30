@@ -2,6 +2,7 @@ import os
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import StreamingResponse
 
 from .db import init_db
@@ -49,6 +50,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+gzip_min_size = int(str(os.getenv("ANNOTATION_GZIP_MIN_SIZE", "1024") or "1024"))
+app.add_middleware(
+    GZipMiddleware,
+    minimum_size=max(256, gzip_min_size),
+    compresslevel=6,
 )
 app.include_router(meta_router)
 

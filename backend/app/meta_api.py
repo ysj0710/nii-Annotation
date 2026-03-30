@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import gzip
 import re
 import time
 from typing import Any
@@ -70,6 +71,24 @@ def _bytes_to_b64(value: bytes | None) -> str:
     if not value:
         return ""
     return base64.b64encode(value).decode("ascii")
+
+
+def _is_gzip_payload(value: bytes | None) -> bool:
+    data = value if isinstance(value, bytes) else b""
+    return len(data) >= 2 and data[0] == 0x1F and data[1] == 0x8B
+
+
+def _normalize_blob_content_for_storage(object_field: str, content: bytes | None) -> bytes:
+    data = content if isinstance(content, bytes) else b""
+    if object_field not in {"mask", "source_mask"}:
+        return data
+    if not data or _is_gzip_payload(data):
+        return data
+    compressed = gzip.compress(data, compresslevel=6)
+    # Keep raw when compression does not improve size meaningfully.
+    if len(compressed) + 64 >= len(data):
+        return data
+    return compressed
 
 
 def _sanitize_object_segment(value: str) -> str:
@@ -360,7 +379,10 @@ def _apply_blob_upsert_payload(
             continue
         if action == "set":
             next_key = _build_object_key(namespace, row.id, object_field)
-            put_bytes(next_key, content or b"")
+            put_bytes(
+                next_key,
+                _normalize_blob_content_for_storage(object_field, content),
+            )
             setattr(row, key_field, next_key)
 
     now_ms = int(time.time() * 1000)
@@ -756,7 +778,10 @@ async def upsert_image_blob_raw(
             if upload is not None:
                 content = await upload.read()
                 next_key = _build_object_key(ns, normalized_id, object_field)
-                put_bytes(next_key, content or b"")
+                put_bytes(
+                    next_key,
+                    _normalize_blob_content_for_storage(object_field, content),
+                )
                 setattr(row, key_attr, next_key)
                 changed += 1
 

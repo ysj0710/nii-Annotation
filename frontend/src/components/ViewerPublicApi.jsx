@@ -715,7 +715,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       ...(imageLoadPerfRef.current || {}),
       last: payload,
     };
-    console.info("[SwitchPerf][Viewer]", payload);
+    if (isViewerDebugEnabled()) {
+      console.info("[SwitchPerf][Viewer]", payload);
+    }
     return payload;
   };
 

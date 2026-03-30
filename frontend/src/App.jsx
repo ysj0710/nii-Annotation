@@ -86,7 +86,20 @@ const toPerfMs = (value) => {
   return Math.round(n * 100) / 100;
 };
 
+const isSwitchPerfDebugEnabled = () => {
+  try {
+    if (typeof window === "undefined") return false;
+    return (
+      window.__NII_SWITCH_PERF_DEBUG__ === true ||
+      window.__NII_VIEWER_DEBUG__ === true
+    );
+  } catch {
+    return false;
+  }
+};
+
 const logSwitchPerf = (stage, payload = {}) => {
+  if (!isSwitchPerfDebugEnabled()) return;
   console.info("[SwitchPerf][App]", {
     stage,
     ...payload,
