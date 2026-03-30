@@ -4295,7 +4295,6 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           })}
         </div>
       )}
-      {!image && <div className="empty">上传 .nii/.nii.gz 或 .zip 开始</div>}
     </div>
   );
 });

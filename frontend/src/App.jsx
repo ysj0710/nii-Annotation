@@ -70,9 +70,9 @@ const PLATFORM_SYNC_CHANNEL = "nii-annotation-sync";
 const PLATFORM_SYNC_STORAGE_KEY = "nii-annotation:sync";
 const QUEUE_PREFETCH_RADIUS = 2;
 const LOCAL_IMAGE_PAGE_SIZE = 20;
-const BATCH_PREFETCH_CONCURRENCY = 2;
-const ENABLE_NEARBY_PREFETCH = true;
-const AUTO_PREFETCH_ALL_MAX_IMAGES = 8;
+const BATCH_PREFETCH_CONCURRENCY = 1;
+const ENABLE_NEARBY_PREFETCH = false;
+const AUTO_PREFETCH_ALL_MAX_IMAGES = 0;
 
 const getNowMs = () => {
   if (typeof performance !== "undefined" && typeof performance.now === "function")
@@ -2876,6 +2876,25 @@ export default function App() {
     return migrated;
   };
 
+  const findCanonicalQueueRecord = async (remoteImageId) => {
+    const remoteKey = String(remoteImageId || "").trim();
+    if (!remoteKey) return null;
+    const stableId = buildRemoteRecordId(remoteKey);
+    if (!stableId) return null;
+    const direct = await getImageById(stableId);
+    if (!direct || direct.isMaskOnly || !hasRenderableImageBuffer(direct)) {
+      return null;
+    }
+    if (String(direct.remoteImageId || "") === remoteKey) {
+      return direct;
+    }
+    const patched = await updateImage(stableId, {
+      remoteImageId: remoteKey,
+      updatedAt: Date.now(),
+    });
+    return patched || { ...direct, remoteImageId: remoteKey };
+  };
+
   const fetchAndImportByImageId = async ({
     imageId = externalCtx.imageId,
     imageUrl = externalCtx.imageUrl,
@@ -3151,7 +3170,7 @@ export default function App() {
     if (!remoteImageId) return false;
     const startedAt = getNowMs();
     const localLookupStartedAt = getNowMs();
-    const existing = await findLocalByRemoteImageId(remoteImageId);
+    const existing = await findCanonicalQueueRecord(remoteImageId);
     const localLookupMs = toPerfMs(getNowMs() - localLookupStartedAt);
     if (existing) {
       cacheImageRecord(existing);
@@ -3188,12 +3207,13 @@ export default function App() {
       });
       return false;
     }
-    cacheImageRecord(imported);
+    const resolved = (await findCanonicalQueueRecord(remoteImageId)) || imported;
+    cacheImageRecord(resolved);
     const selectStartedAt = getNowMs();
-    await selectImage(imported.id);
+    await selectImage(resolved.id);
     logSwitchPerf("queue-switch-imported", {
       remoteImageId,
-      localImageId: String(imported.id || ""),
+      localImageId: String(resolved.id || ""),
       localLookupMs,
       importMs,
       selectImageMs: toPerfMs(getNowMs() - selectStartedAt),
@@ -3205,7 +3225,7 @@ export default function App() {
   const prefetchQueueItemData = async (queueItem) => {
     const remoteImageId = String(queueItem?.imageId || "");
     if (!remoteImageId) return false;
-    const existing = await findLocalByRemoteImageId(remoteImageId);
+    const existing = await findCanonicalQueueRecord(remoteImageId);
     if (existing) {
       prewarmViewerImageRecord(existing);
       return false;
@@ -3333,7 +3353,7 @@ export default function App() {
         setLocalImageIds([]);
         setActiveImage(null);
       }
-      if (!hasRemoteBootstrap) {
+      if (!externalCtx.batchId && !hasRemoteBootstrap) {
         await refreshImageList();
       }
       if (externalCtx.batchId) {
@@ -3356,7 +3376,11 @@ export default function App() {
           }
           if (targetItem) {
             await ensureQueueImageLoaded(targetItem);
-            if (Array.isArray(queue?.images) && queue.images.length > 1) {
+            if (
+              ENABLE_NEARBY_PREFETCH &&
+              Array.isArray(queue?.images) &&
+              queue.images.length > 1
+            ) {
               const currentIndex = Math.max(0, queueNavIndexRef.current);
               const nextIndex = (currentIndex + 1) % queue.images.length;
               const prevIndex =
