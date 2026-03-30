@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import re
 import time
 from typing import Any
@@ -72,14 +73,24 @@ def _bytes_to_b64(value: bytes | None) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
-def _sanitize_object_segment(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9._:-]+", "_", str(value or "").strip()) or "na"
+def _sanitize_object_segment(value: str, *, max_len: int = 180) -> str:
+    # Keep object keys cross-platform safe (especially Windows-backed MinIO).
+    # Avoid ":" and other path-sensitive characters.
+    raw = str(value or "").strip()
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw).strip("._-")
+    if not cleaned:
+        cleaned = "na"
+    if len(cleaned) <= max_len:
+        return cleaned
+    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:10]
+    head_len = max(1, max_len - 11)
+    return f"{cleaned[:head_len]}_{digest}"
 
 
 def _build_object_key(namespace: str, image_id: str, field_name: str) -> str:
-    ns = _sanitize_object_segment(namespace)
-    image = _sanitize_object_segment(image_id)
-    field = _sanitize_object_segment(field_name)
+    ns = _sanitize_object_segment(namespace, max_len=120)
+    image = _sanitize_object_segment(image_id, max_len=120)
+    field = _sanitize_object_segment(field_name, max_len=48)
     return f"{ns}/{image}/{field}.bin"
 
 
@@ -600,20 +611,33 @@ def upsert_image_blob_batch(
         image_id = str(item.id or "").strip()
         if not image_id:
             continue
-        row = db.get(ImageBlobRef, (ns, image_id))
-        if not row:
-            row = ImageBlobRef(
+        try:
+            row = db.get(ImageBlobRef, (ns, image_id))
+            if not row:
+                row = ImageBlobRef(
+                    namespace=ns,
+                    id=image_id,
+                    updated_at=now_ms,
+                )
+                db.add(row)
+            _apply_blob_upsert_payload(
+                row=row,
+                payload=item,
                 namespace=ns,
-                id=image_id,
-                updated_at=now_ms,
             )
-            db.add(row)
-        _apply_blob_upsert_payload(
-            row=row,
-            payload=item,
-            namespace=ns,
-        )
-        upserted += 1
+            upserted += 1
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "blob upsert failed: "
+                    f"namespace={ns}, image_id={image_id}, error={type(exc).__name__}: {exc}"
+                ),
+            ) from exc
     db.commit()
     return {"namespace": ns, "upserted": upserted}
 
