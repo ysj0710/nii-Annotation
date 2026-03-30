@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import re
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
@@ -73,25 +72,41 @@ def _bytes_to_b64(value: bytes | None) -> str:
     return base64.b64encode(value).decode("ascii")
 
 
-def _sanitize_object_segment(value: str, *, max_len: int = 180) -> str:
-    # Keep object keys cross-platform safe (especially Windows-backed MinIO).
-    # Avoid ":" and other path-sensitive characters.
-    raw = str(value or "").strip()
-    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw).strip("._-")
-    if not cleaned:
-        cleaned = "na"
-    if len(cleaned) <= max_len:
-        return cleaned
-    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:10]
-    head_len = max(1, max_len - 11)
-    return f"{cleaned[:head_len]}_{digest}"
+def _sanitize_object_segment(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", str(value or "").strip()) or "na"
 
 
 def _build_object_key(namespace: str, image_id: str, field_name: str) -> str:
-    ns = _sanitize_object_segment(namespace, max_len=120)
-    image = _sanitize_object_segment(image_id, max_len=120)
-    field = _sanitize_object_segment(field_name, max_len=48)
+    ns = _sanitize_object_segment(namespace)
+    image = _sanitize_object_segment(image_id)
+    field = _sanitize_object_segment(field_name)
     return f"{ns}/{image}/{field}.bin"
+
+
+def _normalize_blob_field_name(value: str) -> str:
+    raw = re.sub(r"[^a-zA-Z]+", "", str(value or "").strip()).lower()
+    if raw in {"data"}:
+        return "data"
+    if raw in {"sourcedata"}:
+        return "sourceData"
+    if raw in {"mask"}:
+        return "mask"
+    if raw in {"sourcemask"}:
+        return "sourceMask"
+    raise HTTPException(status_code=400, detail=f"invalid blob field name: {value}")
+
+
+def _blob_field_config(field_name: str) -> tuple[str, str]:
+    normalized = _normalize_blob_field_name(field_name)
+    if normalized == "data":
+        return "data_object_key", "data"
+    if normalized == "sourceData":
+        return "source_data_object_key", "source_data"
+    if normalized == "mask":
+        return "mask_object_key", "mask"
+    if normalized == "sourceMask":
+        return "source_mask_object_key", "source_mask"
+    raise HTTPException(status_code=400, detail=f"unsupported blob field: {field_name}")
 
 
 def _resolve_blob_action(raw: str | None) -> tuple[str, bytes | None]:
@@ -640,6 +655,84 @@ def upsert_image_blob_batch(
             ) from exc
     db.commit()
     return {"namespace": ns, "upserted": upserted}
+
+
+@router.post("/images/{image_id}/blob/raw-upsert")
+async def upsert_image_blob_raw(
+    image_id: str,
+    namespace: str = Query("local-default"),
+    updated_at: int | None = Query(None, alias="updatedAt"),
+    clear_fields: str | None = Form(default=None, alias="clearFields"),
+    data: UploadFile | None = File(default=None),
+    source_data: UploadFile | None = File(default=None, alias="sourceData"),
+    mask: UploadFile | None = File(default=None),
+    source_mask: UploadFile | None = File(default=None, alias="sourceMask"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ns = _sanitize_namespace(namespace)
+    normalized_id = str(image_id or "").strip()
+    if not normalized_id:
+        raise HTTPException(status_code=400, detail="image_id is required")
+
+    clear_set: set[str] = set()
+    if clear_fields:
+        for raw in str(clear_fields).split(","):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            clear_set.add(_normalize_blob_field_name(text))
+
+    uploads: dict[str, UploadFile | None] = {
+        "data": data,
+        "sourceData": source_data,
+        "mask": mask,
+        "sourceMask": source_mask,
+    }
+
+    row = db.get(ImageBlobRef, (ns, normalized_id))
+    if not row:
+        row = ImageBlobRef(namespace=ns, id=normalized_id, updated_at=int(time.time() * 1000))
+        db.add(row)
+
+    changed = 0
+    try:
+        for field_name in ["data", "sourceData", "mask", "sourceMask"]:
+            key_attr, object_field = _blob_field_config(field_name)
+            current_key = getattr(row, key_attr)
+            if field_name in clear_set:
+                if current_key:
+                    delete_object(current_key)
+                setattr(row, key_attr, None)
+                changed += 1
+
+            upload = uploads.get(field_name)
+            if upload is not None:
+                content = await upload.read()
+                next_key = _build_object_key(ns, normalized_id, object_field)
+                put_bytes(next_key, content or b"")
+                setattr(row, key_attr, next_key)
+                changed += 1
+
+        if changed <= 0:
+            return {"namespace": ns, "id": normalized_id, "updated": False}
+
+        now_ms = int(time.time() * 1000)
+        row.updated_at = _coerce_int(updated_at, now_ms) if updated_at is not None else now_ms
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "blob raw upsert failed: "
+                f"namespace={ns}, image_id={normalized_id}, error={type(exc).__name__}: {exc}"
+            ),
+        ) from exc
+
+    return {"namespace": ns, "id": normalized_id, "updated": True}
 
 
 @router.delete("/images/{image_id}/blob")

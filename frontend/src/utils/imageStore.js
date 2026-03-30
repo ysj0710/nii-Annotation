@@ -50,6 +50,11 @@ const hasAnyBlobField = (record) =>
 const hasRenderableImageData = (record) =>
   !!(arrayBufferFrom(record?.data) || arrayBufferFrom(record?.sourceData))
 
+const toNumberSafe = (value, fallback = 0) => {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
 const encodeArrayBufferToBase64 = (buffer) => {
   const source = arrayBufferFrom(buffer)
   if (!source) return ''
@@ -227,6 +232,15 @@ const buildAuthHeaders = () => {
   return { Authorization: value }
 }
 
+const buildMetaUrl = (path, params = {}) => {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value == null || value === '') continue
+    query.set(key, String(value))
+  }
+  return `${META_BACKEND_ORIGIN}${path}${query.toString() ? `?${query.toString()}` : ''}`
+}
+
 const enqueueMetaSync = (task) => {
   META_SYNC_QUEUE = META_SYNC_QUEUE
     .then(task)
@@ -241,12 +255,7 @@ const callMetaApi = async (
   { method = 'GET', body = null, params = {}, timeoutMs = META_SYNC_TIMEOUT_MS } = {}
 ) => {
   if (!metaSyncEnabled()) return null
-  const query = new URLSearchParams()
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value == null || value === '') continue
-    query.set(key, String(value))
-  }
-  const url = `${META_BACKEND_ORIGIN}${path}${query.toString() ? `?${query.toString()}` : ''}`
+  const url = buildMetaUrl(path, params)
   const controller = new AbortController()
   const timer = setTimeout(
     () => controller.abort(),
@@ -274,6 +283,36 @@ const callMetaApi = async (
   }
 }
 
+const callMetaApiForm = async (
+  path,
+  { method = 'POST', formData = null, params = {}, timeoutMs = BLOB_SYNC_TIMEOUT_MS } = {}
+) => {
+  if (!metaSyncEnabled()) return null
+  const url = buildMetaUrl(path, params)
+  const controller = new AbortController()
+  const timer = setTimeout(
+    () => controller.abort(),
+    Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : BLOB_SYNC_TIMEOUT_MS
+  )
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        ...buildAuthHeaders()
+      },
+      body: formData || undefined,
+      signal: controller.signal
+    })
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      throw new Error(`[imageStore] form sync failed status=${response.status} url=${url} detail=${detail}`)
+    }
+    return await response.json().catch(() => null)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 const syncMetaUpsertBatch = async (images) => {
   const items = (Array.isArray(images) ? images : []).map(toMetaPayload).filter(Boolean)
   if (!items.length) return
@@ -286,22 +325,144 @@ const syncMetaUpsertBatch = async (images) => {
   })
 }
 
-const syncBlobUpsertBatch = async (images) => {
-  const items = (Array.isArray(images) ? images : []).map(toBlobPayload).filter(Boolean)
-  if (!items.length) return
-  const chunkSize = Math.max(1, Number(BLOB_SYNC_BATCH_SIZE || 1))
-  for (let i = 0; i < items.length; i += chunkSize) {
-    const chunk = items.slice(i, i + chunkSize)
-    const payload = await callMetaApi('/meta/images/blob-upsert-batch', {
-      method: 'POST',
-      timeoutMs: BLOB_SYNC_TIMEOUT_MS,
-      body: {
-        namespace: DB_NAMESPACE,
-        items: chunk
+const maybeSameBuffer = (a, b) => {
+  const left = arrayBufferFrom(a)
+  const right = arrayBufferFrom(b)
+  if (!left || !right) return false
+  if (left === right) return true
+  if (left.byteLength !== right.byteLength) return false
+  const viewL = new Uint8Array(left)
+  const viewR = new Uint8Array(right)
+  if (viewL.length <= 64) {
+    for (let i = 0; i < viewL.length; i += 1) {
+      if (viewL[i] !== viewR[i]) return false
+    }
+    return true
+  }
+  for (let i = 0; i < 32; i += 1) {
+    if (viewL[i] !== viewR[i]) return false
+  }
+  for (let i = 1; i <= 32; i += 1) {
+    if (viewL[viewL.length - i] !== viewR[viewR.length - i]) return false
+  }
+  return true
+}
+
+const buildLegacyBlobPayload = (record, changedKeys = null) => {
+  const payload = toBlobPayload(record)
+  if (payload) return payload
+  const touched = changedKeys instanceof Set ? changedKeys : null
+  if (!touched || !record?.id) return null
+  const clearData = touched.has('data') ? '' : null
+  const clearSourceData = touched.has('sourceData') ? '' : null
+  const clearMask = touched.has('mask') ? '' : null
+  const clearSourceMask = touched.has('sourceMask') ? '' : null
+  if (clearData == null && clearSourceData == null && clearMask == null && clearSourceMask == null) {
+    return null
+  }
+  return {
+    id: String(record.id),
+    dataB64: clearData,
+    sourceDataB64: clearSourceData,
+    maskB64: clearMask,
+    sourceMaskB64: clearSourceMask,
+    updatedAt: Number(record.updatedAt || Date.now())
+  }
+}
+
+const uploadBlobRecordRaw = async (record, changedKeys = null) => {
+  const imageId = String(record?.id || '').trim()
+  if (!imageId) return
+  const updatedAt = Number(record?.updatedAt || Date.now())
+  const touched = changedKeys instanceof Set ? changedKeys : null
+
+  const dataBuffer = arrayBufferFrom(record?.data)
+  const sourceDataBuffer = arrayBufferFrom(record?.sourceData)
+  const maskBuffer = arrayBufferFrom(record?.mask)
+  const sourceMaskBuffer = arrayBufferFrom(record?.sourceMask)
+
+  const form = new FormData()
+  const clearFields = []
+  let hasUpload = false
+
+  if (dataBuffer) {
+    form.append('data', new Blob([dataBuffer], { type: 'application/octet-stream' }), `${imageId}-data.bin`)
+    hasUpload = true
+  } else if (touched?.has('data')) {
+    clearFields.push('data')
+  }
+
+  if (sourceDataBuffer && !maybeSameBuffer(sourceDataBuffer, dataBuffer)) {
+    form.append(
+      'sourceData',
+      new Blob([sourceDataBuffer], { type: 'application/octet-stream' }),
+      `${imageId}-source-data.bin`
+    )
+    hasUpload = true
+  } else if (touched?.has('sourceData')) {
+    clearFields.push('sourceData')
+  }
+
+  if (maskBuffer) {
+    form.append('mask', new Blob([maskBuffer], { type: 'application/octet-stream' }), `${imageId}-mask.bin`)
+    hasUpload = true
+  } else if (touched?.has('mask')) {
+    clearFields.push('mask')
+  }
+
+  if (sourceMaskBuffer && !maybeSameBuffer(sourceMaskBuffer, maskBuffer)) {
+    form.append(
+      'sourceMask',
+      new Blob([sourceMaskBuffer], { type: 'application/octet-stream' }),
+      `${imageId}-source-mask.bin`
+    )
+    hasUpload = true
+  } else if (touched?.has('sourceMask')) {
+    clearFields.push('sourceMask')
+  }
+
+  if (!hasUpload && clearFields.length <= 0) return
+  if (clearFields.length > 0) {
+    form.append('clearFields', clearFields.join(','))
+  }
+
+  await callMetaApiForm(`/meta/images/${encodeURIComponent(imageId)}/blob/raw-upsert`, {
+    method: 'POST',
+    timeoutMs: BLOB_SYNC_TIMEOUT_MS,
+    params: { namespace: DB_NAMESPACE, updatedAt },
+    formData: form
+  })
+}
+
+const syncBlobUpsertBatch = async (images, { changedKeysById = null } = {}) => {
+  const records = Array.isArray(images) ? images : []
+  if (!records.length) return
+  for (const record of records) {
+    const imageId = String(record?.id || '').trim()
+    if (!imageId) continue
+    const changedKeys =
+      changedKeysById instanceof Map ? changedKeysById.get(imageId) || null : null
+    try {
+      await uploadBlobRecordRaw(record, changedKeys)
+    } catch (error) {
+      // Fallback for mixed-version deployment windows where raw-upsert endpoint is not yet deployed.
+      if (String(error?.message || '').includes('status=404')) {
+        const legacyPayload = buildLegacyBlobPayload(record, changedKeys)
+        if (!legacyPayload) continue
+        const legacyResp = await callMetaApi('/meta/images/blob-upsert-batch', {
+          method: 'POST',
+          timeoutMs: BLOB_SYNC_TIMEOUT_MS,
+          body: {
+            namespace: DB_NAMESPACE,
+            items: [legacyPayload]
+          }
+        })
+        if (!legacyResp) {
+          throw new Error(`[imageStore] blob upsert fallback failed for namespace=${DB_NAMESPACE}`)
+        }
+        continue
       }
-    })
-    if (!payload) {
-      throw new Error(`[imageStore] blob upsert failed for namespace=${DB_NAMESPACE}`)
+      throw error
     }
   }
 }
@@ -564,11 +725,22 @@ const getImageMetasByIdsLocal = async (ids) =>
     ).then((items) => items.filter(Boolean))
   )
 
-const getRemoteRecordById = async (id) => {
-  const meta = await fetchRemoteMetaById(id)
+const getRemoteRecordById = async (id, { remoteMeta = null, preferLocalIfFresh = false } = {}) => {
+  const imageId = String(id || '').trim()
+  if (!imageId) return null
+  const meta = remoteMeta || (await fetchRemoteMetaById(imageId))
   if (!meta) return null
-  const local = await getImageByIdLocal(id)
-  const blob = await fetchRemoteBlobById(id).catch(() => null)
+  const local = await getImageByIdLocal(imageId)
+  if (local && hasRenderableImageData(local) && preferLocalIfFresh) {
+    const localUpdatedAt = toNumberSafe(local?.updatedAt, 0)
+    const remoteUpdatedAt = toNumberSafe(meta?.updatedAt, 0)
+    if (localUpdatedAt >= remoteUpdatedAt) {
+      const merged = { ...local, ...meta }
+      await putImagesLocal([merged])
+      return merged
+    }
+  }
+  const blob = await fetchRemoteBlobById(imageId).catch(() => null)
   const hydrated = applyBlobPayloadToRecord({ ...local, ...meta }, blob)
   if (!hydrated?.isMaskOnly && !hasRenderableImageData(hydrated)) {
     if (local && hasRenderableImageData(local)) {
@@ -588,58 +760,98 @@ export const getAllImages = async () => {
   if (!metaSyncEnabled()) return getAllImagesLocal()
   const ids = await fetchRemoteIdOrder().catch(() => null)
   if (!Array.isArray(ids) || !ids.length) return getAllImagesLocal()
+  const metas = await fetchRemoteMetasByIds(ids).catch(() => null)
+  const metaById =
+    Array.isArray(metas) && metas.length
+      ? new Map(metas.map((item) => [String(item?.id || ''), item]))
+      : null
   const records = []
   for (const id of ids) {
-    const record = await getRemoteRecordById(id)
+    const key = String(id || '')
+    const record = await getRemoteRecordById(key, {
+      remoteMeta: metaById?.get(key) || null,
+      preferLocalIfFresh: true
+    })
     if (record) records.push(record)
   }
   return records
 }
 
 export const getImageById = async (id) => {
-  if (!metaSyncEnabled()) return getImageByIdLocal(id)
-  const remote = await getRemoteRecordById(id)
+  const local = await getImageByIdLocal(id)
+  if (!metaSyncEnabled()) return local
+  if (local && hasRenderableImageData(local)) {
+    void getRemoteRecordById(id, { preferLocalIfFresh: true }).catch(() => {})
+    return local
+  }
+  const remote = await getRemoteRecordById(id, { preferLocalIfFresh: true })
   if (remote) return remote
-  return getImageByIdLocal(id)
+  return local
 }
 
 export const getImageByRemoteImageId = async (remoteImageId) => {
-  if (!metaSyncEnabled()) return getImageByRemoteImageIdLocal(remoteImageId)
+  const local = await getImageByRemoteImageIdLocal(remoteImageId)
+  if (!metaSyncEnabled()) return local
+  if (local && hasRenderableImageData(local)) {
+    void fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
+    return local
+  }
   const metas = await fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
   const first = Array.isArray(metas) ? metas[0] : null
   if (first?.id) {
-    const remote = await getRemoteRecordById(first.id)
+    const remote = await getRemoteRecordById(first.id, {
+      remoteMeta: first,
+      preferLocalIfFresh: true
+    })
     if (remote) return remote
   }
-  return getImageByRemoteImageIdLocal(remoteImageId)
+  return local
 }
 
 export const getImagesByRemoteImageId = async (remoteImageId) => {
-  if (!metaSyncEnabled()) return getImagesByRemoteImageIdLocal(remoteImageId)
+  const localItems = await getImagesByRemoteImageIdLocal(remoteImageId)
+  const localRenderable = localItems.filter((item) => hasRenderableImageData(item))
+  if (!metaSyncEnabled()) return localItems
+  if (localRenderable.length > 0) {
+    void fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
+    return localRenderable
+  }
   const metas = await fetchRemoteMetasByRemoteImageId(remoteImageId).catch(() => null)
   if (Array.isArray(metas) && metas.length > 0) {
     const records = []
     for (const meta of metas) {
-      const record = await getRemoteRecordById(meta?.id)
+      const record = await getRemoteRecordById(meta?.id, {
+        remoteMeta: meta,
+        preferLocalIfFresh: true
+      })
       if (record) records.push(record)
     }
     if (records.length > 0) return records
   }
-  return getImagesByRemoteImageIdLocal(remoteImageId)
+  return localItems
 }
 
 export const getImagesByHash = async (hash) => {
-  if (!metaSyncEnabled()) return getImagesByHashLocal(hash)
+  const localItems = await getImagesByHashLocal(hash)
+  const localRenderable = localItems.filter((item) => hasRenderableImageData(item))
+  if (!metaSyncEnabled()) return localItems
+  if (localRenderable.length > 0) {
+    void fetchRemoteMetasByHash(hash).catch(() => null)
+    return localRenderable
+  }
   const metas = await fetchRemoteMetasByHash(hash).catch(() => null)
   if (Array.isArray(metas) && metas.length > 0) {
     const records = []
     for (const meta of metas) {
-      const record = await getRemoteRecordById(meta?.id)
+      const record = await getRemoteRecordById(meta?.id, {
+        remoteMeta: meta,
+        preferLocalIfFresh: true
+      })
       if (record) records.push(record)
     }
     if (records.length > 0) return records
   }
-  return getImagesByHashLocal(hash)
+  return localItems
 }
 
 export const saveImages = async (images) =>
@@ -674,7 +886,15 @@ export const updateImage = async (id, patch) =>
       void enqueueMetaSync(async () => {
         await syncMetaPatch(id, patch, updated)
         if (hasAnyBlobField(updated) || BLOB_KEYS.some((key) => Object.prototype.hasOwnProperty.call(patch || {}, key))) {
-          await syncBlobUpsertBatch([updated])
+          const changedKeysById = new Map([
+            [
+              String(id || ''),
+              new Set(
+                Object.keys(patch || {}).filter((key) => BLOB_KEYS.includes(String(key || '')))
+              )
+            ]
+          ])
+          await syncBlobUpsertBatch([updated], { changedKeysById })
         }
       })
     }

@@ -4893,7 +4893,8 @@ export default function App() {
     if (!fileList?.length) return;
     const importBatchId = makeImportBatchId();
     const generateThumbnail = !isBatchMode;
-    const existing = await getAllImages();
+    const existingIds = await getImageIdOrder();
+    const existing = await getImageMetasByIds(existingIds);
     const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean));
 
     const regularFiles = [];
@@ -4953,7 +4954,8 @@ export default function App() {
     const imageRootHandle = imgHandle || dirHandle;
     const importBatchId = makeImportBatchId();
 
-    const existing = await getAllImages();
+    const existingIds = await getImageIdOrder();
+    const existing = await getImageMetasByIds(existingIds);
     const hashSet = new Set(existing.map((item) => item.hash).filter(Boolean));
     const imageEntries = [];
     const dicomInputs = [];
