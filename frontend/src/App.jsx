@@ -26,6 +26,8 @@ import {
   getImageIdOrder,
   getImageMetasByIds,
   setImageStoreNamespace,
+  setImageStoreBackendConfig,
+  backfillLocalDataToBackend,
 } from "./utils/imageStore.js";
 import { resolveAutoWindowRange } from "./utils/windowPresets.js";
 
@@ -1791,6 +1793,7 @@ export default function App() {
   const batchPrefetchStartedRef = useRef(false);
   const platformBroadcastRef = useRef(null);
   const switchPerfRef = useRef({ token: 0, current: null });
+  const metaBackfillDoneRef = useRef(new Set());
 
   const externalCtx = useMemo(() => {
     const globalCtx = window.__NII_ANNOTATION_CONTEXT__ || {};
@@ -1871,6 +1874,26 @@ export default function App() {
   useEffect(() => {
     setImageStoreNamespace(imageStoreScope);
   }, [imageStoreScope]);
+
+  useEffect(() => {
+    setImageStoreBackendConfig({
+      origin: localBackendOrigin,
+      token: externalCtx.token || "",
+    });
+  }, [localBackendOrigin, externalCtx.token]);
+
+  useEffect(() => {
+    const backendOrigin = String(localBackendOrigin || "").trim();
+    if (!backendOrigin) return;
+    const scopeKey = String(imageStoreScope || "local-default");
+    if (!scopeKey) return;
+    if (metaBackfillDoneRef.current.has(scopeKey)) return;
+    metaBackfillDoneRef.current.add(scopeKey);
+    void backfillLocalDataToBackend().catch((error) => {
+      console.warn("本地历史数据回填后端失败", error);
+      metaBackfillDoneRef.current.delete(scopeKey);
+    });
+  }, [imageStoreScope, localBackendOrigin]);
 
   const resolveRuntimePlatformToken = (fallbackToken = "") => {
     const rawFallback = String(fallbackToken || "").trim();

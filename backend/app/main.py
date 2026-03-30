@@ -4,6 +4,9 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from .db import init_db
+from .meta_api import router as meta_router
+from .object_store import ensure_bucket
 from .services.exporter import ExportValidationError, build_export_zip
 
 app = FastAPI(title="Nii Annotation Backend", version="0.1.0")
@@ -19,6 +22,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(meta_router)
+
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+    ensure_bucket()
 
 
 @app.get("/health")
