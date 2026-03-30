@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from .db import get_db
 from .models import ImageBlobRef, ImageMeta
-from .object_store import delete_object, get_bytes, put_bytes
+from .object_store import delete_object, get_many_bytes, put_bytes
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -640,21 +640,21 @@ def get_image_blob(
     row = db.get(ImageBlobRef, (ns, str(image_id)))
     if not row:
         return {"item": None}
-    data_blob = get_bytes(row.data_object_key) if row.data_object_key else None
-    source_data_blob = (
-        get_bytes(row.source_data_object_key) if row.source_data_object_key else None
-    )
-    mask_blob = get_bytes(row.mask_object_key) if row.mask_object_key else None
-    source_mask_blob = (
-        get_bytes(row.source_mask_object_key) if row.source_mask_object_key else None
+    blob_map = get_many_bytes(
+        {
+            "data": row.data_object_key,
+            "sourceData": row.source_data_object_key,
+            "mask": row.mask_object_key,
+            "sourceMask": row.source_mask_object_key,
+        }
     )
     return {
         "item": _to_blob_response_item(
             row,
-            data_blob=data_blob,
-            source_data_blob=source_data_blob,
-            mask_blob=mask_blob,
-            source_mask_blob=source_mask_blob,
+            data_blob=blob_map.get("data"),
+            source_data_blob=blob_map.get("sourceData"),
+            mask_blob=blob_map.get("mask"),
+            source_mask_blob=blob_map.get("sourceMask"),
         )
     }
 
