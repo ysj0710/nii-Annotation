@@ -4014,7 +4014,12 @@ export default function App() {
       cacheImageRecord(freshLocal);
       setActiveImage((prev) =>
         prev && prev.id === freshLocal.id
-          ? { ...freshLocal, maskVersion: resolveMaskVersion(freshLocal) }
+          ? {
+              ...prev,
+              ...freshLocal,
+              // Saving current image should not force a full MPR reload.
+              maskVersion: Number(prev?.maskVersion || 0),
+            }
           : prev,
       );
     }

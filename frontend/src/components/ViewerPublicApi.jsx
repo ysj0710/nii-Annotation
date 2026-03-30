@@ -36,6 +36,7 @@ const FREEHAND_OPEN_COLOR = "#db70db";
 const MAX_MARKER_POINTS = 24000;
 const FRAC_EPSILON = 1e-3;
 const FRAC_SOFT_MARGIN = 0.2;
+const LOAD_3D_PANE_IN_IMMEDIATE_STAGE = false;
 
 const isRasterImageName = (name) =>
   /\.(png|jpe?g|bmp|webp|tif|tiff)$/i.test(name || "");
@@ -2188,6 +2189,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     let redrawKeys = visibleKeys.filter(
       (key) => PANE_CONFIGS[key]?.is2D || (allow3DRedraw && key === "R"),
     );
+    if (reason === "load") {
+      redrawKeys = redrawKeys.filter((key) => paneHasLoadedVolume(key));
+    }
     if (reason === "stroke") {
       if (perfProfile.strokeRefreshTarget === "source-only" && sourcePaneKey) {
         redrawKeys = redrawKeys.filter((key) => key === sourcePaneKey);
@@ -3079,7 +3083,9 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const visiblePaneSet = new Set(nextVisiblePaneKeys);
     const primaryPaneKey = getPrimaryPaneKey() || nextVisiblePaneKeys[0] || "A";
     const immediatePaneKeys = new Set([primaryPaneKey]);
-    if (nextVisiblePaneKeys.includes("R")) immediatePaneKeys.add("R");
+    if (nextVisiblePaneKeys.includes("R") && LOAD_3D_PANE_IN_IMMEDIATE_STAGE) {
+      immediatePaneKeys.add("R");
+    }
     const deferredPaneKeys = nextVisiblePaneKeys.filter(
       (key) => !immediatePaneKeys.has(key),
     );
