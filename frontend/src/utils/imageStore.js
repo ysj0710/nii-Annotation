@@ -250,6 +250,11 @@ const callMetaApi = async (path, { method = 'GET', body = null, params = {} } = 
     })
     if (!response.ok) return null
     return await response.json().catch(() => null)
+  } catch (error) {
+    if (error?.name !== 'AbortError') {
+      console.warn('[imageStore] callMetaApi failed', method, url, error)
+    }
+    return null
   } finally {
     clearTimeout(timer)
   }

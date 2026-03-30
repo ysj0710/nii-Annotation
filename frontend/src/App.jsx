@@ -1843,7 +1843,14 @@ export default function App() {
     const ctxOrigin = String(externalCtx.annotationBackendOrigin || "")
       .trim()
       .replace(/\/+$/, "");
-    return ctxOrigin || envOrigin || "http://192.168.110.88:8010";
+    if (ctxOrigin) return ctxOrigin;
+    if (envOrigin) return envOrigin;
+    try {
+      const protocol = window.location.protocol === "https:" ? "https" : "http";
+      const host = String(window.location.hostname || "").trim();
+      if (host) return `${protocol}://${host}:8010`;
+    } catch {}
+    return "http://127.0.0.1:8010";
   }, [externalCtx.annotationBackendOrigin]);
 
   const imageStoreScope = useMemo(() => {
