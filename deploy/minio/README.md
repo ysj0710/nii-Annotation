@@ -1,10 +1,55 @@
 # MinIO 远程安装说明
 
-本目录提供了 Linux（systemd）一键安装脚本：
+本目录现在支持两种系统：
 
-- `install_minio.sh`
+- Linux: `install_minio.sh`（systemd）
+- Windows PowerShell: `install_minio_windows.ps1`（Windows Service）
+- Windows CMD: `install_minio_windows.cmd`（CMD 入口）
 
-## 1) 远程机器执行
+## Windows 安装（你当前用这个）
+
+### 方式 A: PowerShell
+
+用管理员权限打开 PowerShell，进入项目目录后执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\deploy\minio\install_minio_windows.ps1 `
+  -RootUser "minio_admin_prod" `
+  -RootPassword "replace-with-strong-password" `
+  -ApiPort 9000 `
+  -ConsolePort 9001 `
+  -OpenFirewall
+```
+
+2) 验证：
+
+```powershell
+sc.exe query MinIO
+Invoke-WebRequest http://127.0.0.1:9000/minio/health/live
+```
+
+### 方式 B: CMD（你要的）
+
+用管理员权限打开 CMD，进入项目目录后执行：
+
+```cmd
+set MINIO_ROOT_USER=minio_admin_prod
+set MINIO_ROOT_PASSWORD=replace-with-strong-password
+set MINIO_API_PORT=9000
+set MINIO_CONSOLE_PORT=9001
+set MINIO_OPEN_FIREWALL=1
+deploy\minio\install_minio_windows.cmd
+```
+
+### 控制服务
+
+```powershell
+sc.exe stop MinIO
+sc.exe start MinIO
+```
+
+## Linux 安装
 
 ```bash
 cd /path/to/Nii-Annotation
@@ -12,36 +57,9 @@ chmod +x deploy/minio/install_minio.sh
 sudo bash deploy/minio/install_minio.sh
 ```
 
-## 2) 自定义参数（推荐生产环境改默认账号密码）
+## 后端对接配置
 
-```bash
-export MINIO_ROOT_USER='minio_admin_prod'
-export MINIO_ROOT_PASSWORD='replace-with-strong-password'
-export MINIO_API_PORT='9000'
-export MINIO_CONSOLE_PORT='9001'
-export MINIO_DATA_DIR='/var/lib/minio'
-export FORCE_OVERWRITE_ENV='1'   # 覆盖 /etc/minio/minio.env
-sudo -E bash deploy/minio/install_minio.sh
-```
-
-可选变量还包括：
-
-- `MINIO_WORKDIR`（默认同 `MINIO_DATA_DIR`）
-- `MINIO_USER` / `MINIO_GROUP`
-- `MINIO_BINARY_PATH` / `MC_BINARY_PATH`
-- `MINIO_CONFIG_DIR`
-- `MINIO_SERVICE_FILE`
-
-## 3) 验证服务
-
-```bash
-curl -fsS http://127.0.0.1:9000/minio/health/live
-sudo systemctl status minio
-```
-
-## 4) 后端对接配置
-
-在后端启动前设置：
+后端连接 MinIO 的环境变量（Windows/Linux 含义一致）：
 
 ```bash
 export ANNOTATION_MINIO_ENDPOINT='127.0.0.1:9000'

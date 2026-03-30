@@ -50,12 +50,25 @@ uvicorn app.main:app --reload --port 8010
 - 关键接口前缀：`/meta/images/*`（meta 与 blob upsert/query/delete）。
 
 ## 远程部署 MinIO
-- 已提供一键安装脚本：`deploy/minio/install_minio.sh`（Linux + systemd）。
+- 已提供一键安装脚本：
+  - `deploy/minio/install_minio.sh`（Linux + systemd）
+  - `deploy/minio/install_minio_windows.ps1`（Windows + Service）
+  - `deploy/minio/install_minio_windows.cmd`（Windows CMD 入口）
 - 详细步骤见：`deploy/minio/README.md`。
-- 最简执行：
+- Linux 最简执行：
 ```
 chmod +x deploy/minio/install_minio.sh
 sudo bash deploy/minio/install_minio.sh
+```
+- Windows 最简执行（管理员 PowerShell）：
+```
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\deploy\minio\install_minio_windows.ps1 -OpenFirewall
+```
+- Windows CMD 最简执行（管理员 CMD）：
+```
+set MINIO_OPEN_FIREWALL=1
+deploy\minio\install_minio_windows.cmd
 ```
 
 ## 下一步
