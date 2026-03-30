@@ -57,6 +57,9 @@ const toArrayBuffer = (data) => {
   return null;
 };
 
+const resolveImageBuffer = (targetImage) =>
+  toArrayBuffer(targetImage?.data) || toArrayBuffer(targetImage?.sourceData);
+
 const cloneAnnotations = (items) => {
   if (!Array.isArray(items)) return [];
   try {
@@ -852,8 +855,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     targetImage,
     { includeMask = true, generation = 0 } = {},
   ) => {
-    if (!targetImage?.data) return false;
-    const imageBuffer = toArrayBuffer(targetImage.data);
+    const imageBuffer = resolveImageBuffer(targetImage);
     if (!imageBuffer) return false;
     await loadVolumeTemplate({
       cacheKey: getImageTemplateCacheKey(targetImage),
@@ -2035,8 +2037,8 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       const needsReloadBaseVolume =
         !renderNv.volumes?.length ||
         String(renderPaneImageKeyRef.current || "") !== targetRenderImageKey;
-      if (targetImage?.data && needsReloadBaseVolume) {
-        const imageBuffer = toArrayBuffer(targetImage.data);
+      if (needsReloadBaseVolume) {
+        const imageBuffer = resolveImageBuffer(targetImage);
         if (imageBuffer) {
           const baseTemplate = await loadVolumeTemplate({
             cacheKey: getImageTemplateCacheKey(targetImage),
@@ -3031,7 +3033,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     const baseTemplateCacheKey = getImageTemplateCacheKey(targetImage);
     loadPerf.cache.baseTemplateHit =
       volumeTemplateCacheRef.current.has(baseTemplateCacheKey);
-    const imageBuffer = toArrayBuffer(targetImage?.data);
+    const imageBuffer = resolveImageBuffer(targetImage);
     if (!imageBuffer) {
       logImageLoadPerf(loadPerf, "aborted-no-image-buffer");
       return;
@@ -3354,7 +3356,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
 
   useImperativeHandle(ref, () => ({
     prewarmImage: async (targetImage, { includeMask = true } = {}) => {
-      if (!targetImage?.data) return false;
+      if (!resolveImageBuffer(targetImage)) return false;
       const generation = Number(imageLoadGenerationRef.current || 0);
       try {
         return await prewarmImageTemplates(targetImage, {
@@ -3707,7 +3709,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   }, [renderMaskOnly3D]);
 
   useEffect(() => {
-    if (!panesReady || !image?.id || !image?.data) return;
+    if (!panesReady || !image?.id || !resolveImageBuffer(image)) return;
     let cancelled = false;
     const nextImageKey = String(image.id);
     setThreeDUpdatePending(false);

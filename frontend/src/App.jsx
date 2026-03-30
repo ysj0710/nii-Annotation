@@ -872,7 +872,7 @@ const groupDicomInputsBySeries = (items) => {
 const arrayBufferFrom = (data) => {
   if (!data) return null;
   if (data instanceof ArrayBuffer) return data;
-  if (data instanceof Uint8Array) {
+  if (ArrayBuffer.isView(data)) {
     return data.buffer.slice(
       data.byteOffset,
       data.byteOffset + data.byteLength,
@@ -880,6 +880,12 @@ const arrayBufferFrom = (data) => {
   }
   return null;
 };
+
+const hasRenderableImageBuffer = (record) =>
+  !!(
+    arrayBufferFrom(record?.data) ||
+    arrayBufferFrom(record?.sourceData)
+  );
 
 const hashBuffer = async (buffer) => {
   const subtle = globalThis?.crypto?.subtle;
@@ -2395,11 +2401,15 @@ export default function App() {
   };
 
   const prewarmViewerImageRecord = (record) => {
-    if (!record?.data) return;
+    const baseBuffer = arrayBufferFrom(record?.data) || arrayBufferFrom(record?.sourceData);
+    if (!baseBuffer) return;
     const prewarm = viewerRef.current?.prewarmImage;
     if (typeof prewarm !== "function") return;
     // 切图关键路径优先预热原图模板，mask 仍按需异步加载，避免后台预热占满主线程。
-    void prewarm(record, { includeMask: false }).catch(() => {});
+    void prewarm(
+      record?.data ? record : { ...record, data: baseBuffer },
+      { includeMask: false },
+    ).catch(() => {});
   };
 
   const prefetchImageRecord = (id) => {
@@ -2716,7 +2726,12 @@ export default function App() {
   const findLocalByRemoteImageId = async (remoteImageId) => {
     if (!remoteImageId) return null;
     const records = await getImagesByRemoteImageId(String(remoteImageId));
-    const candidates = records.filter((record) => record && !record.isMaskOnly);
+    const candidates = records.filter(
+      (record) =>
+        record &&
+        !record.isMaskOnly &&
+        hasRenderableImageBuffer(record),
+    );
     if (!candidates.length) return null;
     candidates.sort((a, b) => {
       const aUpdated = Number(a?.updatedAt || 0);
@@ -2847,7 +2862,10 @@ export default function App() {
         };
         const pickNewestNonMask = (records = []) => {
           const candidates = (Array.isArray(records) ? records : []).filter(
-            (record) => record && !record.isMaskOnly,
+            (record) =>
+              record &&
+              !record.isMaskOnly &&
+              hasRenderableImageBuffer(record),
           );
           if (!candidates.length) return null;
           candidates.sort((a, b) => {
@@ -2863,6 +2881,7 @@ export default function App() {
 
         const mapRecordToRemote = async (candidate) => {
           if (!candidate || candidate.isMaskOnly) return null;
+          if (!hasRenderableImageBuffer(candidate)) return null;
           if (!imageId) return candidate;
           if (
             candidate.remoteImageId &&
@@ -4123,13 +4142,16 @@ export default function App() {
       }
       return;
     }
-    cacheImageRecord(record);
-    activeImageIdRef.current = String(record.id);
+    const normalizedRecord = !record?.data && arrayBufferFrom(record?.sourceData)
+      ? { ...record, data: arrayBufferFrom(record.sourceData) }
+      : record;
+    cacheImageRecord(normalizedRecord);
+    activeImageIdRef.current = String(normalizedRecord.id);
     setActiveImage({
-      ...record,
-      maskVersion: resolveMaskVersion(record),
+      ...normalizedRecord,
+      maskVersion: resolveMaskVersion(normalizedRecord),
     });
-    trace.activeImageId = String(record.id);
+    trace.activeImageId = String(normalizedRecord.id);
     trace.activatedAt = getNowMs();
     trace.loadLogged = false;
     logSwitchPerf("active-image-set", {

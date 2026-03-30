@@ -6,6 +6,8 @@ let META_BACKEND_ORIGIN = ''
 let META_BACKEND_TOKEN = ''
 let META_SYNC_QUEUE = Promise.resolve()
 const META_SYNC_TIMEOUT_MS = 4500
+const BLOB_SYNC_TIMEOUT_MS = 120000
+const BLOB_SYNC_BATCH_SIZE = 1
 
 const BLOB_KEYS = ['data', 'sourceData', 'mask', 'sourceMask']
 
@@ -44,6 +46,9 @@ const arrayBufferFrom = (value) => {
 
 const hasAnyBlobField = (record) =>
   BLOB_KEYS.some((key) => !!arrayBufferFrom(record?.[key]))
+
+const hasRenderableImageData = (record) =>
+  !!(arrayBufferFrom(record?.data) || arrayBufferFrom(record?.sourceData))
 
 const encodeArrayBufferToBase64 = (buffer) => {
   const source = arrayBufferFrom(buffer)
@@ -190,10 +195,13 @@ const applyBlobPayloadToRecord = (record, blobPayload = null) => {
   const sourceDataBuffer = decodeBase64ToArrayBuffer(blobPayload.sourceDataB64)
   const maskBuffer = decodeBase64ToArrayBuffer(blobPayload.maskB64)
   const sourceMaskBuffer = decodeBase64ToArrayBuffer(blobPayload.sourceMaskB64)
+  const fallbackData = dataBuffer || sourceDataBuffer || record.data || record.sourceData || null
+  const fallbackSourceData =
+    sourceDataBuffer || dataBuffer || record.sourceData || record.data || null
   return {
     ...record,
-    data: dataBuffer || record.data || null,
-    sourceData: sourceDataBuffer || record.sourceData || null,
+    data: fallbackData,
+    sourceData: fallbackSourceData,
     mask: maskBuffer || record.mask || null,
     sourceMask: sourceMaskBuffer || record.sourceMask || null
   }
@@ -228,7 +236,10 @@ const enqueueMetaSync = (task) => {
   return META_SYNC_QUEUE
 }
 
-const callMetaApi = async (path, { method = 'GET', body = null, params = {} } = {}) => {
+const callMetaApi = async (
+  path,
+  { method = 'GET', body = null, params = {}, timeoutMs = META_SYNC_TIMEOUT_MS } = {}
+) => {
   if (!metaSyncEnabled()) return null
   const query = new URLSearchParams()
   for (const [key, value] of Object.entries(params || {})) {
@@ -237,7 +248,10 @@ const callMetaApi = async (path, { method = 'GET', body = null, params = {} } = 
   }
   const url = `${META_BACKEND_ORIGIN}${path}${query.toString() ? `?${query.toString()}` : ''}`
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), META_SYNC_TIMEOUT_MS)
+  const timer = setTimeout(
+    () => controller.abort(),
+    Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0 ? Number(timeoutMs) : META_SYNC_TIMEOUT_MS
+  )
   try {
     const response = await fetch(url, {
       method,
@@ -275,13 +289,21 @@ const syncMetaUpsertBatch = async (images) => {
 const syncBlobUpsertBatch = async (images) => {
   const items = (Array.isArray(images) ? images : []).map(toBlobPayload).filter(Boolean)
   if (!items.length) return
-  await callMetaApi('/meta/images/blob-upsert-batch', {
-    method: 'POST',
-    body: {
-      namespace: DB_NAMESPACE,
-      items
+  const chunkSize = Math.max(1, Number(BLOB_SYNC_BATCH_SIZE || 1))
+  for (let i = 0; i < items.length; i += chunkSize) {
+    const chunk = items.slice(i, i + chunkSize)
+    const payload = await callMetaApi('/meta/images/blob-upsert-batch', {
+      method: 'POST',
+      timeoutMs: BLOB_SYNC_TIMEOUT_MS,
+      body: {
+        namespace: DB_NAMESPACE,
+        items: chunk
+      }
+    })
+    if (!payload) {
+      throw new Error(`[imageStore] blob upsert failed for namespace=${DB_NAMESPACE}`)
     }
-  })
+  }
 }
 
 const syncMetaPatch = async (id, patch, currentRecord = null) => {
@@ -548,6 +570,16 @@ const getRemoteRecordById = async (id) => {
   const local = await getImageByIdLocal(id)
   const blob = await fetchRemoteBlobById(id).catch(() => null)
   const hydrated = applyBlobPayloadToRecord({ ...local, ...meta }, blob)
+  if (!hydrated?.isMaskOnly && !hasRenderableImageData(hydrated)) {
+    if (local && hasRenderableImageData(local)) {
+      void enqueueMetaSync(async () => {
+        await syncMetaUpsertBatch([local])
+        await syncBlobUpsertBatch([local])
+      })
+      return local
+    }
+    return null
+  }
   await putImagesLocal([hydrated])
   return hydrated
 }

@@ -10,14 +10,42 @@ from .object_store import ensure_bucket
 from .services.exporter import ExportValidationError, build_export_zip
 
 app = FastAPI(title="Nii Annotation Backend", version="0.1.0")
-cors_origins_env = os.getenv(
-    "ANNOTATION_CORS_ORIGINS",
-    "http://127.0.0.1:5173,http://localhost:5173,http://192.168.110.88:5173",
-)
-allow_origins = [item.strip() for item in cors_origins_env.split(",") if item.strip()]
+
+
+def _normalize_origin(raw: str) -> str:
+    value = str(raw or "").strip().strip("'\"").rstrip("/")
+    return value
+
+
+def _resolve_cors_origins() -> list[str]:
+    cors_origins_env = os.getenv(
+        "ANNOTATION_CORS_ORIGINS",
+        "http://127.0.0.1:5173,http://localhost:5173,http://192.168.110.88:5173",
+    )
+    items = []
+    for origin in str(cors_origins_env or "").split(","):
+        normalized = _normalize_origin(origin)
+        if normalized:
+            items.append(normalized)
+    if items:
+        return items
+    return [
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        "http://192.168.110.88:5173",
+    ]
+
+
+allow_origins = _resolve_cors_origins()
+allow_origin_regex = _normalize_origin(os.getenv("ANNOTATION_CORS_ORIGIN_REGEX", ""))
+if not allow_origin_regex:
+    allow_origin_regex = (
+        r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$"
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allow_origins,
+    allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
