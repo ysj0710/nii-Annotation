@@ -1639,15 +1639,19 @@ const isLesionCheckboxField = (field) => {
 const createEmptyWorkflowSchema = () => ({
   mainCategoryOptions: [],
   mainCategoryTitle: "主分类项",
-  steps: [
-    {
-      id: "lesion",
-      title: "病灶标注项",
-      scope: "lesion",
-      fields: [],
-    },
-  ],
+  steps: [],
 });
+
+const hasWorkflowSchemaContent = (schema) => {
+  const steps = Array.isArray(schema?.steps) ? schema.steps : [];
+  const hasFields = steps.some(
+    (step) => Array.isArray(step?.fields) && step.fields.length > 0,
+  );
+  const hasMainCategoryOptions =
+    Array.isArray(schema?.mainCategoryOptions) &&
+    schema.mainCategoryOptions.length > 0;
+  return hasFields || hasMainCategoryOptions;
+};
 
 const parseCustomWorkflowSchema = (raw) => {
   const parsed = parseJsonSafe(raw, raw);
@@ -2218,7 +2222,7 @@ export default function App() {
 
   useEffect(() => {
     const localSchema = parseCustomWorkflowSchema(externalCtx.customSchema);
-    if ((localSchema?.steps || []).length > 0) {
+    if (hasWorkflowSchemaContent(localSchema)) {
       setWorkflowSchema(localSchema);
       return;
     }
@@ -2241,7 +2245,7 @@ export default function App() {
         const json = await resp.json().catch(() => null);
         const remoteSchema = parseCustomWorkflowSchema(json);
         if (!cancelled) {
-          if ((remoteSchema?.steps || []).length > 0) {
+          if (hasWorkflowSchemaContent(remoteSchema)) {
             setWorkflowSchema(remoteSchema);
           } else {
             setWorkflowSchema(createEmptyWorkflowSchema());
@@ -3957,8 +3961,8 @@ export default function App() {
         batchId: String(externalCtx.batchId),
         topicId: externalCtx.topicId ? String(externalCtx.topicId) : null,
         clientEnv: clientEnvReport,
-        labelCsv: labelCsv || "",
-        labelXlsxBase64: labelXlsxBase64 || "",
+        ...(labelCsv ? { labelCsv } : {}),
+        ...(labelXlsxBase64 ? { labelXlsxBase64 } : {}),
         items,
       }),
     });
@@ -4028,9 +4032,11 @@ export default function App() {
     let saveLabelCsv = "";
     let saveLabelXlsxBuffer = null;
     let saveLabelXlsxBase64 = "";
+    const shouldGenerateLabelSheet = hasWorkflowSchemaContent(workflowSchema);
     let saveDirHandle = exportDirHandle;
     try {
       if (
+        shouldGenerateLabelSheet &&
         !saveDirHandle &&
         typeof window !== "undefined" &&
         typeof window.showDirectoryPicker === "function"
@@ -4045,26 +4051,28 @@ export default function App() {
         : allRecords.filter(
             (record) => String(record?.id || "") === String(activeImage?.id || ""),
           );
-      saveLabelCsv = buildLabelCsv(saveTableRecords);
-      saveLabelXlsxBuffer = await buildLabelXlsxBuffer(saveTableRecords);
-      saveLabelXlsxBase64 = saveLabelXlsxBuffer
-        ? bufferToBase64(saveLabelXlsxBuffer)
-        : "";
-      if (saveDirHandle && saveLabelCsv) {
-        const labelHandle = await saveDirHandle.getFileHandle("labels.csv", {
-          create: true,
-        });
-        const labelWritable = await labelHandle.createWritable();
-        await labelWritable.write(toExcelFriendlyCsv(saveLabelCsv));
-        await labelWritable.close();
-      }
-      if (saveDirHandle && saveLabelXlsxBuffer) {
-        const xlsxHandle = await saveDirHandle.getFileHandle("labels.xlsx", {
-          create: true,
-        });
-        const xlsxWritable = await xlsxHandle.createWritable();
-        await xlsxWritable.write(saveLabelXlsxBuffer);
-        await xlsxWritable.close();
+      if (shouldGenerateLabelSheet) {
+        saveLabelCsv = buildLabelCsv(saveTableRecords);
+        saveLabelXlsxBuffer = await buildLabelXlsxBuffer(saveTableRecords);
+        saveLabelXlsxBase64 = saveLabelXlsxBuffer
+          ? bufferToBase64(saveLabelXlsxBuffer)
+          : "";
+        if (saveDirHandle && saveLabelCsv) {
+          const labelHandle = await saveDirHandle.getFileHandle("labels.csv", {
+            create: true,
+          });
+          const labelWritable = await labelHandle.createWritable();
+          await labelWritable.write(toExcelFriendlyCsv(saveLabelCsv));
+          await labelWritable.close();
+        }
+        if (saveDirHandle && saveLabelXlsxBuffer) {
+          const xlsxHandle = await saveDirHandle.getFileHandle("labels.xlsx", {
+            create: true,
+          });
+          const xlsxWritable = await xlsxHandle.createWritable();
+          await xlsxWritable.write(saveLabelXlsxBuffer);
+          await xlsxWritable.close();
+        }
       }
     } catch (error) {
       console.warn("保存时写入 labels.csv/xlsx 失败", error);
