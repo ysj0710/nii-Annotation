@@ -2912,6 +2912,42 @@ export default function App() {
     return patched || { ...direct, remoteImageId: remoteKey };
   };
 
+  const pickBestBatchSyncRecord = (
+    records = [],
+    remoteImageId,
+    { preferredLocalId = "" } = {},
+  ) => {
+    const remoteKey = String(remoteImageId || "").trim();
+    if (!remoteKey) return null;
+    const preferredId = String(preferredLocalId || "").trim();
+    const stableId = buildRemoteRecordId(remoteKey);
+    const candidates = (Array.isArray(records) ? records : []).filter(
+      (record) =>
+        record &&
+        !record.isMaskOnly &&
+        String(record.remoteImageId || "").trim() === remoteKey,
+    );
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => {
+      const aPreferred = preferredId && String(a?.id || "") === preferredId ? 1 : 0;
+      const bPreferred = preferredId && String(b?.id || "") === preferredId ? 1 : 0;
+      if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+
+      const aStable = stableId && String(a?.id || "") === stableId ? 1 : 0;
+      const bStable = stableId && String(b?.id || "") === stableId ? 1 : 0;
+      if (aStable !== bStable) return bStable - aStable;
+
+      const aUpdated = Number(a?.updatedAt || 0);
+      const bUpdated = Number(b?.updatedAt || 0);
+      if (aUpdated !== bUpdated) return bUpdated - aUpdated;
+
+      const aCreated = Number(a?.createdAt || 0);
+      const bCreated = Number(b?.createdAt || 0);
+      return bCreated - aCreated;
+    });
+    return candidates[0] || null;
+  };
+
   const fetchAndImportByImageId = async ({
     imageId = externalCtx.imageId,
     imageUrl = externalCtx.imageUrl,
@@ -3886,6 +3922,7 @@ export default function App() {
 
   const syncBatchAnnotationsToPlatform = async ({
     activeImageId = "",
+    activeRemoteImageId = "",
     activeWorkflowSnapshot = null,
     labelCsv = "",
     labelXlsxBase64 = "",
@@ -3910,10 +3947,12 @@ export default function App() {
       const remoteImageId = String(item?.imageId || "");
       if (!remoteImageId) continue;
       const record =
-        records.find(
-          (r) =>
-            String(r.remoteImageId || "") === remoteImageId && !r.isMaskOnly,
-        ) || null;
+        pickBestBatchSyncRecord(records, remoteImageId, {
+          preferredLocalId:
+            String(activeRemoteImageId || "") === remoteImageId
+              ? String(activeImageId || "")
+              : "",
+        }) || null;
       const maskBuffer = record?.mask || record?.sourceMask;
       if (!maskBuffer) continue;
       const sourceName = String(
@@ -3924,9 +3963,11 @@ export default function App() {
       );
       const sourceNameStem =
         fileStem(sourceName) || sourceName || `image-${remoteImageId}`;
+      const isActiveRecord =
+        String(record?.id || "") === String(activeImageId || "") ||
+        String(activeRemoteImageId || "") === remoteImageId;
       const customFields =
-        activeWorkflowSnapshot &&
-        String(record?.id || "") === String(activeImageId || "")
+        activeWorkflowSnapshot && isActiveRecord
           ? getEffectiveCustomFieldValues(record, activeWorkflowSnapshot)
           : getEffectiveCustomFieldValues(record);
       items.push({
@@ -4082,6 +4123,7 @@ export default function App() {
       const synced = externalCtx.batchId
         ? await syncBatchAnnotationsToPlatform({
             activeImageId: String(activeImage?.id || ""),
+            activeRemoteImageId: String(activeImage?.remoteImageId || ""),
             activeWorkflowSnapshot: workflowSnapshot,
             labelCsv: saveLabelCsv,
             labelXlsxBase64: saveLabelXlsxBase64,
