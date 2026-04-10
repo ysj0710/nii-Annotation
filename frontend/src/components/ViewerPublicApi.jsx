@@ -531,6 +531,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const [canFocusPlanes, setCanFocusPlanes] = useState(false);
   const [visiblePaneKeys, setVisiblePaneKeys] = useState([...PANE_ORDER]);
   const [threeDUpdatePending, setThreeDUpdatePending] = useState(false);
+  const [freehandAcceptState, setFreehandAcceptState] = useState({
+    paneKey: null,
+    canAccept: false,
+  });
 
   imageKeyRef.current = image?.id ? String(image.id) : "";
 
@@ -2930,6 +2934,100 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
     curvePaneKeyRef.current = null;
     curveSliceIndexRef.current = null;
     freehandDrawingRef.current = false;
+    setFreehandAcceptState((prev) =>
+      prev.paneKey === null && prev.canAccept === false
+        ? prev
+        : { paneKey: null, canAccept: false },
+    );
+  };
+
+  const syncFreehandAcceptState = () => {
+    const nextPaneKey = String(curvePaneKeyRef.current || "").trim().toUpperCase();
+    const nextState = {
+      paneKey: nextPaneKey || null,
+      canAccept:
+        toolRef.current === "freehand" &&
+        annotationStepsRef.current.length > 2 &&
+        !!nextPaneKey,
+    };
+    setFreehandAcceptState((prev) =>
+      prev.paneKey === nextState.paneKey &&
+      prev.canAccept === nextState.canAccept
+        ? prev
+        : nextState,
+    );
+    return nextState;
+  };
+
+  const acceptFreehandDraft = () => {
+    if (
+      toolRef.current !== "freehand" ||
+      annotationStepsRef.current.length <= 2
+    ) {
+      syncFreehandAcceptState();
+      return false;
+    }
+    const paneKey = curvePaneKeyRef.current;
+    const markerCanvas = paneKey ? getPaneMarkerCanvas(paneKey) : null;
+    if (!paneKey || !markerCanvas) {
+      syncFreehandAcceptState();
+      return false;
+    }
+    if (isDisplayedAsSinglePane(paneKey)) {
+      syncPaneLayoutNow(paneKey);
+    }
+    const rawPoints = [...annotationStepsRef.current];
+    const first = rawPoints[0];
+    const last = rawPoints[rawPoints.length - 1];
+    const isNearClosed =
+      pointDistancePx(first, last, markerCanvas, paneKey) <= FREEHAND_CLOSE_PX;
+    const closedPoints = [...rawPoints];
+    if (
+      !isNearClosed ||
+      pointDistancePx(first, last, markerCanvas, paneKey) > 1e-3
+    ) {
+      closedPoints.push(first);
+    } else {
+      closedPoints[closedPoints.length - 1] = first;
+    }
+    const maskChanged = rasterizeClosedAnnotationToMask(closedPoints, {
+      recordHistory: false,
+      emitChange: false,
+      axCorSag: curvePlaneRef.current,
+      sliceIndex: curveSliceIndexRef.current,
+      sourcePaneKey: paneKey,
+    });
+    if (!maskChanged) {
+      drawStrokeMarkers(true);
+      syncFreehandAcceptState();
+      return false;
+    }
+    addAnnotation(
+      {
+        type: "freehand",
+        points: closedPoints,
+        label: "",
+        color: getCurrentAnnotationColor(),
+        closed: true,
+        renderOnMarker: false,
+        axCorSag: curvePlaneRef.current,
+        paneKey,
+        sliceIndex: curveSliceIndexRef.current,
+      },
+      { recordHistory: false, emitChange: false },
+    );
+    const imageKey = getImageKey();
+    if (imageKey) {
+      actionHistoryRef.current.push({
+        type: "freehand-complete",
+        imageKey,
+        hasMask: maskChanged,
+      });
+    }
+    clearFreehandDraft();
+    drawStrokeMarkers(true);
+    emitDrawingChange("curve-complete");
+    return true;
   };
 
   const clearStrokeState = () => {
@@ -3845,6 +3943,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             annotationStepsRef.current,
             { nearClosed },
           );
+          syncFreehandAcceptState();
           const vox = canvasPosToVox(paneKey, pos, markerCanvas);
           if (vox)
             setCrosshairFromVox(vox, {
@@ -3926,6 +4025,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             annotationDraftRef.current = makeFreehandDraft([norm], {
               nearClosed: false,
             });
+            syncFreehandAcceptState();
             drawStrokeMarkers(true);
             return;
           }
@@ -3948,6 +4048,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
             annotationStepsRef.current,
             { nearClosed },
           );
+          syncFreehandAcceptState();
           const vox = canvasPosToVox(paneKey, pos, markerCanvas);
           if (vox)
             setCrosshairFromVox(vox, {
@@ -4030,6 +4131,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
               annotationStepsRef.current,
               { nearClosed },
             );
+            syncFreehandAcceptState();
             drawStrokeMarkers(true);
           }
           return;
@@ -4118,63 +4220,7 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
       )
         return;
       event.preventDefault();
-      const paneKey = curvePaneKeyRef.current;
-      const markerCanvas = paneKey ? getPaneMarkerCanvas(paneKey) : null;
-      if (!paneKey || !markerCanvas) return;
-      if (isDisplayedAsSinglePane(paneKey)) {
-        syncPaneLayoutNow(paneKey);
-      }
-      const rawPoints = [...annotationStepsRef.current];
-      const first = rawPoints[0];
-      const last = rawPoints[rawPoints.length - 1];
-      const isNearClosed =
-        pointDistancePx(first, last, markerCanvas, paneKey) <=
-        FREEHAND_CLOSE_PX;
-      const closedPoints = [...rawPoints];
-      if (
-        !isNearClosed ||
-        pointDistancePx(first, last, markerCanvas, paneKey) > 1e-3
-      ) {
-        closedPoints.push(first);
-      } else {
-        closedPoints[closedPoints.length - 1] = first;
-      }
-      const maskChanged = rasterizeClosedAnnotationToMask(closedPoints, {
-        recordHistory: false,
-        emitChange: false,
-        axCorSag: curvePlaneRef.current,
-        sliceIndex: curveSliceIndexRef.current,
-        sourcePaneKey: paneKey,
-      });
-      if (!maskChanged) {
-        drawStrokeMarkers(true);
-        return;
-      }
-      addAnnotation(
-        {
-          type: "freehand",
-          points: closedPoints,
-          label: "",
-          color: getCurrentAnnotationColor(),
-          closed: true,
-          renderOnMarker: false,
-          axCorSag: curvePlaneRef.current,
-          paneKey,
-          sliceIndex: curveSliceIndexRef.current,
-        },
-        { recordHistory: false, emitChange: false },
-      );
-      const imageKey = getImageKey();
-      if (imageKey) {
-        actionHistoryRef.current.push({
-          type: "freehand-complete",
-          imageKey,
-          hasMask: maskChanged,
-        });
-      }
-      clearFreehandDraft();
-      drawStrokeMarkers(true);
-      emitDrawingChange("curve-complete");
+      acceptFreehandDraft();
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -4196,6 +4242,10 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
   const canShowPlaneSwitch = !!image && canFocusPlanes;
   const showPlaneButtonsByPane = canShowPlaneSwitch && !focusedPlane;
   const showPlaneButtonsStack = canShowPlaneSwitch && !!focusedPlane;
+  const showAcceptButtons = tool === "freehand";
+  const acceptButtonTitle = freehandAcceptState.canAccept
+    ? "闭合当前勾画，也可以按 Enter 快捷键闭合"
+    : "至少勾画 3 个点后可闭合，也可以按 Enter 快捷键闭合";
   const planeButtonStyles = {
     S: {
       left: "calc(100% - 18px)",
@@ -4229,32 +4279,53 @@ const ViewerPublicApi = forwardRef(function ViewerPublicApi(
           ]
             .filter(Boolean)
             .join(" ");
+          const canAcceptHere =
+            freehandAcceptState.canAccept &&
+            visible &&
+            freehandAcceptState.paneKey === paneKey;
           return (
             <div key={paneKey} className={className} data-pane={paneKey}>
-              <div className="viewer-pane-inner">
-                <canvas
-                  ref={setPaneCanvasRef(paneKey)}
-                  className="viewer-pane-canvas"
-                />
-                {PANE_CONFIGS[paneKey].is2D && (
+              <div className="viewer-pane-surface">
+                <div className="viewer-pane-inner">
                   <canvas
-                    ref={setPaneMarkerCanvasRef(paneKey)}
-                    className="viewer-marker-canvas"
+                    ref={setPaneCanvasRef(paneKey)}
+                    className="viewer-pane-canvas"
                   />
-                )}
-                {paneKey === "R" && (
-                  <div className="viewer-3d-update-wrap">
+                  {PANE_CONFIGS[paneKey].is2D && (
+                    <canvas
+                      ref={setPaneMarkerCanvasRef(paneKey)}
+                      className="viewer-marker-canvas"
+                    />
+                  )}
+                  {paneKey === "R" && (
+                    <div className="viewer-3d-update-wrap">
+                      <button
+                        type="button"
+                        className="viewer-3d-update-btn"
+                        onClick={applyManual3DUpdate}
+                        disabled={!threeDUpdatePending}
+                      >
+                        Update
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {showAcceptButtons && (
+                <div className="viewer-pane-footer">
+                  <span className="viewer-accept-wrap" title={acceptButtonTitle}>
                     <button
                       type="button"
-                      className="viewer-3d-update-btn"
-                      onClick={applyManual3DUpdate}
-                      disabled={!threeDUpdatePending}
+                      className={`viewer-accept-btn${canAcceptHere ? " active" : ""}`}
+                      onClick={acceptFreehandDraft}
+                      disabled={!canAcceptHere}
+                      aria-label="闭合当前勾画"
                     >
-                      Update
+                      Accept
                     </button>
-                  </div>
-                )}
-              </div>
+                  </span>
+                </div>
+              )}
             </div>
           );
         })}

@@ -449,17 +449,24 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   grid-row: 1 / -1;
 }
 
-.viewer-container.mode-2d .viewer-pane {
-  border-radius: 14px;
-}
-
-.viewer-container.mode-2d .viewer-pane-inner {
-  background: #0b0f16;
-}
-
 .viewer-pane {
   position: relative;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.viewer-pane.hidden,
+.viewer-pane.focus-hidden {
+  display: none;
+}
+
+.viewer-pane-surface {
+  position: relative;
+  flex: 1;
   min-height: 0;
   overflow: hidden;
   border-radius: 12px;
@@ -468,9 +475,9 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
   box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.35);
 }
 
-.viewer-pane.hidden,
-.viewer-pane.focus-hidden {
-  display: none;
+.viewer-container.mode-2d .viewer-pane-surface {
+  border-radius: 14px;
+  background: #0b0f16;
 }
 
 .viewer-pane-inner {
@@ -541,6 +548,49 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ro
 
 .viewer-3d-update-btn:disabled {
   opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.viewer-pane-footer {
+  display: flex;
+  justify-content: center;
+  min-height: 32px;
+}
+
+.viewer-accept-wrap {
+  display: inline-flex;
+}
+
+.viewer-accept-btn {
+  min-width: 88px;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid rgba(148, 163, 184, 0.38);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease, color 0.16s ease, transform 0.16s ease;
+}
+
+.viewer-accept-btn:hover:not(:disabled) {
+  border-color: rgba(125, 211, 252, 0.95);
+  background: rgba(30, 41, 59, 0.96);
+  color: #eff6ff;
+  transform: translateY(-1px);
+}
+
+.viewer-accept-btn.active {
+  border-color: rgba(96, 165, 250, 0.96);
+  background: rgba(30, 64, 175, 0.82);
+  color: #eff6ff;
+}
+
+.viewer-accept-btn:disabled {
+  opacity: 0.48;
   cursor: not-allowed;
 }
 
